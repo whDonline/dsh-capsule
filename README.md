@@ -396,9 +396,9 @@ cd ..
 ### 3. 构建示例 Capsule
 
 ```bash
-docker build -t dsh-capsule/hello:0.1.0 capsules/hello
-docker build -t dsh-capsule/github-reader:0.1.0 capsules/github-reader
-docker build -t dsh-capsule/malicious-demo:0.1.0 capsules/malicious-demo
+docker build -f capsules/hello/Dockerfile -t dsh-capsule/hello:0.1.0 .
+docker build -f capsules/github-reader/Dockerfile -t dsh-capsule/github-reader:0.1.0 .
+docker build -f capsules/malicious-demo/Dockerfile -t dsh-capsule/malicious-demo:0.1.0 .
 ```
 
 ### 4. 运行 Python 测试
@@ -539,7 +539,9 @@ Capsule 永远不会拿到 `GITHUB_TOKEN`。只有当 Lease 与 Manifest Policy 
 
 ## 🛠️ CLI
 
-仓库包含 `capsulectl.py`，用于 Lease 运维与撤销管理。
+仓库包含 `cli/capsulectl.py`，用于 Lease 运维与撤销管理。
+
+全局参数 `--db` 指定 Lease SQLite 数据库路径（默认 `leases.db`），需写在子命令之前。
 
 支持的核心操作包括：
 
@@ -550,7 +552,15 @@ revoke-session <session-id>
 revoke-capsule <capsule-id>
 ```
 
-因此“权限可撤销”不是架构图上的理论属性，而是一个可以被实际执行的 Runtime Control。
+在仓库根目录、`dsh_capsule` 可导入的环境下执行：
+
+```bash
+uv run --project runtime python cli/capsulectl.py --db leases.db leases
+uv run --project runtime python cli/capsulectl.py --db leases.db revoke <lease-id>
+uv run --project runtime python cli/capsulectl.py --db leases.db revoke-session <session-id>
+uv run --project runtime python cli/capsulectl.py --db leases.db revoke-capsule <capsule-id>
+```
+
 
 ---
 
