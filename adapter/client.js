@@ -48,10 +48,36 @@ window.__ModuleLoader__.load({
       return null;
     }
 
-    /** 作用：挂载治理面板——把共享的 Console UI 渲染进本组件自己的 DOM 节点。 */
+    /** 作用：把一个"零尺寸/未渲染"的容器兜底成可见内容。
+     * 为什么需要它：面板由宿主 slot 渲染，宿主容器的尺寸/裁剪策略不受本插件控制；一旦
+     * height:100% 解析不出高度、或注入式渲染出了任何意外，用户看到的就是**一片空白**
+     * （实测发生过）。这里做了两层保护：显式最小高度 + 渲染后自检，自检不通过就走 iframe 兜底，
+     * 保证"点开面板一定能看到治理台"。 */
+    const PANEL_MIN_HEIGHT = 420;
+
+    /** 作用：iframe 兜底——直接内嵌治理台独立页面（同源/跨源都可以）。
+     * 代价：iframe 文档拿不到宿主主题令牌与主题切换（宿主文档里也建议避免 iframe），
+     * 因此它只在注入式渲染失败时使用；治理台自身的样式都带兜底色，脱离主题也能读。 */
+    function ConsoleFrame(props) {
+      return h('iframe', {
+        title: 'Capability Guard 治理台',
+        src: props.src,
+        style: {
+          width: '100%',
+          height: '100%',
+          minHeight: PANEL_MIN_HEIGHT + 'px',
+          border: '0',
+          display: 'block',
+          background: 'var(--dsw-alias-bg-base, #f6f7f9)',
+        },
+      });
+    }
+
+    /** 作用：挂载治理面板——优先把共享的 Console UI 注入到本组件自己的 DOM 节点；
+     * 注入式渲染失败（或渲染后容器仍是空的）时退回 iframe，绝不给用户一片空白。 */
     function GuardPanel() {
       const containerRef = React.useRef(null);
-      const [status, setStatus] = React.useState({ state: 'connecting', detail: '' });
+      const [status, setStatus] = React.useState({ state: 'connecting', detail: '', fallbackUrl: '' });
       const [attempt, setAttempt] = React.useState(0);
       React.useEffect(() => {
         // 低频重探：宿主半边可能晚于面板就绪（或临时不可用），每隔一段时间清掉探测缓存后重试一次
@@ -64,8 +90,13 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         let disposed = false;
         let handle = null;
+        let contentTimer = null;
         const container = containerRef.current;
         if (!container) return undefined;
+        const useFrame = (host, why) => {
+          if (disposed) return;
+          setStatus({ state: 'fallback', detail: why, fallbackUrl: host + '/' });
+        };
         const boot = async () => {
           let host = null;
           // 首次挂载时宿主半边可能还没就绪（例如面板先于 Guard 行激活），因此做几次短重试；
@@ -77,7 +108,7 @@ window.__ModuleLoader__.load({
           }
           if (disposed) return;
           if (!host) {
-            setStatus({ state: 'unreachable', detail: '未发现治理接口（同源 ' + SAME_ORIGIN_BASE + '/ 与 127.0.0.1:' + DEFAULT_CONSOLE_PORT + ' 起均未响应）' });
+            setStatus({ state: 'unreachable', detail: '未发现治理接口（同源 ' + SAME_ORIGIN_BASE + '/ 与 127.0.0.1:' + DEFAULT_CONSOLE_PORT + ' 起均未响应）', fallbackUrl: '' });
             return;
           }
           try {
@@ -94,26 +125,50 @@ window.__ModuleLoader__.load({
               document.head.appendChild(script);
             });
             if (disposed) return;
-            handle = window.DshGuardConsole.mount({ host: host, container: container, pollMs: 2000 });
-            setStatus({ state: 'ready', detail: host });
+            const mounted = window.DshGuardConsole.mount({ host: host, container: container, pollMs: 2000 });
+            if (!mounted || typeof mounted !== 'object') {
+              // 共享脚本存在但没返回句柄：视为注入式渲染不可用，直接走内嵌兜底
+              useFrame(host, '共享脚本未返回挂载句柄，已切换为内嵌页面');
+              return;
+            }
+            handle = mounted;
+            // 渲染自检：注入式渲染若没有真的产出节点（宿主样式/时序/脚本异常都可能造成），
+            // 立刻换 iframe 兜底，而不是把空白界面留给用户。
+            contentTimer = setTimeout(() => {
+              if (disposed) return;
+              const rendered = container.childElementCount > 0;
+              if (!rendered) useFrame(host, '注入式渲染未产出内容，已切换为内嵌页面');
+              else setStatus({ state: 'ready', detail: host, fallbackUrl: '' });
+            }, 1200);
           } catch (err) {
-            if (!disposed) setStatus({ state: 'error', detail: String((err && err.message) || err) });
+            useFrame(host, '共享脚本挂载失败：' + String((err && err.message) || err));
           }
         };
         void boot();
         return () => {
           disposed = true;
+          if (contentTimer) clearTimeout(contentTimer);
           if (handle && typeof handle.dispose === 'function') handle.dispose();
           handle = null;
         };
       }, [attempt]);
+      const showBanner = status.state === 'unreachable' || status.state === 'error';
       return h(
         'div',
-        { style: { height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column' } },
-        h('div', { ref: containerRef, style: { flex: '1 1 auto', minHeight: 0, overflow: 'auto' } }),
-        status.state === 'connecting' || status.state === 'ready'
-          ? null
-          : h(
+        {
+          style: {
+            height: '100%',
+            minHeight: PANEL_MIN_HEIGHT + 'px',
+            display: 'flex',
+            flexDirection: 'column',
+            background: 'var(--dsw-alias-bg-base, transparent)',
+          },
+        },
+        status.state === 'fallback'
+          ? h(ConsoleFrame, { src: status.fallbackUrl })
+          : h('div', { ref: containerRef, style: { flex: '1 1 auto', minHeight: 0, overflow: 'auto' } }),
+        showBanner
+          ? h(
               'div',
               {
                 style: {
@@ -130,7 +185,8 @@ window.__ModuleLoader__.load({
                 { style: { marginTop: '10px' } },
                 '排障：确认 @dsh-capsule/adapter 已启用，或直接在浏览器打开治理接口端口查看独立页面（默认 8787）。',
               ),
-            ),
+            )
+          : null,
       );
     }
 
