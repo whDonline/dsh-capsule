@@ -49,3 +49,6 @@ docker-compose.override.yml
 # 日志
 *.log
 logs/
+
+# 临时提交信息文件（禁止入库）
+.git-commit-msg.txt
