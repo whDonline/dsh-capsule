@@ -15,7 +15,7 @@ import { DEFAULTABLE_SCOPE_MODES, SCOPE_MODES, isScopeMode, type ScopeMode } fro
 import { UniversalGate } from "./capability/universal-gate.js";
 import { GovernanceConsole } from "./console/console-service.js";
 import { GovernancePolicy } from "./console/policy.js";
-import { registerGuardWebRoutes, startConsoleServer, DEFAULT_CONSOLE_HOST, DEFAULT_CONSOLE_PORT, GUARD_WEB_PREFIX, type ConsoleHttpHandle } from "./console/http-server.js";
+import { registerGuardWebRoutes, startConsoleServer, DEFAULT_CONSOLE_HOST, DEFAULT_CONSOLE_PORT, GUARD_WEB_PREFIX, guardRouteStatus, type ConsoleHttpHandle } from "./console/http-server.js";
 import type { ConsoleHttpConfig } from "./console/types.js";
 import { CapabilityService } from "./service/capability-service.js";
 function createDetachedContext(): Context {
@@ -157,12 +157,13 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
   const dispose = gate.install(ctx as unknown as Parameters<UniversalGate["install"]>[0]);
   // 同源治理路由（优先）：挂到 DSH Web 服务器的 /guard/…，Web GUI 面板因此与页面同源，
   // 不需要跨源请求、也不依赖额外端口。宿主没有 webServer（headless 等组合）时自动跳过。
+  // 注册结果记录在 guardRouteStatus 里（GET /api/config 的 routes 字段），失败可自证原因。
   const disposeRoutes = registerGuardWebRoutes(ctx as { get?(name: string): unknown }, govConsole, governance) ?? (() => undefined);
   let consoleHandle: ConsoleHttpHandle | undefined;
   const consoleConfig = resolveConsoleConfig(config);
   if (consoleConfig.enabled) {
     consoleHandle = await startConsoleServer({ console: govConsole, policy: governance, host: consoleConfig.host, port: consoleConfig.port, fallbackPort: consoleConfig.fallbackPort });
-    process.stderr.write(`[dsh-guard] governance console: ${consoleHandle.url} (同源入口 ${GUARD_WEB_PREFIX}/)\n`);
+    process.stderr.write(`[dsh-guard] governance console: ${consoleHandle.url} (同源入口 ${GUARD_WEB_PREFIX}/, routes=${JSON.stringify(guardRouteStatus)})\n`);
   }
   return async () => {
     if (consoleHandle) {

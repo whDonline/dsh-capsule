@@ -166,46 +166,137 @@ function normalizePath(pathname: string, prefix: string): string | undefined {
   const rest = pathname.slice(prefix.length) || "/";
   return ROUTES.includes(rest) ? rest : undefined;
 }
+/** 同源路由注册的诊断状态（只含状态与错误文本，不含任何 Secret）。
+ * 为什么要有它：这条链路只在"bundle 行激活顺序 vs webServer 就绪顺序"不对时才失败，
+ * 而这种失败在插件外部完全不可见（浏览器只看到 404），也无法从 stderr 取回（Desktop 进程的
+ * stderr 不落盘）。把状态写进 /api/config 后，任何一次失败都能自证原因。 */
+export interface GuardRouteStatus {
+  /** apply() 是否调用过注册入口 */
+  attempted: boolean;
+  /** 宿主 ctx 是否提供 inject（cordis Context 才有） */
+  hasInject: boolean;
+  /** ctx.inject 是否成功登记回调 */
+  injectRegistered: boolean;
+  /** 回调是否被触发（= webServer 服务曾进入 active） */
+  callbackFired: boolean;
+  /** 回调时能否解析到 webServer 服务 */
+  serviceSeen: boolean;
+  /** 六个路由是否全部注册成功 */
+  registered: boolean;
+  /** 注册重试次数（apply 之后 webServer 才就绪时靠它补上） */
+  retries: number;
+  /** 失败原因（注册冲突 / inject 抛错等），成功时为 undefined */
+  error?: string;
+}
+export const guardRouteStatus: GuardRouteStatus = {
+  attempted: false,
+  hasInject: false,
+  injectRegistered: false,
+  callbackFired: false,
+  serviceSeen: false,
+  registered: false,
+  retries: 0,
+};
+/** 注册重试节奏（毫秒）——累计约 3.5 分钟，覆盖 bundle 行先于 Web 服务器就绪的启动窗口。
+ * 为什么必须有重试（2026-10-15 实测）：真实启动中 webServer 既不在此插件 apply() 时可见，
+ * ctx.inject 的回调在服务就绪后也没有补上（Desktop 组合下），结果 /guard 静默 404——
+ * 而插件其余部分完全正常，外部只看得到 404。重试是唯一不依赖宿主内部顺序的兜底。 */
+export const ROUTE_RETRY_DELAYS_MS: readonly number[] = [1_000, 3_000, 10_000, 30_000, 60_000, 120_000];
+function recordRouteError(err: unknown): void {
+  // 作用：记录首个失败原因（保留第一次，后续重复失败不覆盖，便于定位根因）
+  guardRouteStatus.error ??= String(err);
+  process.stderr.write(`[dsh-guard] same-origin guard routes unavailable: ${String(err)}\n`);
+}
 /**
  * 作用：把治理接口挂到 DSH Web 服务器上（同源 /guard/…）——面板因此与页面同源，
  * 不需要跨源请求、也不依赖额外端口。
  *
- * 【为什么用 ctx.inject 而不是直接 ctx.get】bundle 行的激活顺序不保证 webServer 已经就绪，
- * 直接解析可能拿到 undefined（此时若只回落独立端口，同源入口就会静默缺失）。ctx.inject 会在
- * 服务真正可用（或重新可用）时回调，因此路由注册与服务生命周期对齐，并在服务消失时自动撤销。
- * 宿主没有 webServer（headless 等组合）时回调永不触发，等于零副作用。
+ * 【注册策略：立即 + 等待，两条路都试】bundle 行的激活顺序不保证 webServer 已经就绪：
+ *   ① 立即尝试一次 —— webServer 已就绪时最省事，也覆盖"宿主没有 inject"的退化情形；
+ *   ② 同时用 ctx.inject(['webServer'], cb) 登记一次 —— 服务在 apply() 之后才 active 时补上。
+ * 两条路都通过 guardRouteStatus / /api/config 自证，因此失败不再静默。
  */
 export function registerGuardWebRoutes(hostCtx: CapsuleHostContextLike, govConsole: GovernanceConsole, policy?: GovernancePolicy): (() => void) | undefined {
+  guardRouteStatus.attempted = true;
   const inject = (hostCtx as { inject?: unknown })?.inject;
   const get = (hostCtx as { get?: unknown })?.get;
+  guardRouteStatus.hasInject = typeof inject === "function";
   // 宿主既没有 get 也没有 inject：不是 cordis Context，直接放弃（调用方回落独立 Console 端口）
   if (typeof inject !== "function" && typeof get !== "function") return undefined;
-  if (typeof inject !== "function") return registerGuardWebRoutesNow(hostCtx, govConsole, policy) ?? (() => undefined);
-  let activeDispose: (() => void) | undefined;
+  const disposers: (() => void)[] = [];
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  // ① 立即注册（多数情况下 webServer 已经就绪；也对没有 inject 的宿主生效）
+  const immediate = registerGuardWebRoutesNow(hostCtx, govConsole, policy);
+  if (immediate) disposers.push(immediate);
+  // ② 延迟重试（最多 ROUTE_RETRY_DELAYS_MS 次）：apply() 早于 Web 服务器就绪时的兜底
+  const scheduleRetry = (index: number): void => {
+    if (guardRouteStatus.registered || index >= ROUTE_RETRY_DELAYS_MS.length) return;
+    retryTimer = setTimeout(() => {
+      retryTimer = undefined;
+      if (guardRouteStatus.registered) return;
+      guardRouteStatus.retries += 1;
+      const dispose = registerGuardWebRoutesNow(hostCtx, govConsole, policy);
+      if (dispose) disposers.push(dispose);
+      scheduleRetry(index + 1);
+    }, ROUTE_RETRY_DELAYS_MS[index]);
+    // 定时器不应阻止进程退出（Guard 卸载时会清理）
+    (retryTimer as { unref?: () => void }).unref?.();
+  };
+  if (!guardRouteStatus.registered) scheduleRetry(0);
+  if (typeof inject !== "function") {
+    return () => {
+      if (retryTimer) clearTimeout(retryTimer);
+      for (const dispose of disposers) {
+        try {
+          dispose();
+        } catch {
+          // 撤销失败不影响插件卸载
+        }
+      }
+      disposers.length = 0;
+      guardRouteStatus.registered = false;
+    };
+  }
+  // ③ 服务就绪回调（服务在 apply() 之后 active 时最及时）
   let cancelled = false;
   let injectEffect: unknown;
   try {
     injectEffect = (inject as (names: string[], callback: (serviceCtx: CapsuleHostContextLike) => void) => unknown).call(hostCtx, ["webServer"], (serviceCtx: CapsuleHostContextLike) => {
+      guardRouteStatus.callbackFired = true;
       if (cancelled) return;
-      activeDispose = registerGuardWebRoutesNow(serviceCtx, govConsole, policy);
+      if (guardRouteStatus.registered) return;
+      guardRouteStatus.serviceSeen = typeof (serviceCtx as { get?: unknown })?.get === "function";
+      const dispose = registerGuardWebRoutesNow(serviceCtx, govConsole, policy);
+      if (dispose) disposers.push(dispose);
     });
+    guardRouteStatus.injectRegistered = true;
   } catch (err) {
-    // inject 不可用（宿主形状不同）：退回立即注册一次，仍失败就完全跳过（不影响独立 Console 端口）
-    process.stderr.write(`[dsh-guard] ctx.inject unavailable for webServer: ${String(err)}\n`);
-    return registerGuardWebRoutesNow(hostCtx, govConsole, policy) ?? (() => undefined);
+    // inject 不可用（宿主形状不同）：只保留立即注册 + 重试两条路
+    recordRouteError(err);
   }
   return () => {
     cancelled = true;
-    if (activeDispose) {
-      activeDispose();
-      activeDispose = undefined;
+    if (retryTimer) clearTimeout(retryTimer);
+    for (const dispose of disposers) {
+      try {
+        dispose();
+      } catch {
+        // 撤销失败不影响插件卸载
+      }
     }
+    disposers.length = 0;
+    guardRouteStatus.registered = false;
     if (typeof injectEffect === "function") (injectEffect as () => void)();
   };
 }
 function registerGuardWebRoutesNow(hostCtx: CapsuleHostContextLike, govConsole: GovernanceConsole, policy?: GovernancePolicy): (() => void) | undefined {
+  // 作用：真正调用 webServer.register 注册六个路径；任何一步失败都回滚已注册的部分并记录原因
   const server = getHostService(hostCtx, "webServer") as { register?: unknown } | undefined;
-  if (!server || typeof server.register !== "function") return undefined;
+  if (!server || typeof server.register !== "function") {
+    guardRouteStatus.serviceSeen = false;
+    return undefined;
+  }
+  guardRouteStatus.serviceSeen = true;
   const register = server.register as (route: { kind: string; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }) => unknown;
   const allowedHosts = new Set<string>([...LOOPBACK_HOSTNAMES]);
   const disposers: unknown[] = [];
@@ -224,9 +315,11 @@ function registerGuardWebRoutesNow(hostCtx: CapsuleHostContextLike, govConsole: 
     for (const disposer of disposers) {
       if (typeof disposer === "function") (disposer as () => void)();
     }
-    process.stderr.write(`[dsh-guard] same-origin guard routes unavailable: ${String(err)}\n`);
+    recordRouteError(err);
     return undefined;
   }
+  guardRouteStatus.registered = true;
+  delete guardRouteStatus.error;
   process.stderr.write(`[dsh-guard] same-origin guard routes ready at ${GUARD_WEB_PREFIX}/\n`);
   return () => {
     for (const disposer of disposers) {
@@ -313,11 +406,12 @@ async function handleConfigPatch(req: IncomingMessage, res: ServerResponse, poli
 }
 function policyDocument(policy: GovernancePolicy | undefined): unknown {
   // 作用：GET /api/config 的响应——运行期策略（可写）+ 挡位目录（前后端同一事实来源）+
-  // 说明「哪些项属于部署配置、只能改 profile patch」，避免用户在页面上找不到开关
+  // 说明「哪些项属于部署配置、只能改 profile patch」+ 同源路由注册状态（链路自证）
+  const routes = { ...guardRouteStatus };
   if (!policy) {
-    return { policy: undefined, modes: modeCatalog(), writable: [], immutable: ["enabled", "rules"] };
+    return { policy: undefined, modes: modeCatalog(), writable: [], immutable: ["enabled", "rules"], routes };
   }
-  return { policy: policy.snapshot(), modes: modeCatalog(), writable: ["defaultScope", "defaultTtlSeconds", "maxTtlSeconds"], immutable: ["enabled", "rules"] };
+  return { policy: policy.snapshot(), modes: modeCatalog(), writable: ["defaultScope", "defaultTtlSeconds", "maxTtlSeconds"], immutable: ["enabled", "rules"], routes };
 }
 function modeCatalog(): unknown {
   // 作用：挡位目录投影——供前端渲染下拉框；defaultable 标记哪些挡位允许作为默认值（tool 不允许）

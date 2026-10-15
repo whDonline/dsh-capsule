@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Context } from "@deepseek-ai/cordis";
 import { AuditService } from "../audit/audit-service.js";
 import type { AuditDecision, ToolAuditEvent } from "../audit/types.js";
@@ -11,7 +11,7 @@ import { CapabilityService } from "../service/capability-service.js";
 import { PolicyResolver } from "../capability/policy.js";
 import { GovernanceConsole } from "./console-service.js";
 import { CONSOLE_CLIENT_JS } from "./console-ui.js";
-import { DEFAULT_CONSOLE_PORT, registerGuardWebRoutes, startConsoleServer, type CapsuleHostContextLike, type ConsoleHttpHandle } from "./http-server.js";
+import { DEFAULT_CONSOLE_PORT, registerGuardWebRoutes, startConsoleServer, guardRouteStatus, ROUTE_RETRY_DELAYS_MS, type CapsuleHostContextLike, type ConsoleHttpHandle } from "./http-server.js";
 import { GovernancePolicy } from "./policy.js";
 import type { ConsoleProviderSource } from "./types.js";
 // 作用：测试用 Provider 白名单投影源——与真实 ProviderRegistry.list() 的投影形状一致，
@@ -442,7 +442,7 @@ describe("同源路由（挂到 DSH Web 服务器的 /guard/…）", () => {
   });
   it("用 ctx.inject 等待 webServer 就绪：服务后到也能注册，撤销后路由消失", async () => {
     // 背景：bundle 行的激活顺序不保证 webServer 已就绪，直接 ctx.get 可能拿到 undefined，
-    // 造成 /guard 同源入口静默缺失（实测现象）。因此注册必须走 ctx.inject，与服务生命周期对齐。
+    // 造成 /guard 同源入口静默缺失（实测现象）。因此注册要同时具备「立即」与「等服务就绪」两条路。
     const routes = new Map<string, (req: IncomingMessage, res: ServerResponse) => void | Promise<void>>();
     let callback: ((ctx: CapsuleHostContextLike) => void) | undefined;
     const later: CapsuleHostContextLike = {
@@ -471,6 +471,64 @@ describe("同源路由（挂到 DSH Web 服务器的 /guard/…）", () => {
     expect((await callRoute(routes, "/guard/api/snapshot")).status).toBe(200);
     dispose?.();
     expect(routes.size).toBe(0);
+  });
+  it("【实测缺陷回归】apply 时看不到 webServer、ctx.inject 回调也不来：靠延迟重试补上注册", async () => {
+    // 真实现象（2026-10-15，Desktop 组合）：webServer 既不在此插件 apply() 时可见，
+    // ctx.inject 的回调在服务就绪后也没补上 → /guard 静默 404，而插件其余部分完全正常。
+    // 因此注册必须有第三条路：有界延迟重试。这里用假定时器验证「服务随后就绪 → 重试成功注册」。
+    vi.useFakeTimers();
+    try {
+      const routes = new Map<string, (req: IncomingMessage, res: ServerResponse) => void | Promise<void>>();
+      let serviceReady = false;
+      const host: CapsuleHostContextLike = {
+        get: (name: string) =>
+          name === "webServer" && serviceReady
+            ? {
+                register: (route: { path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }) => {
+                  routes.set(route.path, route.handler);
+                  return () => routes.delete(route.path);
+                },
+              }
+            : undefined,
+        inject: () => () => undefined,
+      } as unknown as CapsuleHostContextLike;
+      const startRetries = guardRouteStatus.retries;
+      const dispose = registerGuardWebRoutes(host, await makeGov(), makePolicyForRoutes());
+      expect(dispose).toBeTypeOf("function");
+      expect(routes.size).toBe(0); // 服务还没到位：立即注册失败
+      // 服务在第一次重试之前就绪 → 重试把它补上（这是启动窗口里的真实时序）
+      serviceReady = true;
+      await vi.advanceTimersByTimeAsync(ROUTE_RETRY_DELAYS_MS[0] + 10);
+      expect(routes.size).toBe(6);
+      expect(guardRouteStatus.registered).toBe(true);
+      expect(guardRouteStatus.retries - startRetries).toBe(1);
+      // 注册成功后仍可正常服务请求；撤销后路由消失
+      expect((await callRoute(routes, "/guard/api/snapshot")).status).toBe(200);
+      dispose?.();
+      expect(routes.size).toBe(0);
+      expect(guardRouteStatus.registered).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("重试到上限后停止：服务始终缺失时不无限轮询、不抛错", async () => {
+    vi.useFakeTimers();
+    try {
+      const host: CapsuleHostContextLike = {
+        get: () => undefined,
+        inject: () => () => undefined,
+      } as unknown as CapsuleHostContextLike;
+      const startRetries = guardRouteStatus.retries;
+      const dispose = registerGuardWebRoutes(host, await makeGov(), makePolicyForRoutes());
+      expect(dispose).toBeTypeOf("function");
+      await vi.advanceTimersByTimeAsync(ROUTE_RETRY_DELAYS_MS.reduce((sum, ms) => sum + ms, 0) + 1_000);
+      // 全部重试跑完后不抛错、不越界，且不会把状态标成已注册
+      expect(guardRouteStatus.retries - startRetries).toBeLessThanOrEqual(ROUTE_RETRY_DELAYS_MS.length);
+      expect(guardRouteStatus.registered).toBe(false);
+      expect(() => dispose?.()).not.toThrow();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 describe("插件装配（index.ts apply + console 配置）", () => {
