@@ -28,7 +28,7 @@
 > **项目定位已经变化。** 当前仓库是纯 TypeScript 的 Capability Guard，不再包含旧版 Python / Docker / Unix Domain Socket 隔离 Runtime。本文只描述当前代码真实存在的能力。
 
 > [!WARNING]
-> **Developer Preview。** 核心链路（Lease、沙箱升级有界授权、Managed Capability、Broker、Audit、Console）已在仓库实现，并有**真 cordis 集成测试**守护 hook 接线；但尚未在真实 profile 中作为插件端到端实跑，也还没有可直接安装的发行包（缺 `dsh.bundle.patch`）。
+> **Developer Preview。** 核心链路（Lease、沙箱升级有界授权、Managed Capability、Broker、Audit、Console）已在仓库实现，有**真 cordis 集成测试**守护 hook 接线与完整权限生命周期，并已在本机 desktop profile 中实跑。
 >
 > DSH 本身仍在快速迭代：本仓库与本机安装版源码的核对结论记录在 `docs/集成基线-真实DSH行为.md`，**升级 DSH 后请重跑该文档第 10 节的检查清单**。
 
@@ -290,7 +290,20 @@ issues.create
   <img src="assets/governance-console-cn.svg" alt="Governance Console Preview" width="100%" />
 </p>
 
-Console 默认关闭。开启后启动一个**只读**本地 HTTP 查看器：
+治理台有两个入口，共用**同一份**前端代码与同一套 HTTP API（`adapter/src/console/console-ui.ts`），因此不会出现两套视图漂移：
+
+1. **DSH Web GUI 面板**：左侧栏「能力授权」入口（`adapter/client.js` 注册 `main` 面板 + `sidebar.panellist` 图标）；
+2. **独立只读页面**：`http://127.0.0.1:8787/`，浏览器可直接打开，不依赖 DSH 页面。
+
+三个视图：
+
+```text
+授权与剩余时间   每条 Lease 的 Session / Tool / Scope / 状态 / 实时倒计时（相对 TTL 的进度条）
+审计             按 sessionId / toolName / decision 过滤的治理事件流，含沙箱档位提升与回滚
+范围挡位与 TTL   默认范围挡位的可视化切换（只列出允许作为默认值的挡位）、TTL 上下限、只读部署规则
+```
+
+配置（默认**已开启**；端口被占用时自动回退到系统分配的随机端口，实际地址写在 stderr 里）：
 
 ```ts
 {
@@ -305,19 +318,45 @@ Console 默认关闭。开启后启动一个**只读**本地 HTTP 查看器：
 只提供：
 
 ```text
-GET /
-GET /api/snapshot
-GET /api/audit
+GET   /                 前端页面（独立入口）
+GET   /console.js       共享前端脚本（面板与独立页面复用）
+GET   /api/snapshot     全量治理快照（含每条授权的剩余毫秒）
+GET   /api/audit        审计过滤查询
+GET   /api/config       运行期策略 + 挡位目录（含哪些挡位允许作为默认值）
+PATCH /api/config       唯一的写接口：defaultScope / defaultTtlSeconds / maxTtlSeconds
 ```
 
-`/api/audit` 支持按 `sessionId`、`toolName`、`decision`、`limit` 过滤。
+此外，插件会尝试把同一组接口挂到 DSH Web 服务器上的**同源**前缀 `/guard/…`（`registerGuardWebRoutes`）。
+同源入口可用时面板优先走它（无跨源请求）；不可用时回落到独立端口（Console 对 loopback 来源开放 CORS）。
+`/guard/` 与独立端口**互为备份**，任一可用治理台就能工作。
+
+### 范围挡位（默认匹配范围）
+
+治理台里可选的挡位，同时也是 `rules[].scope.mode` 的取值：
+
+| 挡位 | 复用范围 | 可否作为默认值 |
+|---|---|---|
+| `exact-arguments` | 工具名 + 参数逐字节一致 | ✅（零配置默认） |
+| `fields` | 只按指定字段取键 | ✅（未配置字段时使用兜底字段集合） |
+| `sandbox-escalation` | 工具名 + 目标沙箱档位 | ✅ |
+| `tool` | 同一 Session 内该工具的全部调用 | ❌ 必须按工具显式配置 |
+
+> `tool` 被刻意排除在默认值之外（规格第 7 条）：默认值决定了「任意一次批准能复用多大范围」，
+> 不允许它悄悄变成整个工具。
+
+### 治理台的写权限边界
+
+- 只能改 `defaultScope` / `defaultTtlSeconds` / `maxTtlSeconds`；
+- `enabled` 与 `rules` **接口层不可写**（返回 400）——页面不能关掉 Guard，也不能凭空新增授权规则；
+- 运行期改动**不落盘**：Guard 不改写 profile 的 `cordis.patch.yml`，重启后回到 profile 配置值；
+- 面板不做任何审批、撤销或签发动作（那些必须走 DSH 原生审批与 API）。
 
 安全属性：
 
-- 默认仅监听 `127.0.0.1`；
-- 无任何写接口；
-- 响应使用 `no-store`、`nosniff` 与 CSP；
-- UI 动态数据通过 `textContent` 渲染；
+- 默认仅监听 `127.0.0.1`；Host 头必须是 loopback（DNS rebinding 防护）；
+- 跨源只回显 loopback 来源，非 loopback 来源直接 403；
+- 写接口要求自定义头（`x-dsh-guard`）＋ `application/json`，靠浏览器预检挡住 CSRF；
+- 响应使用 `no-store`、`nosniff` 与 CSP；前端所有动态数据通过 `textContent` 渲染；
 - 只展示白名单投影，不包含 Credential、Authorization Header 或原始 Tool Arguments。
 
 ---
@@ -350,12 +389,12 @@ Workspace：
 @dsh-capsule/github-demo
 ```
 
-### 接入 DSH profile（Developer Preview）
+### 接入 DSH profile
 
 插件包的 `package.json` 声明了 bundle patch，因此用 DSH 自带的 profile 插件管理命令即可接入：
 
 ```bash
-# 把本仓库的 adapter 作为一个 bundle 装进 web profile
+# 把本仓库的 adapter 作为一个 bundle 装进目标 profile（web / desktop / …）
 dsh plugin --profile web add <本仓库 adapter 目录的绝对路径>
 
 # 装载前先离线检查组合结果（不 boot、不执行任何插件代码）
@@ -365,7 +404,14 @@ dsh --profile web --dump-config
 dsh web
 ```
 
-安装后 Guard 会注册四个观察型 hook。**未配置 `rules` 时它不改变任何 DSH 行为**；要启用沙箱升级复用，在 profile 的 `cordis.patch.yml` 中按 `id` 覆盖该行：
+安装后 Guard 会注册四个观察型 hook，并默认打开治理台。开箱默认行为：
+
+- 默认范围挡位 `exact-arguments`（可在治理台里切换）；
+- 为 `pwsh` / `bash` 打开沙箱升级复用（`sandbox-escalation`，TTL 300s）——
+  **只有**带 `sandbox_permissions` + `justification` 的调用会进入这条链路，其余调用完全不受影响；
+- 治理台监听 `127.0.0.1:8787`。
+
+要按自己的偏好覆盖，在 profile 的 `cordis.patch.yml` 中按 `id` 覆盖该行（patch 会替换整行 config，请重述要保留的字段）：
 
 ```yaml
 - id: capability-guard
@@ -373,13 +419,20 @@ dsh web
   config:
     defaultTtlSeconds: 60
     maxTtlSeconds: 1800
+    defaultScope: exact-arguments
+    console: { enabled: true, host: 127.0.0.1, port: 8787 }
     rules:
       - match: pwsh
         ttlSeconds: 300
         scope: { mode: sandbox-escalation }
+      - match: deploy.preview
+        ttlSeconds: 120
+        scope: { mode: fields, paths: [project, environment] }
 ```
 
 > 本仓库的 `adapter/cordis.patch.yml` 可用 `dsh --profile <name> --dump-config --patch <该文件路径>` 单独验证语法，无需真正安装。
+>
+> 改完插件代码后需要**重启 DSH**：profile 的 HMR 只重组配置，不会重新加载已装载模块的新一代 JavaScript。
 
 ### 默认策略
 
@@ -392,6 +445,9 @@ dsh web
   rules: []
 }
 ```
+
+其中 `defaultScope`（默认范围挡位）与两个 TTL 可以在 DSH Web GUI 的治理台里运行期切换；
+`enabled` 与 `rules` 属于部署配置，只能在 profile patch 里改。
 
 ### Tool 级规则
 
@@ -570,17 +626,18 @@ SANDBOX_MODE_SKIPPED_USER_OVERRIDE   检测到用户已手动改动模式，跳�
 | Session / Scope / TTL / Revoke | ✅ 已实现 |
 | 沙箱升级有界授权（`sandbox-escalation` + 模式提升与回滚） | ✅ 已实现 |
 | 真 cordis 集成测试（真实 `Context` / `waterfall` / `emit`） | ✅ 已实现 |
+| 权限生命周期端到端集成测试（ask→签发→复用→过期/撤销） | ✅ 已实现（`integration/permission-lifecycle.test.ts`） |
 | DSH 行为基线核实（逐行核对已安装版本源码） | ✅ 已完成（`docs/集成基线-真实DSH行为.md`） |
-| Managed Capability Service | ✅ 已实现 |
-| Credential Broker | ✅ 已实现 |
+| 治理台：授权剩余时间 / 审计 / 范围挡位 | ✅ 已实现（Web GUI 面板 + 独立页面 + `/guard/` 同源路由） |
+| Managed Capability Service | ✅ 已实现（权限代理链路按项目决策暂不实跑） |
+| Credential Broker | ✅ 已实现（同上） |
 | GitHub `issues.read` / `issues.create` Provider | ✅ 已实现 |
 | Secret-safe Audit | ✅ 已实现 |
-| Read-only Governance Console | ✅ 已实现 |
 | TypeScript Extension SDK | ✅ 已实现 |
 | GitHub Managed Extension Demo | ✅ 已实现 |
 | Ubuntu / Windows / macOS CI workflow | ✅ 已配置 |
-| 在真实 profile 中做端到端联调（安装为插件并实跑） | 🚧 待完成 |
-| 可直接安装的公开 DSH Release Package（`dsh.bundle.patch`） | 🚧 待完成 |
+| 在真实 profile 中安装并实跑（hook 挂载 + 治理台 + 面板注册） | ✅ 已完成（本机 desktop profile） |
+| 可直接安装的公开 DSH Release Package（`dsh.bundle.patch`） | ✅ 已具备（`dsh.bundle.patch` + `dsh.client`） |
 | Durable Lease Store | 🗺️ Roadmap |
 | 更多 Trusted Providers | 🗺️ Roadmap |
 
@@ -593,19 +650,23 @@ DeepSeek Harness 本身也处于 Developer Preview 并快速迭代，因此正�
 ```text
 .
 ├── adapter/
+│   ├── client.js                    # DSH 客户端半边：治理台面板（main + sidebar.panellist）
+│   ├── cordis.patch.yml             # bundle patch：插入 capability-guard 行（含默认规则）
 │   └── src/
 │       ├── index.ts                 # Guard 插件装配入口 + buildSandboxContext 宿主适配器
 │       ├── capability/
 │       │   ├── universal-gate.ts    # 四个 hook：pre-execute / execute / approval / result
 │       │   ├── escalation.ts        # 沙箱升级的确定性识别与语义 Scope
 │       │   ├── sandbox-grant.ts     # 会话沙箱模式的有界授权（提升 / 回滚 / 冲突检测）
-│       │   ├── policy.ts            # TTL / Scope Policy
+│       │   ├── scope-modes.ts       # 范围挡位的唯一事实来源（枚举 + 文案 + 可默认白名单）
+│       │   ├── policy.ts            # TTL / Scope Policy（支持运行期实时读取配置）
 │       │   ├── scope-resolver.ts    # Universal Scope（含 sandbox-escalation）
 │       │   ├── lease-manager.ts     # Lease 生命周期
 │       │   ├── lease-store.ts       # MemoryLeaseStore
 │       │   └── pending.ts           # callId 并发隔离
 │       ├── integration/
-│       │   └── cordis-pipeline.test.ts  # 真 cordis：hook 接线与瀑布认领语义
+│       │   ├── cordis-pipeline.test.ts        # 真 cordis：hook 接线与瀑布认领语义
+│       │   └── permission-lifecycle.test.ts   # 真 cordis：完整权限生命周期端到端
 │       ├── service/
 │       │   └── capability-service.ts
 │       ├── broker/
@@ -614,6 +675,10 @@ DeepSeek Harness 本身也处于 Developer Preview 并快速迭代，因此正�
 │       │   └── providers/github.ts
 │       ├── audit/
 │       └── console/
+│           ├── console-service.ts   # 治理聚合（Plugins/Tools/Capabilities/Leases/Activity）
+│           ├── policy.ts            # 运行期策略（挡位/TTL）与 Fail Closed 校验
+│           ├── http-server.ts       # 独立端口 + /guard 同源路由 + 写接口安全闸门
+│           └── console-ui.ts        # 共享前端（面板与独立页面同一份）
 ├── sdk/typescript/                  # @dsh-capsule/extension-sdk
 ├── extensions/github-demo/          # Managed Extension 示例
 └── .github/workflows/ci.yml         # 三平台 build + test
@@ -677,13 +742,12 @@ RBAC 更适合回答“这个角色通常拥有什么权限”。Capability Leas
 
 近期优先级：
 
-1. **在真实 profile 中做端到端联调**：把 Guard 打成带 `dsh.bundle.patch` 的插件包装进 profile，实跑一次"沙箱升级 → 批准 → 复用 → 到期回滚"；
-2. 对齐真实 DSH API：`defineTool`（需 `output: { schema, render }`）、`CapabilityService extends Service`；
-3. 将 `MemoryLeaseStore` 抽象落到可选持久化实现，并让 Audit 可导出（合规场景依赖它）；
-4. 增加更多窄 Action Schema 的 Trusted Provider；
-5. 为宽 Scope（`tool`）增加次数配额（`maxUses`），只有 TTL 不够；
-6. 强化 Console 的只读治理与可观测性，但不把它变成权限修改入口；
-7. 发布稳定的 Extension SDK 与最小 Managed Extension 模板。
+1. **Managed Mode / 权限代理端到端**：Broker 与 Provider 已实现，但按项目决策暂不接入实跑；
+2. 将 `MemoryLeaseStore` 抽象落到可选持久化实现，并让 Audit 可导出（合规场景依赖它）；
+3. 增加更多窄 Action Schema 的 Trusted Provider；
+4. 为宽 Scope（`tool`）增加次数配额（`maxUses`），只有 TTL 不够；
+5. 强化 Console 的只读治理与可观测性，但不把它变成权限修改入口；
+6. 发布稳定的 Extension SDK 与最小 Managed Extension 模板。
 
 ---
 

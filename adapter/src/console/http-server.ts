@@ -37,6 +37,11 @@ export const GUARD_WEB_PREFIX = "/guard";
 const ROUTES: readonly string[] = ["/", "/index.html", "/console.js", "/api/snapshot", "/api/audit", "/api/config"];
 const AUDIT_DECISIONS: readonly string[] = ["PASSTHROUGH_ALLOW", "PASSTHROUGH_DENY", "ASK", "LEASE_REUSED", "LEASE_ISSUED", "APPROVAL_REJECTED", "TOOL_SUCCESS", "TOOL_ERROR", "SANDBOX_MODE_RAISED", "SANDBOX_MODE_RESTORED", "SANDBOX_MODE_SKIPPED_USER_OVERRIDE"];
 const LOOPBACK_HOSTNAMES: readonly string[] = ["127.0.0.1", "localhost", "[::1]", "::1"];
+/** 允许被跨源读取的来源——只放行本机页面（http://127.0.0.1:任意端口 / http://localhost:任意端口）。
+ * 为什么需要：DSH Web GUI 运行在 http://127.0.0.1:<DSH 端口>，与独立 Console 端口不同源；
+ * 当同源 /guard 路由不可用时（宿主未提供 webServer 或路由注册失败），面板需要跨源访问治理接口。
+ * 放行范围严格限制在 loopback，且写接口另有自定义头 + JSON content-type 两道闸门（见 handleConfigPatch）。 */
+const LOOPBACK_ORIGIN_PATTERN = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i;
 export async function startConsoleServer(options: ConsoleHttpOptions): Promise<ConsoleHttpHandle> {
   // 作用：启动 Console 服务器——host/port 配置校验（Fail Closed：port 必须为 [1, 65535] 整数
   // 或 0 表示随机端口）；listen 成功才 resolve；端口占用且 fallbackPort 为 true 时改用随机端口重试
@@ -89,6 +94,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, govConso
   // PATCH：/api/config（运行期策略）；其余方法 405、未知路径 404、异常 500（不向客户端泄漏内部细节）。
   // prefix 非空表示本次请求来自 DSH Web 服务器的同源路由（/guard/…），此时 Host 检查交由 DSH 自己负责。
   try {
+    // CORS 只对 loopback 来源放行（同源 /guard 路由不可用时面板需要跨源访问治理接口）；非 loopback 直接 403
+    if (!applyCors(req, res)) {
+      sendJson(res, 403, { error: "ORIGIN_NOT_ALLOWED" });
+      return;
+    }
     if (prefix === "" && !isLoopbackHostHeader(req.headers.host, allowedHosts)) {
       sendJson(res, 403, { error: "HOST_NOT_ALLOWED" });
       return;
@@ -97,6 +107,12 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, govConso
     const pathname = normalizePath(url.pathname, prefix);
     if (pathname === undefined) {
       sendJson(res, 404, { error: "NOT_FOUND" });
+      return;
+    }
+    // 跨源预检（浏览器在带自定义头的写请求前会先发 OPTIONS）：凭证策略由上面的 applyCors 决定
+    if (req.method === "OPTIONS") {
+      res.writeHead(204, { "cache-control": "no-store", "content-length": "0" });
+      res.end();
       return;
     }
     if (req.method === "GET") {
@@ -152,10 +168,42 @@ function normalizePath(pathname: string, prefix: string): string | undefined {
 }
 /**
  * 作用：把治理接口挂到 DSH Web 服务器上（同源 /guard/…）——面板因此与页面同源，
- * 不需要跨源请求、不依赖额外端口；任一依赖缺失或注册失败时返回 undefined（调用方回落独立端口，
- * 治理能力不受影响）。注册的每个路径都挂在传入的宿主 ctx 上，随插件卸载自动移除。
+ * 不需要跨源请求、也不依赖额外端口。
+ *
+ * 【为什么用 ctx.inject 而不是直接 ctx.get】bundle 行的激活顺序不保证 webServer 已经就绪，
+ * 直接解析可能拿到 undefined（此时若只回落独立端口，同源入口就会静默缺失）。ctx.inject 会在
+ * 服务真正可用（或重新可用）时回调，因此路由注册与服务生命周期对齐，并在服务消失时自动撤销。
+ * 宿主没有 webServer（headless 等组合）时回调永不触发，等于零副作用。
  */
 export function registerGuardWebRoutes(hostCtx: CapsuleHostContextLike, govConsole: GovernanceConsole, policy?: GovernancePolicy): (() => void) | undefined {
+  const inject = (hostCtx as { inject?: unknown })?.inject;
+  const get = (hostCtx as { get?: unknown })?.get;
+  // 宿主既没有 get 也没有 inject：不是 cordis Context，直接放弃（调用方回落独立 Console 端口）
+  if (typeof inject !== "function" && typeof get !== "function") return undefined;
+  if (typeof inject !== "function") return registerGuardWebRoutesNow(hostCtx, govConsole, policy) ?? (() => undefined);
+  let activeDispose: (() => void) | undefined;
+  let cancelled = false;
+  let injectEffect: unknown;
+  try {
+    injectEffect = (inject as (names: string[], callback: (serviceCtx: CapsuleHostContextLike) => void) => unknown).call(hostCtx, ["webServer"], (serviceCtx: CapsuleHostContextLike) => {
+      if (cancelled) return;
+      activeDispose = registerGuardWebRoutesNow(serviceCtx, govConsole, policy);
+    });
+  } catch (err) {
+    // inject 不可用（宿主形状不同）：退回立即注册一次，仍失败就完全跳过（不影响独立 Console 端口）
+    process.stderr.write(`[dsh-guard] ctx.inject unavailable for webServer: ${String(err)}\n`);
+    return registerGuardWebRoutesNow(hostCtx, govConsole, policy) ?? (() => undefined);
+  }
+  return () => {
+    cancelled = true;
+    if (activeDispose) {
+      activeDispose();
+      activeDispose = undefined;
+    }
+    if (typeof injectEffect === "function") (injectEffect as () => void)();
+  };
+}
+function registerGuardWebRoutesNow(hostCtx: CapsuleHostContextLike, govConsole: GovernanceConsole, policy?: GovernancePolicy): (() => void) | undefined {
   const server = getHostService(hostCtx, "webServer") as { register?: unknown } | undefined;
   if (!server || typeof server.register !== "function") return undefined;
   const register = server.register as (route: { kind: string; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }) => unknown;
@@ -179,6 +227,7 @@ export function registerGuardWebRoutes(hostCtx: CapsuleHostContextLike, govConso
     process.stderr.write(`[dsh-guard] same-origin guard routes unavailable: ${String(err)}\n`);
     return undefined;
   }
+  process.stderr.write(`[dsh-guard] same-origin guard routes ready at ${GUARD_WEB_PREFIX}/\n`);
   return () => {
     for (const disposer of disposers) {
       if (typeof disposer === "function") (disposer as () => void)();
@@ -187,6 +236,8 @@ export function registerGuardWebRoutes(hostCtx: CapsuleHostContextLike, govConso
 }
 export interface CapsuleHostContextLike {
   get?(name: string): unknown;
+  /** cordis 的依赖注册入口：服务可用（或重新可用）时回调，返回的 effect 随宿主卸载撤销 */
+  inject?(names: string[], callback: (serviceCtx: CapsuleHostContextLike) => void): unknown;
 }
 function getHostService(hostCtx: CapsuleHostContextLike, name: string): unknown {
   // 作用：按 cordis 方式解析宿主服务（只走 ctx.get，缺失返回 undefined，绝不抛错）
@@ -332,6 +383,24 @@ function parseAuditQuery(params: URLSearchParams): ConsoleAuditQuery | undefined
     query.limit = parsed;
   }
   return query;
+}
+function isLoopbackOrigin(origin: unknown): boolean {
+  // 作用：来源白名单判定——只接受本机 http 来源；缺失 Origin（同源请求 / 非浏览器客户端）不视为跨源
+  if (typeof origin !== "string" || origin.length === 0) return false;
+  return LOOPBACK_ORIGIN_PATTERN.test(origin);
+}
+function applyCors(req: IncomingMessage, res: ServerResponse): boolean {
+  // 作用：为 loopback 来源写入 CORS 响应头；返回 false 表示来源不被允许（调用方回 403）。
+  // 不返回通配符 `*`：只回显被验证过的具体来源，避免任何非本机页面读取治理数据。
+  const origin = req.headers.origin;
+  if (typeof origin !== "string" || origin.length === 0) return true;
+  if (!isLoopbackOrigin(origin)) return false;
+  res.setHeader("access-control-allow-origin", origin);
+  res.setHeader("vary", "origin");
+  res.setHeader("access-control-allow-methods", "GET, PATCH, OPTIONS");
+  res.setHeader("access-control-allow-headers", "content-type, x-dsh-guard");
+  res.setHeader("access-control-max-age", "600");
+  return true;
 }
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   // 作用：发送 JSON 响应——统一 no-store + nosniff + 严格 CSP（JSON 端点 default-src 'none'）

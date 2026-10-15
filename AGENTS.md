@@ -86,7 +86,9 @@ DSH Capability Guard（TS 插件，横切）
 5. **Phase 4**：Governance Console / Observability。
 6. ~~**Phase 5**：Optional Isolated Runtime~~（已作废：Legacy Python/Docker 层按项目决策移除，不再实现）。
 
-Phase 0–4 已全部完成；规格后续以"接入真实 DSH/Cordis API 联调基线（第 34 节）+ extensions/github-demo"为下一步。
+Phase 0–4 已全部完成。当前验收基线见第 7.2 节：**通用场景的权限生命周期**（ask → 签发 → 复用 → 过期/撤销，
+含沙箱升级的档位提升与回滚）已端到端跑通并有真 cordis 集成测试守护；**权限代理（Managed Broker 代理链路）**
+按项目决策暂不实跑，其代码保留但不作为验收标准。治理台（授权剩余时间 / 审计 / 范围挡位）已接入 DSH Web GUI。
 
 ## 7. 目录结构（新增模块必须归位）
 
@@ -98,10 +100,39 @@ adapter/src/
 │                            #   / plugin-activation（Context.plugin 装载）/ cordis-get-semantics（ctx.get 降级契约）
 ├── service/                 # capability-service.ts（ctx.capabilities）
 ├── broker/                  # errors / provider / registry / broker / providers/github.ts
-└── audit/                   # types / audit-service
+├── audit/                   # types / audit-service
+└── console/                 # types / policy（运行期挡位与 TTL）/ console-service / http-server / console-ui
+adapter/client.js            # DSH 客户端半边：治理台面板（main + sidebar.panellist 槽位）
 sdk/typescript/              # @dsh-capsule/extension-sdk
 extensions/github-demo/      # Managed Extension 示例
+scripts/smoke-console.mjs    # 本地手工冒烟（示例数据 + 独立治理页面）
 ```
+
+## 7.1 治理台接线事实（2026-10-15 实测，禁止再按旧假设实现）
+
+1. **Console 默认开启**（`console.enabled !== false`）：治理台是「查看授权剩余时间 / 审计 / 切换范围挡位」的
+   唯一可视化入口；端口被占用时回退系统分配的随机端口（不让插件装配失败），实际地址写在 stderr。
+2. **同源路由必须用 `ctx.inject(['webServer'], cb)` 注册**，不能只用 `ctx.get("webServer")`：
+   bundle 行的激活顺序不保证 webServer 已就绪，直接解析可能拿到 undefined，导致 `/guard/…` 静默缺失
+   （实测现象：插件其余部分全部正常，只有同源入口返回 404）。
+3. **跨源访问要走 loopback CORS**：DSH Web GUI 与独立 Console 端口不同源；Console 只对
+   `http://127.0.0.1|localhost|[::1]` 来源回显 CORS 头，其余来源 403；写接口另有自定义头 +
+   JSON content-type 两道闸门（浏览器预检挡住 CSRF）。
+4. **治理台写接口只能改 `defaultScope` / `defaultTtlSeconds` / `maxTtlSeconds`**：
+   `enabled` 与 `rules` 是部署配置，接口层返回 400；`tool` 挡位禁止作为默认值（规格第 7 条）。
+   运行期改动**不落盘**（Guard 不写 profile 的 `cordis.patch.yml`）。
+5. **客户端半边注册槽位**：`ctx.slots.inject('main', …)` 提供面板、`ctx.slots.inject('sidebar.panellist', …)`
+   提供侧栏入口，两者的 `id`/`key` 必须一致（`guard`）才能互相寻址。
+6. **改完插件代码必须重启 DSH**：profile 的 HMR 只重组配置，不会重新加载已装载模块的新一代 JavaScript。
+
+## 7.2 当前验收基线
+
+- **通用权限生命周期已跑通**：`adapter/src/integration/permission-lifecycle.test.ts` 在真 cordis 上覆盖
+  ask → allowed-once → 签发 → 复用 → TTL 过期 / 撤销 → 重新询问，以及沙箱升级的
+  「提升档位 → 复用 → 到期回滚 → 用户手动改动则跳过回滚」。
+- **权限代理（Managed Broker 代理链路）按项目决策暂不实跑**：代码仍在（`broker/`、`service/`），
+  但不作为当前验收标准，也不要为了它改动 Universal 链路。
+- 治理台的两个入口（DSH 面板 / 独立页面）共用 `console/console-ui.ts` 一份前端代码，禁止再造第二套视图。
 
 ## 8. 安全声明边界（README / 注释不得混淆）
 

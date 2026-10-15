@@ -250,6 +250,26 @@ describe("HTTP 只读查看器（规格 Phase 4）", () => {
       await handle.close();
     }
   });
+  it("跨源访问只放行 loopback 来源：GET 回显来源、预检 204、非 loopback 来源 403", async () => {
+    // 背景：DSH Web GUI（http://127.0.0.1:19387）与独立 Console 端口不同源；当同源 /guard 路由
+    // 不可用时，面板必须能跨源读取治理接口——因此对 loopback 来源回显 CORS 头，其余一律拒绝。
+    const handle = await startConsoleServer({ console: await makeGov(), port: 0 });
+    const origin = "http://127.0.0.1:19387";
+    try {
+      const ok = await fetch(`${handle.url}api/snapshot`, { headers: { origin } });
+      expect(ok.status).toBe(200);
+      expect(ok.headers.get("access-control-allow-origin")).toBe(origin);
+      expect(ok.headers.get("vary")).toBe("origin");
+      const preflight = await fetch(`${handle.url}api/config`, { method: "OPTIONS", headers: { origin, "access-control-request-method": "PATCH", "access-control-request-headers": "content-type, x-dsh-guard" } });
+      expect(preflight.status).toBe(204);
+      expect(preflight.headers.get("access-control-allow-methods")).toContain("PATCH");
+      expect(preflight.headers.get("access-control-allow-headers")).toContain("x-dsh-guard");
+      const evil = await fetch(`${handle.url}api/snapshot`, { headers: { origin: "https://evil.example.com" } });
+      expect(evil.status).toBe(403);
+    } finally {
+      await handle.close();
+    }
+  });
 });
 describe("治理策略写接口（默认范围挡位与 TTL）", () => {
   function makePolicy(): GovernancePolicy {
@@ -400,9 +420,57 @@ describe("同源路由（挂到 DSH Web 服务器的 /guard/…）", () => {
     dispose?.();
     expect(routes.size).toBe(0);
   });
-  it("宿主没有 webServer 时返回 undefined（调用方回落独立端口，不抛错）", () => {
-    expect(registerGuardWebRoutes({ get: () => undefined }, {} as unknown as GovernanceConsole)).toBeUndefined();
+  it("宿主没有 webServer 时安全降级（返回可调用的 disposer 或 undefined，绝不抛错）", () => {
+    // 只有 get、没有 inject：走「立即注册一次」的兜底路径；注册不成时返回 no-op disposer（可安全调用）
+    const noInject = registerGuardWebRoutes({ get: () => undefined }, {} as unknown as GovernanceConsole);
+    expect(noInject).toBeTypeOf("function");
+    expect(() => noInject?.()).not.toThrow();
+    // 既没有 get 也没有 inject（完全不同的宿主对象）：返回 undefined，调用方用 ?? 兜底
     expect(registerGuardWebRoutes({}, {} as unknown as GovernanceConsole)).toBeUndefined();
+    // 有 inject 但 webServer 服务始终缺失（非 Web 组合）：回调永不触发，等于零副作用
+    const dispose = registerGuardWebRoutes({ get: () => undefined, inject: () => () => undefined }, {} as unknown as GovernanceConsole);
+    expect(dispose).toBeTypeOf("function");
+    expect(() => dispose?.()).not.toThrow();
+  });
+  it("ctx.inject 抛错时退回立即注册（宿主形状不同也不丢入口）", () => {
+    const { routes, host } = makeFakeWebServer();
+    const throwing = { get: host.get, inject: () => { throw new Error("inject unavailable"); } } as unknown as CapsuleHostContextLike;
+    const dispose = registerGuardWebRoutes(throwing, {} as unknown as GovernanceConsole);
+    expect(routes.size).toBe(6);
+    dispose?.();
+    expect(routes.size).toBe(0);
+  });
+  it("用 ctx.inject 等待 webServer 就绪：服务后到也能注册，撤销后路由消失", async () => {
+    // 背景：bundle 行的激活顺序不保证 webServer 已就绪，直接 ctx.get 可能拿到 undefined，
+    // 造成 /guard 同源入口静默缺失（实测现象）。因此注册必须走 ctx.inject，与服务生命周期对齐。
+    const routes = new Map<string, (req: IncomingMessage, res: ServerResponse) => void | Promise<void>>();
+    let callback: ((ctx: CapsuleHostContextLike) => void) | undefined;
+    const later: CapsuleHostContextLike = {
+      get: (name: string) =>
+        name === "webServer"
+          ? {
+              register: (route: { path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }) => {
+                routes.set(route.path, route.handler);
+                return () => routes.delete(route.path);
+              },
+            }
+          : undefined,
+    };
+    const host: CapsuleHostContextLike = {
+      get: () => undefined,
+      inject: (names: string[], cb: (serviceCtx: CapsuleHostContextLike) => void) => {
+        expect(names).toEqual(["webServer"]);
+        callback = cb;
+      },
+    } as unknown as CapsuleHostContextLike;
+    const dispose = registerGuardWebRoutes(host, await makeGov(), makePolicyForRoutes());
+    expect(dispose).toBeTypeOf("function");
+    expect(routes.size).toBe(0); // 服务还没到位：不注册、不抛错
+    callback?.(later);
+    expect(routes.size).toBe(6); // 服务就绪后才注册
+    expect((await callRoute(routes, "/guard/api/snapshot")).status).toBe(200);
+    dispose?.();
+    expect(routes.size).toBe(0);
   });
 });
 describe("插件装配（index.ts apply + console 配置）", () => {

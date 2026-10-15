@@ -52,16 +52,32 @@ window.__ModuleLoader__.load({
     function GuardPanel() {
       const containerRef = React.useRef(null);
       const [status, setStatus] = React.useState({ state: 'connecting', detail: '' });
+      const [attempt, setAttempt] = React.useState(0);
+      React.useEffect(() => {
+        // 低频重探：宿主半边可能晚于面板就绪（或临时不可用），每隔一段时间清掉探测缓存后重试一次
+        const timer = setInterval(() => {
+          probeCache.host = null;
+          setAttempt((value) => value + 1);
+        }, MONITOR_INTERVAL_MS * 6);
+        return () => clearInterval(timer);
+      }, []);
       React.useEffect(() => {
         let disposed = false;
         let handle = null;
         const container = containerRef.current;
         if (!container) return undefined;
         const boot = async () => {
-          const host = await probeConsoleHost();
+          let host = null;
+          // 首次挂载时宿主半边可能还没就绪（例如面板先于 Guard 行激活），因此做几次短重试；
+          // 全部失败后显示排障提示，并由上面的低频重探再次触发本效果。
+          for (let round = 0; round < 4; round += 1) {
+            host = await probeConsoleHost();
+            if (host || disposed) break;
+            await new Promise((resolve) => setTimeout(resolve, 1500));
+          }
           if (disposed) return;
           if (!host) {
-            setStatus({ state: 'unreachable', detail: '未发现本机治理接口（默认端口 ' + DEFAULT_CONSOLE_PORT + ' 起）' });
+            setStatus({ state: 'unreachable', detail: '未发现治理接口（同源 ' + SAME_ORIGIN_BASE + '/ 与 127.0.0.1:' + DEFAULT_CONSOLE_PORT + ' 起均未响应）' });
             return;
           }
           try {
@@ -90,7 +106,7 @@ window.__ModuleLoader__.load({
           if (handle && typeof handle.dispose === 'function') handle.dispose();
           handle = null;
         };
-      }, []);
+      }, [attempt]);
       return h(
         'div',
         { style: { height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column' } },
@@ -140,21 +156,11 @@ window.__ModuleLoader__.load({
       apply(ctx) {
         // 作用：注册治理面板（主面板 + 侧栏入口）。两处注册都挂在插件 fiber 上，
         // 插件卸载（或 profile patch 关闭该行）时随之移除。
+        // 说明：治理接口的探测与低频重探由 GuardPanel 自己负责（它才知道何时需要重新挂载）。
         ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PANEL_ID }, GuardPanel));
         ctx.slots.inject('sidebar.panellist', () =>
           ctx.slots.register({ name: 'sidebar.panellist', id: PANEL_ID, order: 20, label: PANEL_LABEL }, GuardIcon),
         );
-        // 作用：低频重探治理接口——首次探测失败（例如 DSH 重启顺序导致端口还没起来）时，
-        // 面板不会永久停留在"未连接"状态；探测本身只发 loopback GET，不做任何写操作。
-        if (typeof ctx.effect === 'function') {
-          ctx.effect(() => {
-            const timer = setInterval(() => {
-              probeCache.host = null;
-              void probeConsoleHost();
-            }, MONITOR_INTERVAL_MS * 6);
-            return () => clearInterval(timer);
-          });
-        }
       },
     };
   },
