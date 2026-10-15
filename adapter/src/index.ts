@@ -15,7 +15,7 @@ import { DEFAULTABLE_SCOPE_MODES, SCOPE_MODES, isScopeMode, type ScopeMode } fro
 import { UniversalGate } from "./capability/universal-gate.js";
 import { GovernanceConsole } from "./console/console-service.js";
 import { GovernancePolicy } from "./console/policy.js";
-import { registerGuardWebRoutes, startConsoleServer, DEFAULT_CONSOLE_HOST, DEFAULT_CONSOLE_PORT, GUARD_WEB_PREFIX, guardRouteStatus, type ConsoleHttpHandle } from "./console/http-server.js";
+import { registerGuardWebRoutes, startConsoleServer, DEFAULT_CONSOLE_HOST, DEFAULT_CONSOLE_PORT, GUARD_WEB_PREFIX, ROUTE_RETRY_DELAYS_MS, guardRouteStatus, type GuardRouteStatus, type ConsoleHttpHandle } from "./console/http-server.js";
 import type { ConsoleHttpConfig } from "./console/types.js";
 import { CapabilityService } from "./service/capability-service.js";
 function createDetachedContext(): Context {
@@ -67,8 +67,8 @@ function getService(ctx: CapsuleHostContext, name: string): unknown {
     return undefined;
   }
 }
-export { AuditService, CapabilityService, CredentialBroker, GitHubProvider, GovernanceConsole, GovernancePolicy, LeaseManager, MemoryLeaseStore, PendingRegistry, PolicyResolver, ProviderRegistry, SandboxGrantManager, ScopeResolver, UniversalGate, registerGuardWebRoutes, startConsoleServer, DEFAULT_UNIVERSAL_POLICY, DEFAULT_BROKER_TIMEOUT_MS, DEFAULT_CONSOLE_HOST, DEFAULT_CONSOLE_PORT, DEFAULTABLE_SCOPE_MODES, GUARD_WEB_PREFIX, SCOPE_MODES, findCredentialService, isScopeMode, sha256Scope };
-export type { UniversalPolicyConfig, CredentialServiceLike, BrokerDeps, ConsoleHttpConfig, ScopeMode, ConsoleHttpHandle };
+export { AuditService, CapabilityService, CredentialBroker, GitHubProvider, GovernanceConsole, GovernancePolicy, LeaseManager, MemoryLeaseStore, PendingRegistry, PolicyResolver, ProviderRegistry, SandboxGrantManager, ScopeResolver, UniversalGate, registerGuardWebRoutes, startConsoleServer, DEFAULT_UNIVERSAL_POLICY, DEFAULT_BROKER_TIMEOUT_MS, DEFAULT_CONSOLE_HOST, DEFAULT_CONSOLE_PORT, DEFAULTABLE_SCOPE_MODES, GUARD_WEB_PREFIX, ROUTE_RETRY_DELAYS_MS, SCOPE_MODES, findCredentialService, guardRouteStatus, isScopeMode, sha256Scope };
+export type { UniversalPolicyConfig, CredentialServiceLike, BrokerDeps, ConsoleHttpConfig, ScopeMode, ConsoleHttpHandle, GuardRouteStatus };
 // 作用：Guard 插件完整配置——策略项（Partial<UniversalPolicyConfig>）+ Phase 4 Governance Console
 // 查看器开关（默认开启；治理页面是「授权剩余时间 / 审计 / 范围挡位」的唯一可视化入口）。
 export interface GuardPluginConfig extends Partial<UniversalPolicyConfig> {

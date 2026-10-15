@@ -290,42 +290,42 @@ export function registerGuardWebRoutes(hostCtx: CapsuleHostContextLike, govConso
   };
 }
 function registerGuardWebRoutesNow(hostCtx: CapsuleHostContextLike, govConsole: GovernanceConsole, policy?: GovernancePolicy): (() => void) | undefined {
-  // 作用：真正调用 webServer.register 注册六个路径；任何一步失败都回滚已注册的部分并记录原因
+  // 作用：真正调用 webServer.register 注册同源前缀路由；失败时记录原因并回滚。
+  //
+  // 【必须方法调用而非函数引用（2026-10-15 实测缺陷）】dsh-host-webserver 的 register 是**实例方法**，
+  // 内部用 `this.exact` / `this.prefixes` 两张表：
+  //     register(route) { const table = route.kind === "exact" ? this.exact : this.prefixes; … }
+  // 一旦写成 `const register = server.register; register(...)`，this 丢失 →
+  // 抛 `TypeError: Cannot read properties of undefined (reading 'exact')`，且注册整体失败、
+  // /guard 静默 404（插件其余部分完全正常）。所以这里始终保持 `server.register(...)` 的调用形态。
+  //
+  // 【只注册一条 prefix 路由】服务端 match() 的语义是「exact 先命中，否则在 prefix 表里取最长前缀」，
+  // 且 `pathname === prefix || pathname.startsWith(prefix + "/")` 才算命中。因此一条 `/guard` 前缀
+  // 同时覆盖 `/guard` 与 `/guard/**`，比原来六条 exact 更简单、也不会给同源页面的其他路径兜底
+  // （非 /guard 前缀仍走 DSH 自己的 fallback）。
   const server = getHostService(hostCtx, "webServer") as { register?: unknown } | undefined;
   if (!server || typeof server.register !== "function") {
     guardRouteStatus.serviceSeen = false;
     return undefined;
   }
   guardRouteStatus.serviceSeen = true;
-  const register = server.register as (route: { kind: string; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }) => unknown;
   const allowedHosts = new Set<string>([...LOOPBACK_HOSTNAMES]);
-  const disposers: unknown[] = [];
   try {
-    for (const path of ROUTES) {
-      disposers.push(
-        register({
-          kind: "exact",
-          path: `${GUARD_WEB_PREFIX}${path === "/" ? "" : path}`,
-          handler: (req, res) => handleRequest(req, res, govConsole, policy, allowedHosts, GUARD_WEB_PREFIX),
-        }),
-      );
-    }
+    const dispose = server.register({
+      kind: "prefix",
+      path: GUARD_WEB_PREFIX,
+      handler: (req: IncomingMessage, res: ServerResponse) => handleRequest(req, res, govConsole, policy, allowedHosts, GUARD_WEB_PREFIX),
+    });
+    guardRouteStatus.registered = true;
+    delete guardRouteStatus.error;
+    process.stderr.write(`[dsh-guard] same-origin guard routes ready at ${GUARD_WEB_PREFIX}/\n`);
+    return () => {
+      if (typeof dispose === "function") (dispose as () => void)();
+    };
   } catch (err) {
-    // 注册失败（路径冲突 / 宿主未就绪）：回滚已注册的路由，返回 undefined 由调用方回落独立端口
-    for (const disposer of disposers) {
-      if (typeof disposer === "function") (disposer as () => void)();
-    }
     recordRouteError(err);
     return undefined;
   }
-  guardRouteStatus.registered = true;
-  delete guardRouteStatus.error;
-  process.stderr.write(`[dsh-guard] same-origin guard routes ready at ${GUARD_WEB_PREFIX}/\n`);
-  return () => {
-    for (const disposer of disposers) {
-      if (typeof disposer === "function") (disposer as () => void)();
-    }
-  };
 }
 export interface CapsuleHostContextLike {
   get?(name: string): unknown;

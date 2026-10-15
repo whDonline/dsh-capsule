@@ -45,15 +45,15 @@ function makePolicyForRoutes(): GovernancePolicy {
   return new GovernancePolicy({ initial: { defaultScope: "exact-arguments", defaultTtlSeconds: 60, maxTtlSeconds: 1800 } });
 }
 function callRoute(
-  routes: Map<string, (req: IncomingMessage, res: ServerResponse) => void | Promise<void>>,
+  server: { match(pathname: string): { path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> } | undefined },
   path: string,
 ): Promise<{ status: number; body: string }> {
-  // 作用：直接以最小 req/res 替身调用已注册的同源 handler（不启动真实 HTTP 服务器）
-  // 作用：真实 Web 服务器按最长前缀匹配把 /guard/** 交给已注册的某个 exact 路由；这里用
-  // /guard/api/snapshot 的 handler 代表该前缀下的入口，再由 handler 内部按路径白名单决定 200/404。
+  // 作用：用真实语义的 match 找到路由，再以最小 req/res 替身调用它的 handler（不启动真实 HTTP 服务器）。
+  // 前缀路由拿到的 url 是完整路径，因此这里原样传入——与 dsh-host-webserver 的行为一致。
   const pathname = path.split("?")[0];
-  const handler = routes.get(pathname) ?? routes.get("/guard/api/snapshot");
-  if (!handler) return Promise.resolve({ status: 0, body: "" });
+  const route = server.match(pathname);
+  if (!route) return Promise.resolve({ status: 404, body: "" });
+  const handler = route.handler;
   return new Promise((resolve) => {
     const req = { url: path, method: "GET", headers: { host: "127.0.0.1:19387" } } as unknown as IncomingMessage;
     const res = {
@@ -387,38 +387,68 @@ describe("治理面板前端资源（浏览器可直接打开，也被 DSH 面�
   });
 });
 describe("同源路由（挂到 DSH Web 服务器的 /guard/…）", () => {
-  function makeFakeWebServer(): { routes: Map<string, (req: IncomingMessage, res: ServerResponse) => void | Promise<void>>; host: CapsuleHostContextLike } {
-    // 作用：模拟 DSH 的 ctx.webServer——只保留 register(route)，用一个 Map 记录路径到 handler
-    const routes = new Map<string, (req: IncomingMessage, res: ServerResponse) => void | Promise<void>>();
-    return {
-      routes,
-      host: {
-        get: (name: string) =>
-          name === "webServer"
-            ? {
-                register: (route: { path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }) => {
-                  routes.set(route.path, route.handler);
-                  return () => routes.delete(route.path);
-                },
-              }
-            : undefined,
+  /** 作用：忠实复刻 dsh-host-webserver 的路由表语义——register 是**实例方法**且依赖 this
+   * （`route.kind === "exact" ? this.exact : this.prefixes`），match 先查 exact 再取最长前缀且要求
+   * `pathname === prefix || startsWith(prefix + "/")`。
+   * 【为什么必须这样写】把 register 当普通函数取出来调用会丢 this，真机上表现为
+   * `TypeError: Cannot read properties of undefined (reading 'exact')`，而旧的双替身（不依赖 this）
+   * 会让这个缺陷完全测试不出来——这正是 2026-10-15 实测踩到的坑。 */
+  function makeFakeWebServer() {
+    const exact = new Map<string, { path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }>();
+    const prefixes = new Map<string, { path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }>();
+    const server = {
+      exact,
+      prefixes,
+      register(route: { kind: string; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }) {
+        const table = route.kind === "exact" ? this.exact : this.prefixes;
+        if (table.has(route.path)) throw new Error(`webserver: duplicate ${route.kind} route "${route.path}"`);
+        table.set(route.path, route);
+        return () => {
+          table.delete(route.path);
+        };
+      },
+      match(pathname: string) {
+        const hit = this.exact.get(pathname);
+        if (hit !== undefined) return hit;
+        let best: { path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> } | undefined;
+        for (const [prefix, route] of this.prefixes) {
+          if (pathname !== prefix && !pathname.startsWith(`${prefix}/`)) continue;
+          if (best === undefined || prefix.length > best.path.length) best = route;
+        }
+        return best;
       },
     };
+    const host: CapsuleHostContextLike = { get: (name: string) => (name === "webServer" ? server : undefined) };
+    return { exact, prefixes, server, host };
   }
-  it("注册 /guard/ 下的全部治理路径；前缀外的路径不响应（404，不做兜底）", async () => {
-    const { routes, host } = makeFakeWebServer();
+  it("注册一条 /guard 前缀路由并覆盖其下全部治理路径；前缀外的路径不响应（404，不做兜底）", async () => {
+    const { prefixes, server, host } = makeFakeWebServer();
     const dispose = registerGuardWebRoutes(host, await makeGov(), makePolicyForRoutes());
     expect(dispose).toBeTypeOf("function");
-    expect([...routes.keys()].sort()).toEqual(["/guard", "/guard/api/audit", "/guard/api/config", "/guard/api/snapshot", "/guard/console.js", "/guard/index.html"]);
-    const snapshot = await callRoute(routes, "/guard/api/snapshot");
+    expect([...prefixes.keys()]).toEqual(["/guard"]);
+    expect(server.match("/guard/api/snapshot")).toBeDefined();
+    expect(server.match("/guard")).toBeDefined();
+    expect(server.match("/guard/api/secret")).toBeDefined(); // 前缀命中，由 handler 内部白名单决定 404
+    expect(server.match("/other/api/snapshot")).toBeUndefined();
+    const snapshot = await callRoute(server, "/guard/api/snapshot");
     expect(snapshot.status).toBe(200);
     expect(JSON.parse(snapshot.body)).toHaveProperty("summary");
-    const outside = await callRoute(routes, "/guard/api/secret");
-    expect(outside.status).toBe(404);
-    const unknown = await callRoute(routes, "/other/api/snapshot");
-    expect(unknown.status).toBe(404);
+    expect((await callRoute(server, "/guard/api/secret")).status).toBe(404);
+    expect((await callRoute(server, "/guard/api/config")).status).toBe(200);
+    expect((await callRoute(server, "/guard/console.js")).status).toBe(200);
     dispose?.();
-    expect(routes.size).toBe(0);
+    expect(prefixes.size).toBe(0);
+  });
+  it("【实测缺陷回归】register 必须以方法形态调用（丢 this 会抛 reading 'exact'）", async () => {
+    // 该替身的 register 依赖 this.exact / this.prefixes；一旦实现里写成 `const register = server.register`，
+    // 就会抛 TypeError，本用例会直接失败——以此锁死这个曾经在真机上静默 404 的缺陷。
+    const { prefixes, host } = makeFakeWebServer();
+    const dispose = registerGuardWebRoutes(host, await makeGov(), makePolicyForRoutes());
+    expect(guardRouteStatus.registered).toBe(true);
+    expect(guardRouteStatus.error).toBeUndefined();
+    expect(prefixes.size).toBe(1);
+    dispose?.();
+    expect(guardRouteStatus.registered).toBe(false);
   });
   it("宿主没有 webServer 时安全降级（返回可调用的 disposer 或 undefined，绝不抛错）", () => {
     // 只有 get、没有 inject：走「立即注册一次」的兜底路径；注册不成时返回 no-op disposer（可安全调用）
@@ -433,29 +463,18 @@ describe("同源路由（挂到 DSH Web 服务器的 /guard/…）", () => {
     expect(() => dispose?.()).not.toThrow();
   });
   it("ctx.inject 抛错时退回立即注册（宿主形状不同也不丢入口）", () => {
-    const { routes, host } = makeFakeWebServer();
+    const { exact, prefixes, host } = makeFakeWebServer();
     const throwing = { get: host.get, inject: () => { throw new Error("inject unavailable"); } } as unknown as CapsuleHostContextLike;
     const dispose = registerGuardWebRoutes(throwing, {} as unknown as GovernanceConsole);
-    expect(routes.size).toBe(6);
+    expect(exact.size + prefixes.size).toBe(1);
     dispose?.();
-    expect(routes.size).toBe(0);
+    expect(exact.size + prefixes.size).toBe(0);
   });
   it("用 ctx.inject 等待 webServer 就绪：服务后到也能注册，撤销后路由消失", async () => {
     // 背景：bundle 行的激活顺序不保证 webServer 已就绪，直接 ctx.get 可能拿到 undefined，
     // 造成 /guard 同源入口静默缺失（实测现象）。因此注册要同时具备「立即」与「等服务就绪」两条路。
-    const routes = new Map<string, (req: IncomingMessage, res: ServerResponse) => void | Promise<void>>();
     let callback: ((ctx: CapsuleHostContextLike) => void) | undefined;
-    const later: CapsuleHostContextLike = {
-      get: (name: string) =>
-        name === "webServer"
-          ? {
-              register: (route: { path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }) => {
-                routes.set(route.path, route.handler);
-                return () => routes.delete(route.path);
-              },
-            }
-          : undefined,
-    };
+    let later: CapsuleHostContextLike | undefined;
     const host: CapsuleHostContextLike = {
       get: () => undefined,
       inject: (names: string[], cb: (serviceCtx: CapsuleHostContextLike) => void) => {
@@ -465,47 +484,42 @@ describe("同源路由（挂到 DSH Web 服务器的 /guard/…）", () => {
     } as unknown as CapsuleHostContextLike;
     const dispose = registerGuardWebRoutes(host, await makeGov(), makePolicyForRoutes());
     expect(dispose).toBeTypeOf("function");
-    expect(routes.size).toBe(0); // 服务还没到位：不注册、不抛错
+    expect(guardRouteStatus.registered).toBe(false); // 服务还没到位：不注册、不抛错
+    const fake = makeFakeWebServer();
+    later = fake.host;
     callback?.(later);
-    expect(routes.size).toBe(6); // 服务就绪后才注册
-    expect((await callRoute(routes, "/guard/api/snapshot")).status).toBe(200);
+    expect(fake.prefixes.size).toBe(1); // 服务就绪后才注册
+    expect(guardRouteStatus.registered).toBe(true);
+    expect((await callRoute(fake.server, "/guard/api/snapshot")).status).toBe(200);
     dispose?.();
-    expect(routes.size).toBe(0);
+    expect(fake.prefixes.size).toBe(0);
+    expect(guardRouteStatus.registered).toBe(false);
   });
-  it("【实测缺陷回归】apply 时看不到 webServer、ctx.inject 回调也不来：靠延迟重试补上注册", async () => {
-    // 真实现象（2026-10-15，Desktop 组合）：webServer 既不在此插件 apply() 时可见，
-    // ctx.inject 的回调在服务就绪后也没补上 → /guard 静默 404，而插件其余部分完全正常。
-    // 因此注册必须有第三条路：有界延迟重试。这里用假定时器验证「服务随后就绪 → 重试成功注册」。
+  it("【实测缺陷回归】apply 时看不到 webServer：靠有界延迟重试补上注册", async () => {
+    // 真实现象（2026-10-15，Desktop 组合）：webServer 在 apply() 时不可见 → 立即注册失败。
+    // 服务随后就绪时，延迟重试必须把它补上。
     vi.useFakeTimers();
     try {
-      const routes = new Map<string, (req: IncomingMessage, res: ServerResponse) => void | Promise<void>>();
+      const fake = makeFakeWebServer();
       let serviceReady = false;
       const host: CapsuleHostContextLike = {
-        get: (name: string) =>
-          name === "webServer" && serviceReady
-            ? {
-                register: (route: { path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }) => {
-                  routes.set(route.path, route.handler);
-                  return () => routes.delete(route.path);
-                },
-              }
-            : undefined,
+        get: (name: string) => (name === "webServer" && serviceReady ? fake.server : undefined),
         inject: () => () => undefined,
       } as unknown as CapsuleHostContextLike;
       const startRetries = guardRouteStatus.retries;
       const dispose = registerGuardWebRoutes(host, await makeGov(), makePolicyForRoutes());
       expect(dispose).toBeTypeOf("function");
-      expect(routes.size).toBe(0); // 服务还没到位：立即注册失败
+      expect(fake.prefixes.size).toBe(0); // 服务还没到位：立即注册失败
       // 服务在第一次重试之前就绪 → 重试把它补上（这是启动窗口里的真实时序）
       serviceReady = true;
       await vi.advanceTimersByTimeAsync(ROUTE_RETRY_DELAYS_MS[0] + 10);
-      expect(routes.size).toBe(6);
+      expect(fake.prefixes.size).toBe(1);
       expect(guardRouteStatus.registered).toBe(true);
       expect(guardRouteStatus.retries - startRetries).toBe(1);
       // 注册成功后仍可正常服务请求；撤销后路由消失
-      expect((await callRoute(routes, "/guard/api/snapshot")).status).toBe(200);
+      expect((await callRoute(fake.server, "/guard/api/snapshot")).status).toBe(200);
       dispose?.();
-      expect(routes.size).toBe(0);
+      expect(fake.prefixes.size).toBe(0);
       expect(guardRouteStatus.registered).toBe(false);
     } finally {
       vi.useRealTimers();
