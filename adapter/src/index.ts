@@ -11,9 +11,11 @@ import { DEFAULT_UNIVERSAL_POLICY, PolicyResolver, type UniversalPolicyConfig } 
 import { ScopeResolver } from "./capability/scope-resolver.js";
 import { SandboxGrantManager, type SandboxContext } from "./capability/sandbox-grant.js";
 import type { SandboxMode } from "./capability/escalation.js";
+import { DEFAULTABLE_SCOPE_MODES, SCOPE_MODES, isScopeMode, type ScopeMode } from "./capability/scope-modes.js";
 import { UniversalGate } from "./capability/universal-gate.js";
 import { GovernanceConsole } from "./console/console-service.js";
-import { startConsoleServer, type ConsoleHttpHandle } from "./console/http-server.js";
+import { GovernancePolicy } from "./console/policy.js";
+import { registerGuardWebRoutes, startConsoleServer, DEFAULT_CONSOLE_HOST, DEFAULT_CONSOLE_PORT, GUARD_WEB_PREFIX, type ConsoleHttpHandle } from "./console/http-server.js";
 import type { ConsoleHttpConfig } from "./console/types.js";
 import { CapabilityService } from "./service/capability-service.js";
 function createDetachedContext(): Context {
@@ -65,14 +67,23 @@ function getService(ctx: CapsuleHostContext, name: string): unknown {
     return undefined;
   }
 }
-export { AuditService, CapabilityService, CredentialBroker, GitHubProvider, GovernanceConsole, LeaseManager, MemoryLeaseStore, PendingRegistry, PolicyResolver, ProviderRegistry, SandboxGrantManager, ScopeResolver, UniversalGate, startConsoleServer, DEFAULT_UNIVERSAL_POLICY, DEFAULT_BROKER_TIMEOUT_MS, findCredentialService, sha256Scope };
-export type { UniversalPolicyConfig, CredentialServiceLike, BrokerDeps, ConsoleHttpConfig };
+export { AuditService, CapabilityService, CredentialBroker, GitHubProvider, GovernanceConsole, GovernancePolicy, LeaseManager, MemoryLeaseStore, PendingRegistry, PolicyResolver, ProviderRegistry, SandboxGrantManager, ScopeResolver, UniversalGate, registerGuardWebRoutes, startConsoleServer, DEFAULT_UNIVERSAL_POLICY, DEFAULT_BROKER_TIMEOUT_MS, DEFAULT_CONSOLE_HOST, DEFAULT_CONSOLE_PORT, DEFAULTABLE_SCOPE_MODES, GUARD_WEB_PREFIX, SCOPE_MODES, findCredentialService, isScopeMode, sha256Scope };
+export type { UniversalPolicyConfig, CredentialServiceLike, BrokerDeps, ConsoleHttpConfig, ScopeMode, ConsoleHttpHandle };
 // 作用：Guard 插件完整配置——策略项（Partial<UniversalPolicyConfig>）+ Phase 4 Governance Console
-// 本地只读查看器开关（默认关闭：仅提供编程 API，不监听任何端口）。
+// 查看器开关（默认开启；治理页面是「授权剩余时间 / 审计 / 范围挡位」的唯一可视化入口）。
 export interface GuardPluginConfig extends Partial<UniversalPolicyConfig> {
   console?: ConsoleHttpConfig;
 }
-// 作用：DSH Guard 插件入口（重构规格第 16 节）——纯 TypeScript 挂载 Universal Gate 三个 hook；
+// 作用：Governance Console 默认配置——**默认启动**并绑定 loopback。治理页面是本插件的主要可用性
+// 入口（查看哪些授权还剩多久、审计、切换范围挡位），因此默认开启；端口被占用时回退到随机端口
+// （不会让插件装配失败），端口与访问地址同时写入 stderr 供用户直接打开。
+export function resolveConsoleConfig(config: GuardPluginConfig | undefined): Required<Pick<ConsoleHttpConfig, "enabled" | "host" | "port">> & { fallbackPort: boolean } {
+  const raw = config?.console;
+  const host = raw?.host ?? DEFAULT_CONSOLE_HOST;
+  const port = raw?.port ?? DEFAULT_CONSOLE_PORT;
+  return { enabled: raw?.enabled !== false, host, port, fallbackPort: true };
+}
+// 作用：DSH Guard 插件入口（重构规格第 16 节）——纯 TypeScript 挂载 Universal Gate 四个 hook；
 // 不 spawn Python、不依赖 Docker / Unix Domain Socket（Legacy Isolated Runtime 已按项目决策移除）。
 export const name = "dsh-capability-guard";
 export const inject = ["tools", "approval"];
@@ -83,13 +94,24 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
   // 的语义 Scope 由 Gate 优先采用（规格 10.4）。Phase 3：组装 ProviderRegistry + GitHubProvider +
   // CredentialBroker 注入 executor——Provider 只能由 Guard Core 内置注册（规格 11.2），每个 operation
   // 现场定位 ctx.credentials 并重新 resolve（规格 11.3 禁止跨 operation 缓存 Secret）。
-  // Phase 4：GovernanceConsole 聚合 Audit/Leases/Capabilities/Providers 五维治理视图；配置
-  // console.enabled 时额外启动本地只读 HTTP 查看器（默认 127.0.0.1，启动失败 Fail Closed 抛错）。
-  const policyConfig: UniversalPolicyConfig = {
-    ...DEFAULT_UNIVERSAL_POLICY,
-    ...config,
+  // Phase 4：GovernancePolicy（运行期可切换的默认范围挡位与 TTL）+ GovernanceConsole 聚合
+  // Audit/Leases/Capabilities/Providers 五维治理视图；Console HTTP 查看器默认启动，同时承载
+  // 面板使用的 /api/* 接口与运行期策略写接口（PATCH /api/config）。
+  const deployment = {
+    enabled: config?.enabled ?? DEFAULT_UNIVERSAL_POLICY.enabled,
     rules: config?.rules ?? DEFAULT_UNIVERSAL_POLICY.rules,
+    defaultScopePaths: config?.defaultScopePaths ?? DEFAULT_UNIVERSAL_POLICY.defaultScopePaths,
   };
+  const governance = new GovernancePolicy({
+    initial: {
+      defaultScope: isScopeMode(config?.defaultScope) ? config.defaultScope : DEFAULT_UNIVERSAL_POLICY.defaultScope,
+      defaultTtlSeconds: config?.defaultTtlSeconds ?? DEFAULT_UNIVERSAL_POLICY.defaultTtlSeconds,
+      maxTtlSeconds: config?.maxTtlSeconds ?? DEFAULT_UNIVERSAL_POLICY.maxTtlSeconds,
+    },
+    deployment,
+    source: "plugin-config",
+  });
+  const policyConfig = (): UniversalPolicyConfig => ({ ...governance.config, defaultScopePaths: deployment.defaultScopePaths });
   const leases = new LeaseManager(new MemoryLeaseStore());
   const registry = new ProviderRegistry();
   registry.register(new GitHubProvider());
@@ -98,20 +120,21 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
   // 随 fiber 卸载自动注销（基线修正，取代原先往 ctx 硬挂属性 + 手动 delete 的做法）。
   // 真实 DSH 的 ctx 必然是 cordis Context；仅在非 cordis 宿主（如单元测试的最小 ctx）下退化为
   // 不注册服务，此时 Managed Extension 因 `inject: ["capabilities"]` 不会激活（Fail Closed，不静默降级）。
+  const initialPolicy = policyConfig();
   let capabilities: CapabilityService;
   try {
     capabilities = new CapabilityService(ctx as unknown as Context, {
       leases,
-      defaultTtlSeconds: policyConfig.defaultTtlSeconds,
-      maxTtlSeconds: policyConfig.maxTtlSeconds,
+      defaultTtlSeconds: initialPolicy.defaultTtlSeconds,
+      maxTtlSeconds: initialPolicy.maxTtlSeconds,
       executor: broker,
     });
   } catch (err) {
     process.stderr.write(`[dsh-guard] ctx.capabilities service registration unavailable: ${String(err)}\n`);
     capabilities = new CapabilityService(createDetachedContext(), {
       leases,
-      defaultTtlSeconds: policyConfig.defaultTtlSeconds,
-      maxTtlSeconds: policyConfig.maxTtlSeconds,
+      defaultTtlSeconds: initialPolicy.defaultTtlSeconds,
+      maxTtlSeconds: initialPolicy.maxTtlSeconds,
       executor: broker,
     });
   }
@@ -132,14 +155,20 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
     throw new Error("GUARD_INSTALL_FAILED: ctx.on unavailable");
   }
   const dispose = gate.install(ctx as unknown as Parameters<UniversalGate["install"]>[0]);
+  // 同源治理路由（优先）：挂到 DSH Web 服务器的 /guard/…，Web GUI 面板因此与页面同源，
+  // 不需要跨源请求、也不依赖额外端口。宿主没有 webServer（headless 等组合）时自动跳过。
+  const disposeRoutes = registerGuardWebRoutes(ctx as { get?(name: string): unknown }, govConsole, governance) ?? (() => undefined);
   let consoleHandle: ConsoleHttpHandle | undefined;
-  if (config?.console?.enabled === true) {
-    consoleHandle = await startConsoleServer({ console: govConsole, host: config.console.host, port: config.console.port });
+  const consoleConfig = resolveConsoleConfig(config);
+  if (consoleConfig.enabled) {
+    consoleHandle = await startConsoleServer({ console: govConsole, policy: governance, host: consoleConfig.host, port: consoleConfig.port, fallbackPort: consoleConfig.fallbackPort });
+    process.stderr.write(`[dsh-guard] governance console: ${consoleHandle.url} (同源入口 ${GUARD_WEB_PREFIX}/)\n`);
   }
   return async () => {
     if (consoleHandle) {
       await consoleHandle.close();
     }
+    disposeRoutes();
     dispose();
   };
 }

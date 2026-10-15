@@ -1,20 +1,26 @@
 # DSH Capability Guard bundle patch
 #
 # 本文件由 `@dsh-capsule/adapter` 的 package.json 通过 `dsh.bundle.patch` 声明；
-# 以 `dsh plugin --profile <name> add <此包>` 安装后，该包会作为一层 profile bundle 生效，
-# 本行随之被插入到 profile 组合中（后续 bundle 层与用户自己的 cordis.patch.yml 可按 id 覆盖它）。
+# 以 `dsh plugin --profile <name> add <此包>` 或插件管理器的 install_bundle 安装后，
+# 该包会作为一层 profile bundle 生效，下面的行随之进入 profile 组合
+# （后续 bundle 层与用户自己的 cordis.patch.yml 可按 id 覆盖它）。
 #
-# 行为说明（刻意保守）：
-#   - 未配置任何 rules 时，Guard 只注册四个观察型 hook，**不改变任何 DSH 行为**；
-#   - 只有用户在 profile 的 cordis.patch.yml 中为该行补上 config.rules，才会接管沙箱升级等链路。
+# 默认行为（刻意保守但可用）：
+#   - 注册四个观察型 hook：tools/pre-execute、tools/execute、approval/request、tools/result；
+#     原始 allow / deny 一律透传，只有下游 ask 与沙箱升级才进入 Guard；
+#   - 默认范围挡位 exact-arguments（可在 Web GUI 的「能力授权」面板里切换）；
+#   - 只为 pwsh / bash 打开沙箱升级链路（sandbox-escalation）：批准一次后，本会话内该工具
+#     升级到同一档位不再重复询问，TTL 到期回滚到批准前的档位。
+#     未带 sandbox_permissions + justification 的调用完全不受影响。
 #
-# 按 id 覆盖示例（加到 profile 的 cordis.patch.yml）：
+# 覆盖示例（加到 profile 的 cordis.patch.yml；patch 会替换整行 config，请重述要保留的字段）：
 #
 #   - id: capability-guard
 #     name: '@dsh-capsule/adapter'
 #     config:
 #       defaultTtlSeconds: 60
 #       maxTtlSeconds: 1800
+#       console: { enabled: true, host: 127.0.0.1, port: 8787 }
 #       rules:
 #         - match: pwsh
 #           ttlSeconds: 300
@@ -23,3 +29,20 @@
 - insert:
     - id: capability-guard
       name: '@dsh-capsule/adapter'
+      config:
+        defaultTtlSeconds: 300
+        maxTtlSeconds: 1800
+        defaultScope: exact-arguments
+        console:
+          enabled: true
+          host: 127.0.0.1
+          port: 8787
+        rules:
+          - match: pwsh
+            ttlSeconds: 300
+            scope:
+              mode: sandbox-escalation
+          - match: bash
+            ttlSeconds: 300
+            scope:
+              mode: sandbox-escalation

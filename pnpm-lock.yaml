@@ -29,6 +29,9 @@ importers:
         specifier: workspace:*
         version: link:../../sdk/typescript
     devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: 4.0.2
+        version: 4.0.2
       '@dsh-capsule/adapter':
         specifier: workspace:*
         version: link:../../adapter

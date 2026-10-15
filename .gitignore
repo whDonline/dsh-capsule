@@ -18,6 +18,8 @@ node_modules/
 dist/
 *.tsbuildinfo
 pnpm-debug.log*
+# 本地 pnpm 内容寻址存储（本仓库配置为工作区内 .pnpm-store，禁止入库）
+.pnpm-store/
 
 # 环境变量与密钥（禁止入库）
 .env

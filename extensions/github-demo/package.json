@@ -13,6 +13,7 @@
     "@dsh-capsule/extension-sdk": "workspace:*"
   },
   "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.2",
     "@dsh-capsule/adapter": "workspace:*",
     "@types/node": "^22",
     "typescript": "^5.6",

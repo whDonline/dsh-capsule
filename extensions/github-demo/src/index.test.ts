@@ -1,3 +1,4 @@
+import { Context } from "@deepseek-ai/cordis";
 import { CapabilityService, LeaseManager, MemoryLeaseStore, sha256Scope } from "@dsh-capsule/adapter";
 import { describe, expect, it } from "vitest";
 import { apply, type DemoHostContext, type DemoToolDefinition } from "./index.js";
@@ -16,7 +17,10 @@ function makeHost(): TestHost {
   const tools = new Map<string, DemoToolDefinition>();
   const operations: Array<{ provider: string; resource: string; action: string; input: unknown }> = [];
   const leases = new LeaseManager(new MemoryLeaseStore());
-  const capabilities = new CapabilityService({
+  // 作用：CapabilityService 现在是真正的 cordis Service（构造时 `super(ctx, "capabilities")`
+  // 会调用 ctx.reflect.provide），因此必须传真实 cordis Context——假对象会以
+  // "Cannot read properties of undefined (reading 'provide')" 崩溃（2026-09 CI 三平台失败的根因）
+  const capabilities = new CapabilityService(new Context(), {
     leases,
     defaultTtlSeconds: 60,
     maxTtlSeconds: 1800,
