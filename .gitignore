@@ -1,5 +1,4 @@
-# 技术规格（本地保留，不纳入版本控制）
-/docs/
+# 鎶€鏈鏍硷紙鏈湴淇濈暀锛屼笉绾冲叆鐗堟湰鎺у埗锛?/docs/
 
 # Python
 __pycache__/
@@ -18,17 +17,15 @@ node_modules/
 dist/
 *.tsbuildinfo
 pnpm-debug.log*
-# 本地 pnpm 内容寻址存储（本仓库配置为工作区内 .pnpm-store，禁止入库）
+# 鏈湴 pnpm 鍐呭瀵诲潃瀛樺偍锛堟湰浠撳簱閰嶇疆涓哄伐浣滃尯鍐?.pnpm-store锛岀姝㈠叆搴擄級
 .pnpm-store/
 
-# 环境变量与密钥（禁止入库）
-.env
+# 鐜鍙橀噺涓庡瘑閽ワ紙绂佹鍏ュ簱锛?.env
 .env.local
 .env.*.local
 *.pem
 
-# 数据库（Lease SQLite 存于用户目录，不入库）
-*.db
+# 鏁版嵁搴擄紙Lease SQLite 瀛樹簬鐢ㄦ埛鐩綍锛屼笉鍏ュ簱锛?*.db
 *.db-shm
 *.db-wal
 *.sqlite3
@@ -46,9 +43,10 @@ Thumbs.db
 # Docker
 docker-compose.override.yml
 
-# 日志
+# 鏃ュ織
 *.log
 logs/
 
-# 临时提交信息文件（禁止入库）
+# 涓存椂鎻愪氦淇℃伅鏂囦欢锛堢姝㈠叆搴擄級
 .git-commit-msg.txt
+.commitmsg
