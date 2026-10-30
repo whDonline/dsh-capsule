@@ -267,11 +267,12 @@ describe("DSH 客户端半边（adapter/client.js）", () => {
     plugin.apply(ctx);
     return { registrations };
   }
-  it("注册对话内提示条与会话内「能力授权」tab（都直接拿到当前会话 id）", () => {
+  it("注册对话内提示条、会话内「能力授权」tab 与设置页（前两者直接拿到当前会话 id）", () => {
     const { registrations } = registerPlugin();
-    expect(registrations.map((item) => item.slot).sort()).toEqual(["conversation.input.dock", "conversation.view"]);
+    expect(registrations.map((item) => item.slot).sort()).toEqual(["conversation.input.dock", "conversation.view", "settings.section"]);
     const dock = registrations.find((item) => item.slot === "conversation.input.dock");
     const view = registrations.find((item) => item.slot === "conversation.view");
+    const settings = registrations.find((item) => item.slot === "settings.section");
     // 提示条：list 槽的 id 形态 + 排序位，紧跟在待办之后
     expect(dock?.options.id).toBe("guard");
     expect(dock?.options.order).toBe(5);
@@ -281,6 +282,11 @@ describe("DSH 客户端半边（adapter/client.js）", () => {
     expect(view?.options.order).toBe(20);
     expect(view?.options.label).toBe("能力授权");
     expect(typeof view?.component).toBe("function");
+    // 设置页：全局策略（范围挡位 / TTL）放这里，跟具体会话无关，排在 DSH 自带设置页之后
+    expect(settings?.options.id).toBe("guard");
+    expect(settings?.options.order).toBe(25);
+    expect(settings?.options.label).toBe("能力授权");
+    expect(typeof settings?.component).toBe("function");
     // 组件在「还没拿到快照」时渲染为空（不占位、不报错）——数据到达后才决定显示什么
     const rendered = (dock?.component as (props: Record<string, unknown>) => FakeElement | null)({ sessionId: "session-x" });
     expect(rendered).toBeNull();
@@ -329,7 +335,7 @@ describe("DSH 客户端半边（adapter/client.js）", () => {
   it("插件可重复装载（fiber 卸载后重新注册不会抛错）", () => {
     const first = registerPlugin();
     const second = registerPlugin();
-    expect(first.registrations).toHaveLength(2);
-    expect(second.registrations).toHaveLength(2);
+    expect(first.registrations).toHaveLength(3);
+    expect(second.registrations).toHaveLength(3);
   });
 });

@@ -157,6 +157,11 @@ scripts/smoke-console.mjs    # 本地手工冒烟（示例数据 + 独立治理�
     独立 HTTP 页面保留，仅作排障与接口验证，不作为面向使用者的入口。
     提示条与 tab 都必须遵守同一条规则：**没有值得说的状态也要给一行**（无授权时显示"本会话没有临时放开的操作"，
     否则用户会认为功能不存在——2026-10-31 实测反馈）。
+11. **全局策略配置挂在 DSH 设置页 `settings.section`（2026-10-31）**：`id=guard, order=25, label=能力授权`，
+    该槽位是 list + `replaceRisk: none`，现有 general(0)/models(10)/plugins(15)/agent-presets(20)。
+    页面只写 `defaultScope` / `defaultTtlSeconds` / `maxTtlSeconds` 三项（与 `PATCH /api/config` 完全一致），
+    `enabled` / `rules` / `defaultScopePaths` / `sweepIntervalMs` 只读展示并注明"去 profile 改"。
+    **范围挡位与 TTL 绝不能放进会话 tab**：它们是全局策略，放进某个会话会误导成"只对这个会话生效"。
 
 ## 7.2 当前验收基线
 
