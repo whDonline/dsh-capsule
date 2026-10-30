@@ -1,7 +1,7 @@
 {
   "name": "dsh-capsule",
   "private": true,
-  "description": "Isolated Plugin Runtime with Revocable Capability Leases for DeepSeek Harness",
+  "description": "Short-lived authorization and sandbox permission lifecycle for DeepSeek Harness",
   "packageManager": "pnpm@11.25.0",
   "scripts": {
     "build": "pnpm -r --if-present build",

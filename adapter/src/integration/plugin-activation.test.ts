@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { Context } from "@deepseek-ai/cordis";
 import { apply, inject, name } from "../index.js";
-/** 供插件 inject 满足的最小服务桩：Guard 只要求这两个键存在，不调用其方法。 */
-const toolsStub = { register: () => () => undefined };
+/** 供插件 inject 满足的最小服务桩；Guard 不应再注册任何凭证代理工具。 */
+const toolsStub = { register: () => { throw new Error("短期授权插件不应注册代理工具"); } };
 const approvalStub = { request: async () => "unavailable" };
 function provideStubs(root: Context): void {
   root.provide("tools", toolsStub as never);
@@ -14,13 +14,11 @@ describe("插件装载形态（P1-3）", () => {
     expect(inject).toEqual(["tools", "approval"]);
     expect(typeof apply).toBe("function");
   });
-  it("经 cordis 装载后：capabilities 服务可解析，且四个 hook 在真实 waterfall 上生效", async () => {
+  it("经 cordis 装载后：不注册代理服务，四个授权 hook 在真实 waterfall 上生效", async () => {
     const root = new Context();
     provideStubs(root);
     await root.plugin({ name, inject, apply: apply as never });
-    const capabilities = root.get("capabilities") as { register?: unknown; execute?: unknown } | undefined;
-    expect(typeof capabilities?.register).toBe("function");
-    expect(typeof capabilities?.execute).toBe("function");
+    expect(root.get("capabilities")).toBeUndefined();
     // 四个 hook 的存在性用行为证明（事件名注册无法从外部枚举，行为可验证）：
     // ① pre-execute：allow 透传
     const exec = { callId: "c1", rootCallId: "c1", name: "pwsh", arguments: { command: "Get-Date" }, agent: { id: "s1" } };

@@ -224,7 +224,7 @@ describe("治理接口在真实生命周期状态上的投影", () => {
     const host = makeHost(ALWAYS_ASK, () => Promise.resolve("allowed-once"));
     await runTool(host, plainExec("c1"), { pre: askDownstream });
     await askApproval(host, "c1");
-    const govConsole = new GovernanceConsole({ audit: host.audit, leases: host.leases, capabilities: { listCapabilities: () => [] }, providers: { list: () => [] }, guardName: "dsh-capability-guard", now: clock });
+    const govConsole = new GovernanceConsole({ audit: host.audit, leases: host.leases, guardName: "dsh-capability-guard", now: clock });
     const handle = await startConsoleServer({ console: govConsole, policy: host.policy, port: 0 });
     try {
       const snapshot = (await (await fetch(`${handle.url}api/snapshot`)).json()) as { summary: { leasesActive: number }; leases: { remainingMs: number; status: string; toolName: string }[] };

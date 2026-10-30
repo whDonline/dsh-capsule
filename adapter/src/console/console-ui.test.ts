@@ -111,7 +111,7 @@ function texts(node: FakeNode): string[] {
   return out;
 }
 function makeConsole(leases: LeaseManager, audit: AuditService): GovernanceConsole {
-  return new GovernanceConsole({ audit, leases, capabilities: { listCapabilities: () => [] }, providers: { list: () => [] }, guardName: "dsh-capability-guard" });
+  return new GovernanceConsole({ audit, leases, guardName: "dsh-capability-guard" });
 }
 interface UiHandle {
   refresh(): Promise<unknown>;

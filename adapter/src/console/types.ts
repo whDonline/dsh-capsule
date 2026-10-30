@@ -1,22 +1,9 @@
 import type { AuditDecision, ToolAuditEvent } from "../audit/types.js";
-import type { CapabilityLease, LeaseKind, LeaseStatus, ManagedCapabilitySummary, ScopeKind } from "../capability/types.js";
-// 作用：Governance Console 视图模型（重构规格第 24 节 Phase 4）——Plugins / Tools / Activity /
-// Capabilities / Audit 五个维度的只读数据形状；所有视图均为白名单投影，类型层即不存在 Secret、
-// 原始 Tool Arguments 与 resource 函数（规格第 9/29 节安全边界）。
-export type ConsoleCapabilityView = ManagedCapabilitySummary;
-export interface ConsoleProviderView {
-  /** Provider 唯一标识 */
-  id: string;
-  /** DSH Credential 引用名（引用本身不是 Secret，是 ctx.credentials.resolve 用的 ref，规格 11.3） */
-  credentialRef: string;
-  /** 允许执行的 action 白名单 */
-  allowedActions: readonly string[];
-}
+import type { CapabilityLease, LeaseKind, LeaseStatus, ScopeKind } from "../capability/types.js";
+// 作用：治理台只读视图——授权、工具统计与审计；不暴露原始工具参数。
 export interface ConsolePluginView {
   id: string;
-  kind: "guard" | "provider";
-  credentialRef?: string;
-  allowedActions?: readonly string[];
+  kind: "guard";
 }
 export interface ConsoleToolStat {
   toolName: string;
@@ -53,8 +40,6 @@ export interface GovernanceSummary {
   leasesActive: number;
   leasesRevoked: number;
   leasesExpired: number;
-  managedCapabilities: number;
-  providers: number;
   auditedEvents: number;
 }
 export interface GovernanceSnapshot {
@@ -65,7 +50,6 @@ export interface GovernanceSnapshot {
   tools: ConsoleToolStat[];
   /** 最近活动（最新在前，条数受 activityLimit 约束） */
   activity: ToolAuditEvent[];
-  capabilities: ConsoleCapabilityView[];
   leases: ConsoleLeaseView[];
 }
 export interface ConsoleAuditQuery {
@@ -74,25 +58,16 @@ export interface ConsoleAuditQuery {
   decision?: AuditDecision;
   limit?: number;
 }
-// 作用：Console 依赖的最小数据源接口（结构化抽象）——组装期注入 AuditService / LeaseManager /
-// CapabilityService / ProviderRegistry 实例；Console 不反向依赖具体实现，便于独立单测。
+// 作用：治理台依赖审计与授权的最小数据源，不反向依赖具体实现，便于独立单测。
 export interface ConsoleAuditSource {
   list(limit?: number): ToolAuditEvent[];
 }
 export interface ConsoleLeaseSource {
   list(): Promise<readonly CapabilityLease[]>;
 }
-export interface ConsoleCapabilitySource {
-  listCapabilities(): readonly ConsoleCapabilityView[];
-}
-export interface ConsoleProviderSource {
-  list(): readonly ConsoleProviderView[];
-}
 export interface GovernanceConsoleDeps {
   audit: ConsoleAuditSource;
   leases: ConsoleLeaseSource;
-  capabilities: ConsoleCapabilitySource;
-  providers: ConsoleProviderSource;
   guardName?: string;
   /** 快照 Activity 区块保留的最近事件条数（默认 50，必须为正整数） */
   activityLimit?: number;

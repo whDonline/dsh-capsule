@@ -42,8 +42,6 @@ for (const [decision, toolName, extra] of [
 const govConsole = new GovernanceConsole({
   audit,
   leases,
-  capabilities: { listCapabilities: () => [] },
-  providers: { list: () => [] },
   guardName: "dsh-capability-guard",
 });
 const handle = await startConsoleServer({ console: govConsole, policy, host: "127.0.0.1", port: 8799 });

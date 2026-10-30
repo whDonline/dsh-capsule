@@ -7,24 +7,11 @@ import { MemoryLeaseStore } from "../capability/lease-store.js";
 import { request as httpRequest } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { apply, resolveConsoleConfig, type CapsuleHostContext, type DisposeHook } from "../index.js";
-import { CapabilityService } from "../service/capability-service.js";
 import { PolicyResolver } from "../capability/policy.js";
 import { GovernanceConsole } from "./console-service.js";
 import { CONSOLE_CLIENT_JS } from "./console-ui.js";
 import { DEFAULT_CONSOLE_PORT, registerGuardWebRoutes, startConsoleServer, guardRouteStatus, ROUTE_RETRY_DELAYS_MS, type CapsuleHostContextLike, type ConsoleHttpHandle } from "./http-server.js";
 import { GovernancePolicy } from "./policy.js";
-import type { ConsoleProviderSource } from "./types.js";
-// 作用：测试用 Provider 白名单投影源——与真实 ProviderRegistry.list() 的投影形状一致，
-// credentialRef 是 resolve 引用名而非 Secret（规格 11.3）
-const fakeProviders: ConsoleProviderSource = {
-  list: () => [{ id: "github", credentialRef: "github-token", allowedActions: ["issues.read", "issues.create"] }],
-};
-function makeCapabilities(leases: LeaseManager): CapabilityService {
-  // 作用：构造注册了一条 managed 定义的 CapabilityService——resource 函数确定性返回，供投影断言
-  const service = new CapabilityService(new Context(), { leases, defaultTtlSeconds: 60, maxTtlSeconds: 1800 });
-  service.register({ toolName: "github.create_issue", provider: "github", action: "issues.create", resource: () => "repo:o/r", ttlSeconds: 300 });
-  return service;
-}
 function recordEvent(audit: AuditService, event: { callId: string; toolName: string; decision: AuditDecision; sessionId?: string; leaseId?: string }): ToolAuditEvent {
   // 作用：写入一条最简形状的审计事件（rootCallId 缺省与 callId 相同）
   return audit.record({ rootCallId: event.callId, ...event });
@@ -75,7 +62,6 @@ interface ConsoleFixture {
   gov: GovernanceConsole;
   audit: AuditService;
   leases: LeaseManager;
-  capabilities: CapabilityService;
   advance: (ms: number) => void;
 }
 async function makeConsole(): Promise<ConsoleFixture> {
@@ -84,30 +70,29 @@ async function makeConsole(): Promise<ConsoleFixture> {
   let now = 10_000;
   const audit = new AuditService();
   const leases = new LeaseManager(new MemoryLeaseStore(), () => now);
-  const capabilities = makeCapabilities(leases);
-  recordEvent(audit, { callId: "call-1", toolName: "github.create_issue", decision: "ASK", sessionId: "sess-1" });
-  recordEvent(audit, { callId: "call-1", toolName: "github.create_issue", decision: "LEASE_ISSUED", sessionId: "sess-1", leaseId: "lease-1" });
-  recordEvent(audit, { callId: "call-1", toolName: "github.create_issue", decision: "TOOL_SUCCESS", sessionId: "sess-1" });
-  recordEvent(audit, { callId: "call-2", toolName: "github.create_issue", decision: "LEASE_REUSED", sessionId: "sess-1", leaseId: "lease-1" });
+  recordEvent(audit, { callId: "call-1", toolName: "deploy.preview", decision: "ASK", sessionId: "sess-1" });
+  recordEvent(audit, { callId: "call-1", toolName: "deploy.preview", decision: "LEASE_ISSUED", sessionId: "sess-1", leaseId: "lease-1" });
+  recordEvent(audit, { callId: "call-1", toolName: "deploy.preview", decision: "TOOL_SUCCESS", sessionId: "sess-1" });
+  recordEvent(audit, { callId: "call-2", toolName: "deploy.preview", decision: "LEASE_REUSED", sessionId: "sess-1", leaseId: "lease-1" });
   recordEvent(audit, { callId: "call-3", toolName: "fs.write", decision: "PASSTHROUGH_DENY" });
-  await leases.issue({ sessionId: "sess-1", toolName: "github.create_issue", scope: { kind: "exact-arguments", key: "hash-1", display: "tool=github.create_issue args=<sha256>" }, ttlSeconds: 60 });
-  return { gov: new GovernanceConsole({ audit, leases, capabilities, providers: fakeProviders, now: () => now }), audit, leases, capabilities, advance: (ms) => { now += ms; } };
+  await leases.issue({ sessionId: "sess-1", toolName: "deploy.preview", scope: { kind: "exact-arguments", key: "hash-1", display: "tool=deploy.preview args=<sha256>" }, ttlSeconds: 60 });
+  return { gov: new GovernanceConsole({ audit, leases, now: () => now }), audit, leases, advance: (ms) => { now += ms; } };
 }
 async function makeGov(): Promise<GovernanceConsole> {
   // 作用：仅取聚合实例（HTTP 只读查询用）
   return (await makeConsole()).gov;
 }
 describe("GovernanceConsole 聚合（规格第 24 节 Phase 4）", () => {
-  it("snapshot 聚合五维视图：summary 计数、plugins 白名单投影、capabilities 投影、activity 最新在前", async () => {
+  it("snapshot 聚合授权与审计：summary 计数、Guard 投影、activity 最新在前", async () => {
     const { gov } = await makeConsole();
     const snap = await gov.snapshot();
     expect(snap.guardName).toBe("dsh-capability-guard");
-    expect(snap.summary).toMatchObject({ leasesTotal: 1, leasesActive: 1, leasesRevoked: 0, leasesExpired: 0, managedCapabilities: 1, providers: 1, auditedEvents: 5 });
+    expect(snap.summary).toMatchObject({ leasesTotal: 1, leasesActive: 1, leasesRevoked: 0, leasesExpired: 0, auditedEvents: 5 });
     expect(snap.plugins).toEqual([
       { id: "dsh-capability-guard", kind: "guard" },
-      { id: "github", kind: "provider", credentialRef: "github-token", allowedActions: ["issues.read", "issues.create"] },
     ]);
-    expect(snap.capabilities).toEqual([{ toolName: "github.create_issue", provider: "github", action: "issues.create", ttlSeconds: 300 }]);
+    expect(snap).not.toHaveProperty("capabilities");
+    expect(snap.summary).not.toHaveProperty("providers");
     expect(snap.activity.map((event) => event.decision)).toEqual(["PASSTHROUGH_DENY", "LEASE_REUSED", "TOOL_SUCCESS", "LEASE_ISSUED", "ASK"]);
   });
   it("activityLimit 截断最近活动，非法值构造 Fail Closed 抛错", async () => {
@@ -117,16 +102,16 @@ describe("GovernanceConsole 聚合（规格第 24 节 Phase 4）", () => {
     for (let i = 0; i < 8; i += 1) {
       recordEvent(audit, { callId: `call-${i}`, toolName: "t", decision: "ASK" });
     }
-    const gov = new GovernanceConsole({ audit, leases, capabilities: { listCapabilities: () => [] }, providers: { list: () => [] }, activityLimit: 3, now: () => now });
+    const gov = new GovernanceConsole({ audit, leases, activityLimit: 3, now: () => now });
     const snap = await gov.snapshot();
     expect(snap.activity).toHaveLength(3);
     expect(snap.activity[0].callId).toBe("call-7");
-    expect(() => new GovernanceConsole({ audit, leases, capabilities: { listCapabilities: () => [] }, providers: { list: () => [] }, activityLimit: 0 })).toThrow(/GUARD_CONSOLE_INVALID/);
+    expect(() => new GovernanceConsole({ audit, leases, activityLimit: 0 })).toThrow(/GUARD_CONSOLE_INVALID/);
   });
   it("Tool 统计按 callId 去重：调用链多事件只计 1 次 invocations，各决策计数正确", async () => {
     const { gov } = await makeConsole();
     const snap = await gov.snapshot();
-    const tool = snap.tools.find((stat) => stat.toolName === "github.create_issue");
+    const tool = snap.tools.find((stat) => stat.toolName === "deploy.preview");
     expect(tool).toBeDefined();
     expect(tool).toMatchObject({ invocations: 2, ask: 1, leaseIssued: 1, leaseReused: 1, approvalRejected: 0, passthroughAllow: 0, passthroughDeny: 0, toolSuccess: 1, toolError: 0 });
     const fs = snap.tools.find((stat) => stat.toolName === "fs.write");
@@ -151,19 +136,13 @@ describe("GovernanceConsole 聚合（规格第 24 节 Phase 4）", () => {
   });
   it("queryAudit 按 sessionId/toolName/decision 过滤（最新在前）并支持 limit；非法 limit Fail Closed", async () => {
     const { gov } = await makeConsole();
-    expect(gov.queryAudit({ toolName: "github.create_issue" })).toHaveLength(4);
+    expect(gov.queryAudit({ toolName: "deploy.preview" })).toHaveLength(4);
     expect(gov.queryAudit({ sessionId: "sess-1", decision: "TOOL_SUCCESS" }).map((event) => event.callId)).toEqual(["call-1"]);
     expect(gov.queryAudit({ limit: 2 }).map((event) => event.decision)).toEqual(["PASSTHROUGH_DENY", "LEASE_REUSED"]);
     expect(() => gov.queryAudit({ limit: 0 })).toThrow(/GUARD_CONSOLE_INVALID/);
     expect(gov.queryAudit({})).toHaveLength(5);
   });
-  it("CapabilityService.listCapabilities 返回安全投影：不含 resource 函数字段", () => {
-    const leases = new LeaseManager(new MemoryLeaseStore());
-    const capabilities = makeCapabilities(leases);
-    const list = capabilities.listCapabilities();
-    expect(list).toHaveLength(1);
-    expect(Object.keys(list[0]).sort()).toEqual(["action", "provider", "toolName", "ttlSeconds"]);
-  });
+
 });
 describe("HTTP 只读查看器（规格 Phase 4）", () => {
   it("GET /api/snapshot 返回快照 JSON 与安全响应头", async () => {
@@ -183,7 +162,7 @@ describe("HTTP 只读查看器（规格 Phase 4）", () => {
   it("GET /api/audit 支持 toolName/decision/limit 过滤，非法 decision/limit 返回 400", async () => {
     const handle = await startConsoleServer({ console: await makeGov(), port: 0 });
     try {
-      const filtered = await (await fetch(`${handle.url}api/audit?toolName=github.create_issue&decision=TOOL_SUCCESS&limit=5`)).json();
+      const filtered = await (await fetch(`${handle.url}api/audit?toolName=deploy.preview&decision=TOOL_SUCCESS&limit=5`)).json();
       expect(filtered).toHaveLength(1);
       const invalidDecision = await fetch(`${handle.url}api/audit?decision=NOT_A_DECISION`);
       expect(invalidDecision.status).toBe(400);
@@ -546,11 +525,11 @@ describe("同源路由（挂到 DSH Web 服务器的 /guard/…）", () => {
   });
 });
 describe("插件装配（index.ts apply + console 配置）", () => {
-  it("console.enabled 启动只读查看器，dispose 后端口释放且 capabilities 服务仍可解析", async () => {
+  it("console.enabled 启动只读查看器，dispose 不注册凭证代理服务", async () => {
     const ctx = new Context() as unknown as CapsuleHostContext & { get(name: string): unknown };
     (ctx as { on?: unknown }).on = () => () => undefined;
     const dispose: DisposeHook = await apply(ctx, { console: { enabled: true, port: 0 } });
-    expect(typeof ctx.get("capabilities")).toBe("object");
+    expect(ctx.get("capabilities")).toBeUndefined();
     await dispose();
   });
   it("默认启用 console（治理页面是主要入口），可用 enabled:false 显式关闭", async () => {
@@ -559,7 +538,7 @@ describe("插件装配（index.ts apply + console 配置）", () => {
     const ctx = new Context() as unknown as CapsuleHostContext & { get(name: string): unknown };
     (ctx as { on?: unknown }).on = () => () => undefined;
     const dispose = await apply(ctx, { console: { enabled: false } });
-    expect(typeof ctx.get("capabilities")).toBe("object");
+    expect(ctx.get("capabilities")).toBeUndefined();
     await dispose();
   });
 });

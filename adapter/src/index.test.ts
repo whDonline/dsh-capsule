@@ -9,27 +9,35 @@ function makeBus(host: CapsuleHostContext) {
 function makeCtx(): CapsuleHostContext {
   return makeBus({});
 }
-describe("Guard 插件入口（基线修正后：服务化注册）", () => {
-  it("真实 cordis 宿主：CapabilityService 以 ctx.capabilities 注册为服务（不再是硬挂属性）", async () => {
+describe("Guard 插件入口（仅短期授权）", () => {
+  it("真实 cordis 宿主：不注册 Managed 服务、不读取凭证服务", async () => {
     const ctx = makeBus(new Context());
-    const dispose = await apply(ctx);
-    const capabilities = (ctx as unknown as { get(name: string): unknown }).get("capabilities") as { register?: unknown; execute?: unknown; listCapabilities?: unknown };
-    expect(typeof capabilities?.register).toBe("function");
-    expect(typeof capabilities?.execute).toBe("function");
-    expect(typeof capabilities?.listCapabilities).toBe("function");
+    const get = (ctx as unknown as Context).get.bind(ctx);
+    const accessed: string[] = [];
+    ctx.get = (name: string) => {
+      accessed.push(name);
+      return get(name);
+    };
+    const dispose = await apply(ctx, { console: { enabled: false } });
+    expect(get("capabilities")).toBeUndefined();
+    expect(accessed).not.toContain("credentials");
+    expect(accessed).not.toContain("subprocess");
     await dispose();
   });
-  it("带策略配置：默认路径正常组装，dispose 不抛错", async () => {
-    const ctx = makeBus(new Context());
-    const dispose = await apply(ctx, { defaultTtlSeconds: 120 });
-    expect((ctx as unknown as { get(name: string): unknown }).get("capabilities")).toBeDefined();
+  it("带策略配置：仅安装四个授权 hook，卸载时全部注销", async () => {
+    const registered: string[] = [];
+    const removed: string[] = [];
+    const ctx = { on: (event: string) => { registered.push(event); return () => { removed.push(event); }; } };
+    const dispose = await apply(ctx, { defaultTtlSeconds: 120, console: { enabled: false } });
+    expect(registered).toEqual(["tools/pre-execute", "tools/execute", "approval/request", "tools/result"]);
     await dispose();
+    expect(removed).toEqual(registered);
   });
-  it("非 cordis 宿主：退化为游离 Context 承载服务，不抛错（仅注入可见性受影响）", async () => {
+  it("最小宿主无需 Managed 服务也能装配和卸载", async () => {
     const ctx = makeCtx();
-    const dispose = await apply(ctx);
+    const dispose = await apply(ctx, { console: { enabled: false } });
     await dispose();
-    expect((ctx as { capabilities?: unknown }).capabilities).toBeUndefined();
+    expect(ctx.capabilities).toBeUndefined();
   });
 });
 describe("buildSandboxContext（P0-2 宿主适配器）", () => {

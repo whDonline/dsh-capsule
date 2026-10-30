@@ -1,8 +1,4 @@
 import { AuditService } from "./audit/audit-service.js";
-import { Context } from "@deepseek-ai/cordis";
-import { CredentialBroker, DEFAULT_BROKER_TIMEOUT_MS, findCredentialService, type BrokerDeps, type CredentialServiceLike } from "./broker/broker.js";
-import { GitHubProvider } from "./broker/providers/github.js";
-import { ProviderRegistry } from "./broker/registry.js";
 import { sha256Scope } from "./capability/canonical.js";
 import { LeaseManager } from "./capability/lease-manager.js";
 import { MemoryLeaseStore } from "./capability/lease-store.js";
@@ -17,13 +13,6 @@ import { GovernanceConsole } from "./console/console-service.js";
 import { GovernancePolicy } from "./console/policy.js";
 import { registerGuardWebRoutes, startConsoleServer, DEFAULT_CONSOLE_HOST, DEFAULT_CONSOLE_PORT, GUARD_WEB_PREFIX, ROUTE_RETRY_DELAYS_MS, guardRouteStatus, type GuardRouteStatus, type ConsoleHttpHandle } from "./console/http-server.js";
 import type { ConsoleHttpConfig } from "./console/types.js";
-import { CapabilityService } from "./service/capability-service.js";
-function createDetachedContext(): Context {
-  // 作用：为「宿主 ctx 不是 cordis Context」的场景创建一个游离 Context 承载 CapabilityService——
-  // 服务照常可用（例如 Console / 治理视图会读取它），但不会被注册进任何真实宿主上下文。
-  // 该退化只影响 Managed Extension 的依赖注入可见性，不影响 Universal Mode 主链路。
-  return new Context();
-}
 export type CapsuleHostContext = Record<string, unknown>;
 export type DisposeHook = () => void | Promise<void>;
 // 作用：P0-2 宿主适配器——把 DSH 的会话沙箱模式读写能力收敛成 SandboxContext 最小接口。
@@ -67,10 +56,10 @@ function getService(ctx: CapsuleHostContext, name: string): unknown {
     return undefined;
   }
 }
-export { AuditService, CapabilityService, CredentialBroker, GitHubProvider, GovernanceConsole, GovernancePolicy, LeaseManager, MemoryLeaseStore, PendingRegistry, PolicyResolver, ProviderRegistry, SandboxGrantManager, ScopeResolver, UniversalGate, registerGuardWebRoutes, startConsoleServer, DEFAULT_UNIVERSAL_POLICY, DEFAULT_BROKER_TIMEOUT_MS, DEFAULT_CONSOLE_HOST, DEFAULT_CONSOLE_PORT, DEFAULTABLE_SCOPE_MODES, GUARD_WEB_PREFIX, ROUTE_RETRY_DELAYS_MS, SCOPE_MODES, findCredentialService, guardRouteStatus, isScopeMode, sha256Scope };
-export type { UniversalPolicyConfig, CredentialServiceLike, BrokerDeps, ConsoleHttpConfig, ScopeMode, ConsoleHttpHandle, GuardRouteStatus };
+export { AuditService, GovernanceConsole, GovernancePolicy, LeaseManager, MemoryLeaseStore, PendingRegistry, PolicyResolver, SandboxGrantManager, ScopeResolver, UniversalGate, registerGuardWebRoutes, startConsoleServer, DEFAULT_UNIVERSAL_POLICY, DEFAULT_CONSOLE_HOST, DEFAULT_CONSOLE_PORT, DEFAULTABLE_SCOPE_MODES, GUARD_WEB_PREFIX, ROUTE_RETRY_DELAYS_MS, SCOPE_MODES, guardRouteStatus, isScopeMode, sha256Scope };
+export type { UniversalPolicyConfig, ConsoleHttpConfig, ScopeMode, ConsoleHttpHandle, GuardRouteStatus };
 // 作用：Guard 插件完整配置——策略项（Partial<UniversalPolicyConfig>）+ Phase 4 Governance Console
-// 查看器开关（默认开启；治理页面是「授权剩余时间 / 审计 / 范围挡位」的唯一可视化入口）。
+// 查看器开关（默认开启；提供授权剩余时间、审计与范围挡位配置）。
 export interface GuardPluginConfig extends Partial<UniversalPolicyConfig> {
   console?: ConsoleHttpConfig;
 }
@@ -90,13 +79,7 @@ export const inject = ["tools", "approval"];
 export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig): Promise<DisposeHook> {
   // 作用：组装 Guard 并安装到 DSH——策略来自插件配置（缺省 DEFAULT_UNIVERSAL_POLICY：默认 TTL 60s、
   // 上限 1800s、默认 exact-arguments scope）；任何安装失败立即抛错（Fail Closed，绝不静默降级）。
-  // Phase 2：CapabilityService 挂到 ctx.capabilities 供 Managed Extension inject 使用，Managed Tool
-  // 的语义 Scope 由 Gate 优先采用（规格 10.4）。Phase 3：组装 ProviderRegistry + GitHubProvider +
-  // CredentialBroker 注入 executor——Provider 只能由 Guard Core 内置注册（规格 11.2），每个 operation
-  // 现场定位 ctx.credentials 并重新 resolve（规格 11.3 禁止跨 operation 缓存 Secret）。
-  // Phase 4：GovernancePolicy（运行期可切换的默认范围挡位与 TTL）+ GovernanceConsole 聚合
-  // Audit/Leases/Capabilities/Providers 五维治理视图；Console HTTP 查看器默认启动，同时承载
-  // 面板使用的 /api/* 接口与运行期策略写接口（PATCH /api/config）。
+  // 治理台聚合授权、工具调用与审计；不注册凭证服务或代理执行工具。
   const deployment = {
     enabled: config?.enabled ?? DEFAULT_UNIVERSAL_POLICY.enabled,
     rules: config?.rules ?? DEFAULT_UNIVERSAL_POLICY.rules,
@@ -113,31 +96,6 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
   });
   const policyConfig = (): UniversalPolicyConfig => ({ ...governance.config, defaultScopePaths: deployment.defaultScopePaths });
   const leases = new LeaseManager(new MemoryLeaseStore());
-  const registry = new ProviderRegistry();
-  registry.register(new GitHubProvider());
-  const broker = new CredentialBroker({ registry, getCredentials: () => findCredentialService(ctx) });
-  // 作用：把 cordis 上下文交给 CapabilityService——它以 `super(ctx, "capabilities")` 自注册为服务，
-  // 随 fiber 卸载自动注销（基线修正，取代原先往 ctx 硬挂属性 + 手动 delete 的做法）。
-  // 真实 DSH 的 ctx 必然是 cordis Context；仅在非 cordis 宿主（如单元测试的最小 ctx）下退化为
-  // 不注册服务，此时 Managed Extension 因 `inject: ["capabilities"]` 不会激活（Fail Closed，不静默降级）。
-  const initialPolicy = policyConfig();
-  let capabilities: CapabilityService;
-  try {
-    capabilities = new CapabilityService(ctx as unknown as Context, {
-      leases,
-      defaultTtlSeconds: initialPolicy.defaultTtlSeconds,
-      maxTtlSeconds: initialPolicy.maxTtlSeconds,
-      executor: broker,
-    });
-  } catch (err) {
-    process.stderr.write(`[dsh-guard] ctx.capabilities service registration unavailable: ${String(err)}\n`);
-    capabilities = new CapabilityService(createDetachedContext(), {
-      leases,
-      defaultTtlSeconds: initialPolicy.defaultTtlSeconds,
-      maxTtlSeconds: initialPolicy.maxTtlSeconds,
-      executor: broker,
-    });
-  }
   const audit = new AuditService();
   const gate = new UniversalGate({
     policy: new PolicyResolver(policyConfig),
@@ -145,12 +103,11 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
     leases,
     pending: new PendingRegistry(),
     audit,
-    managed: capabilities,
     // P0-2：沙箱模式有界授权。宿主服务缺失时该链路自动失效（Fail Closed：不提升 = 不越权），
     // 其余 Universal Mode 行为完全不受影响
     sandboxGrants: new SandboxGrantManager(buildSandboxContext(ctx), leases),
   });
-  const govConsole = new GovernanceConsole({ audit, leases, capabilities, providers: registry, guardName: name });
+  const govConsole = new GovernanceConsole({ audit, leases, guardName: name });
   if (typeof (ctx as { on?: unknown }).on !== "function") {
     throw new Error("GUARD_INSTALL_FAILED: ctx.on unavailable");
   }

@@ -56,12 +56,6 @@ export class LeaseManager {
       return undefined;
     }
   }
-  async findLatest(sessionId: string, toolName: string, scopeKey: string): Promise<CapabilityLease | undefined> {
-    // 作用：查找桶内最新一条 Lease（不限状态）——Broker 路径（execute）用它区分失败原因：
-    // 完全无记录抛 LEASE_REQUIRED 由上层处理，有记录则交给 validate 抛出 LEASE_REVOKED/LEASE_EXPIRED；
-    // 与 findMatching（Gate 复用路径，失败统一回落 undefined 重新 ask）语义互补
-    return await Promise.resolve(this.store.findLatest({ sessionId, toolName, scopeKey }));
-  }
   get(id: string): CapabilityLease | undefined {
     // 作用：按 id 读取单条 Lease（不校验、不改状态）——供沙箱授权回收路径实时查询「该 Lease 是否还活着」。
     // 刻意不做 validate：调用方需要区分「不存在 / 已撤销 / 已过期」三种失效情形并统一按失效处理，

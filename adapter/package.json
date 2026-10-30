@@ -1,7 +1,7 @@
 {
   "name": "@dsh-capsule/adapter",
   "version": "0.1.0",
-  "description": "DSH Capability Guard - short-lived authorization leases and a managed credential broker for DeepSeek Harness",
+  "description": "DSH Capability Guard - short-lived authorization leases and sandbox permission lifecycle for DeepSeek Harness",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

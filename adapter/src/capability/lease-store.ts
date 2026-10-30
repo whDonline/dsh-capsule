@@ -11,7 +11,6 @@ export interface LeaseQuery {
 export interface LeaseStore {
   insert(lease: CapabilityLease): void | Promise<void>;
   findMatching(query: LeaseQuery): CapabilityLease | undefined | Promise<CapabilityLease | undefined>;
-  findLatest(query: LeaseQuery): CapabilityLease | undefined | Promise<CapabilityLease | undefined>;
   get(id: string): CapabilityLease | undefined | Promise<CapabilityLease | undefined>;
   revoke(id: string, reason?: string): boolean | Promise<boolean>;
   revokeSession(sessionId: string, reason?: string): number | Promise<number>;
@@ -39,16 +38,6 @@ export class MemoryLeaseStore implements LeaseStore {
     if (!bucket || bucket.length === 0) return undefined;
     const latest = bucket[bucket.length - 1];
     if (!latest || latest.status !== "ACTIVE") return undefined;
-    if (query.kind !== undefined && latest.kind !== query.kind) return undefined;
-    return latest;
-  }
-  findLatest(query: LeaseQuery): CapabilityLease | undefined {
-    // 作用：查询桶内最新一条 Lease（不限状态）——供 Broker 路径（execute）区分失败原因
-    // （REVOKED/EXPIRED），与 findMatching（只认 ACTIVE，失败统一回落 undefined）语义互补
-    const bucket = this.buckets.get(bucketKeyOf(query.sessionId, query.toolName, query.scopeKey));
-    if (!bucket || bucket.length === 0) return undefined;
-    const latest = bucket[bucket.length - 1];
-    if (!latest) return undefined;
     if (query.kind !== undefined && latest.kind !== query.kind) return undefined;
     return latest;
   }

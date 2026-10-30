@@ -6,7 +6,7 @@ import type { ResolvedToolPolicy, PolicyResolver } from "./policy.js";
 import type { LeaseManager } from "./lease-manager.js";
 import type { PendingRegistry } from "./pending.js";
 import type { ScopeResolver } from "./scope-resolver.js";
-import type { ApprovalOutcome, ApprovalRequestLike, CapabilityScope, EscalationGrant, LeaseKind, ManagedCapabilitySource, PreToolDecision, ResolvedManagedCapability, ToolExecutionLike } from "./types.js";
+import type { ApprovalOutcome, ApprovalRequestLike, CapabilityScope, EscalationGrant, PreToolDecision, ToolExecutionLike } from "./types.js";
 // 作用：Universal Gate（重构规格第 6 节 + 2026-09-14 基线修正）——Guard 横切 DSH 原生 Tool Pipeline
 // 的四个 hook：
 //   tools/pre-execute  只接管下游 ask（真实 DSH 中通常为 allow → 透传；仅 hook 插件会产生 ask）
@@ -27,8 +27,6 @@ export interface UniversalGateDeps {
    * Guard 不识别、不记录、不签发沙箱升级授权），这样"不配置就不改变任何 DSH 语义"由构造方式保证。
    */
   sandboxGrants?: SandboxGrantManager;
-  /** Phase 2：Managed 语义能力查询（CapabilityService 实现）——已注册 Tool 优先用 provider/resource/action 语义 Scope */
-  managed?: ManagedCapabilitySource;
   /** 可注入时钟（默认 Date.now），保证 TTL/GC 语义可模拟时间测试 */
   now?: () => number;
 }
@@ -124,29 +122,11 @@ export class UniversalGate {
       return downstream;
     }
     let scope: CapabilityScope;
-    let ttlSeconds: number;
-    let leaseKind: LeaseKind = "universal";
-    let managed: ResolvedManagedCapability | undefined;
     try {
-      managed = this.resolveManaged(exec.name, exec.arguments);
+      scope = this.deps.scopes.resolve({ toolName: exec.name, arguments: exec.arguments }, policy);
     } catch {
-      // 已注册 managed 定义但 resource 计算失败：禁止回落 universal exact-arguments 链路签发
-      // 语义错误的 Lease（规格 10.4），Fail Closed 保持下游原始 ask——Guard 完全不接管本次调用
+      // Scope 解析失败：不接管、不签发，保持原始 ask。
       return downstream;
-    }
-    if (managed) {
-      // 已注册 managed Tool：优先用 provider/resource/action 语义 Scope（规格 10.4），TTL 来自 definition
-      scope = managed.scope;
-      ttlSeconds = managed.ttlSeconds;
-      leaseKind = "managed";
-    } else {
-      try {
-        scope = this.deps.scopes.resolve({ toolName: exec.name, arguments: exec.arguments }, policy);
-      } catch {
-        // Scope 解析失败：Fail Closed，不签发 Lease，保持原 ask
-        return downstream;
-      }
-      ttlSeconds = policy.ttlSeconds;
     }
     const lease = await this.deps.leases.findMatching(sessionId, exec.name, scope.key);
     if (lease) {
@@ -174,15 +154,14 @@ export class UniversalGate {
         sessionId,
         toolName: exec.name,
         scope,
-        ttlSeconds,
+        ttlSeconds: policy.ttlSeconds,
         startedAt: this.now(),
         decision: "ASKED",
-        leaseKind,
       },
       exec.signal,
     );
     this.recordAudit(exec, "ASK", { scopeKey: scope.key, scopeDisplay: scope.display });
-    return { kind: "ask", reason: appendGuardReason(downstream.reason, scope, ttlSeconds) };
+    return { kind: "ask", reason: appendGuardReason(downstream.reason, scope, policy.ttlSeconds) };
   }
   async handleApprovalRequest(req: ApprovalRequestLike, next: () => Promise<ApprovalOutcome>): Promise<ApprovalOutcome> {
     // 作用：approval/request 处理器（规格 6.3 算法）——先交给真正的 DSH human/machine answerer（next），
@@ -231,7 +210,7 @@ export class UniversalGate {
           toolName: context.toolName,
           scope: context.scope,
           ttlSeconds: context.ttlSeconds,
-          kind: escalationGrant ? "sandbox-mode" : pendingExec?.leaseKind ?? "universal",
+          kind: escalationGrant ? "sandbox-mode" : "universal",
           sourceCallId: req.callId,
         });
         if (pendingExec) pendingExec.leaseId = lease.id;
@@ -363,13 +342,6 @@ export class UniversalGate {
     } catch {
       // 提升失败不抛出：保持 DSH 原生审批语义（用户仍会被问一次），不影响本次调用本身
     }
-  }
-  private resolveManaged(toolName: string, args: unknown): ResolvedManagedCapability | undefined {
-    // 作用：查询 managed 语义能力定义（规格 10.4）——未注入 managed 源或 Tool 未注册返回 undefined
-    //（回落 exact-arguments 默认策略）；定义存在但 resource 解析抛错则向上传播，由 handlePreExecute
-    // Fail Closed 不接管保持原 ask（禁止回落 universal 签发语义错误的 Lease）
-    if (!this.deps.managed) return undefined;
-    return this.deps.managed.resolve(toolName, args);
   }
   private recordAudit(exec: ToolExecutionLike, decision: AuditDecision, extra?: { scopeKey?: string; scopeDisplay?: string; leaseId?: string }): void {
     // 作用：组装审计事件——只含 Session/callId/Tool 名/Scope 哈希与脱敏 display/Lease id，绝不含参数原文

@@ -1,5 +1,8 @@
 # AGENTS.md
 
+> **当前项目决策（2026-10-30，项目所有者明确要求）**：凭证代理相关代码已移除，包括 Broker / Provider、命令凭证绑定、Managed Capability Service、Managed Extension SDK 与 GitHub 示例。当前仅保留通用短期授权、沙箱提升与回滚、审计、治理台。下文旧定位中涉及 Managed/Broker 的实现、保留及测试要求已作废，禁止按历史条款恢复这些模块；凭证管理交由 DSH 原生或相关工具。通用授权的安全红线及测试要求继续有效。
+
+
 > 本文件是 dsh-capsule 项目的"项目宪法"，所有 AI 编码会话开始前必须通读并遵守。
 > 当前有效规格：`docs/DSH_Capability_Guard_基于现有版本重构技术规格.md`（增量重构，以其为准）。
 > 项目决策（2026-09-14，项目所有者确认）：**Legacy Python / Docker Isolated Runtime 已整体移除，不再预留、后续不实现**。规格中涉及 Legacy 保留 / Phase 5 Optional Isolated Runtime 的条款随之作废；本插件为纯 TypeScript，无 Python / Docker / UDS 依赖。

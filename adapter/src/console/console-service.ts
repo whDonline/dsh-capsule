@@ -1,10 +1,8 @@
 import type { ToolAuditEvent } from "../audit/types.js";
 import type { CapabilityLease } from "../capability/types.js";
-import type { ConsoleAuditQuery, ConsoleAuditSource, ConsoleCapabilitySource, ConsoleLeaseSource, ConsoleLeaseView, ConsolePluginView, ConsoleProviderSource, ConsoleToolStat, GovernanceConsoleDeps, GovernanceSnapshot, GovernanceSummary } from "./types.js";
-// 作用：GovernanceConsole（重构规格第 24 节 Phase 4）——把 AuditService / LeaseManager /
-// CapabilityService / ProviderRegistry 聚合成 Plugins / Tools / Activity / Capabilities / Audit
-// 五个维度的只读治理视图（快照 + 审计过滤查询）；纯查询无副作用，不修改任何 Guard 运行状态，
-// 安全正确性始终由 LeaseManager.validate 决定（本类仅做展示层白名单投影）。
+import type { ConsoleAuditQuery, ConsoleAuditSource, ConsoleLeaseSource, ConsoleLeaseView, ConsolePluginView, ConsoleToolStat, GovernanceConsoleDeps, GovernanceSnapshot, GovernanceSummary } from "./types.js";
+// 作用：聚合授权、工具调用与审计的只读治理视图。
+// 授权安全校验仍由 LeaseManager 执行，查询不修改运行状态。
 export class GovernanceConsole {
   private readonly now: () => number;
   private readonly guardName: string;
@@ -19,8 +17,7 @@ export class GovernanceConsole {
     }
   }
   async snapshot(): Promise<GovernanceSnapshot> {
-    // 作用：生成全量治理快照——Lease 白名单投影（实时剩余毫秒 + 视图层过期修正）、Managed 能力
-    // 定义投影、Provider 投影、按 callId 去重的 Tool 统计与最近 Activity（最新在前）
+    // 作用：生成授权白名单投影、按 callId 去重的工具统计与最近审计活动。
     const now = this.now();
     const events = this.deps.audit.list();
     const leases = await this.deps.leases.list();
@@ -30,8 +27,6 @@ export class GovernanceConsole {
       leasesActive: leaseViews.filter((lease) => lease.status === "ACTIVE").length,
       leasesRevoked: leaseViews.filter((lease) => lease.status === "REVOKED").length,
       leasesExpired: leaseViews.filter((lease) => lease.status === "EXPIRED").length,
-      managedCapabilities: this.deps.capabilities.listCapabilities().length,
-      providers: this.deps.providers.list().length,
       auditedEvents: events.length,
     };
     return {
@@ -41,7 +36,6 @@ export class GovernanceConsole {
       plugins: this.buildPlugins(),
       tools: this.toolStats(events),
       activity: [...events].reverse().slice(0, this.activityLimit),
-      capabilities: [...this.deps.capabilities.listCapabilities()],
       leases: leaseViews,
     };
   }
@@ -61,14 +55,8 @@ export class GovernanceConsole {
     return query?.limit === undefined ? filtered : filtered.slice(0, query.limit);
   }
   private buildPlugins(): ConsolePluginView[] {
-    // 作用：Plugins 视图——Guard 自身 + 已注册 Provider 白名单投影（credentialRef 是 resolve 用的
-    // 引用名而非 Secret，规格 11.3）；Guard 无法枚举 DSH 其他已装插件（规则 4：不猜 DSH API），
-    // 故本视图仅含 Guard 与其内置 Provider
-    const plugins: ConsolePluginView[] = [{ id: this.guardName, kind: "guard" }];
-    for (const provider of this.deps.providers.list()) {
-      plugins.push({ id: provider.id, kind: "provider", credentialRef: provider.credentialRef, allowedActions: [...provider.allowedActions] });
-    }
-    return plugins;
+    // 作用：仅展示当前 Guard 插件，不枚举宿主的其他插件。
+    return [{ id: this.guardName, kind: "guard" }];
   }
   private projectLease(lease: CapabilityLease, now: number): ConsoleLeaseView {
     // 作用：Lease 白名单投影——scope 只保留 kind 与脱敏 display（key 是参数哈希、无 Secret，保留

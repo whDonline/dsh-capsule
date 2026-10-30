@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/hero-cn.svg" alt="DSH Capsule — DeepSeek Harness Capability Guard" width="100%" />
+  <b>DSH Capsule · Capability Guard</b>
 </p>
 
 <p align="center">
@@ -16,19 +16,19 @@
 </p>
 
 <p align="center">
-  <b>让 Agent 获得短期、可撤销、可审计的能力，而不是长期持有凭证。</b>
+  <b>让 Agent 的临时授权有期限、可收回、可审计。</b>
 </p>
 
 <p align="center">
   DSH Capsule 是面向 <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a> 的 <b>Capability Guard</b>：<br/>
-  对已有 Tool 提供零改造的短期 Lease 层；对受管扩展提供 Credential Broker 与 Provider 代理执行。
+  为已有审批增加短期 Lease，并管理沙箱模式提升、到期回滚与审计。
 </p>
 
 > [!IMPORTANT]
-> **项目定位已经变化。** 当前仓库是纯 TypeScript 的 Capability Guard，不再包含旧版 Python / Docker / Unix Domain Socket 隔离 Runtime。本文只描述当前代码真实存在的能力。
+> **项目定位已经变化。** 当前仓库是纯 TypeScript 的 Capability Guard，不再包含旧版 Python / Docker / Unix Domain Socket 隔离 Runtime。本文只描述当前代码真实存在的能力。2026-10-30 按项目决策移除凭证代理、命令凭证绑定及 Managed SDK/示例，当前聚焦通用短期授权。
 
 > [!WARNING]
-> **Developer Preview。** 核心链路（Lease、沙箱升级有界授权、Managed Capability、Broker、Audit、Console）已在仓库实现，有**真 cordis 集成测试**守护 hook 接线与完整权限生命周期，并已在本机 desktop profile 中实跑。
+> **Developer Preview。** 核心链路（Lease、沙箱升级有界授权、Audit、Console）已在仓库实现，有**真 cordis 集成测试**守护 hook 接线与完整权限生命周期，并已在本机 desktop profile 中实跑。
 >
 > DSH 本身仍在快速迭代：本仓库与本机安装版源码的核对结论记录在 `docs/集成基线-真实DSH行为.md`，**升级 DSH 后请重跑该文档第 10 节的检查清单**。
 
@@ -52,20 +52,18 @@ DSH Capsule 补的就是这一层：
 | 同一个安全操作反复弹审批 | `allowed-once` 后签发短期 Lease，在相同 Scope + Session 内复用 |
 | 授权范围太宽 | Lease 绑定 `Session × Tool × Scope × TTL` |
 | 授权无法自动收回 | TTL 到期回收；沙箱模式提升还会**回滚到批准前的档位** |
-| 插件直接接触长期 Token | Managed Extension 只提交 Operation，Broker 每次调用时动态解析 Credential |
-| 插件伪造资源或 Action | Guard 从可信 `run.arguments` 重算资源，再与 Operation 做完整比对 |
 | 发生了什么难以追踪 | Secret-safe Audit + 只读 Governance Console（放宽/回滚都会留痕） |
 | 安全失败被静默放行 | 关键路径统一 **Fail Closed** |
 
 一句话理解：
 
-> **Universal Mode 管“这个 Tool 现在还要不要再问一次”；Managed Mode 管“批准后谁能拿凭证、能执行什么外部操作”。**
+> **把一次明确批准变成有 Session、Scope 与 TTL 边界的短期授权。**
 
 ---
 
-## 两种工作模式
+## 通用短期授权
 
-### 1. Universal Mode — 已有插件零改造获得短期授权
+### Universal Mode — 已有插件零改造获得短期授权
 
 Guard 工作在 DSH 原生工具管线的**四个** hook 上（`tools/pre-execute` / `tools/execute` / `approval/request` / `tools/result`），原始语义保持不变：
 
@@ -89,55 +87,15 @@ Guard 工作在 DSH 原生工具管线的**四个** hook 上（`tools/pre-execut
   <img src="assets/universal-lease-cn.svg" alt="Universal Mode Lease Flow" width="100%" />
 </p>
 
-### 2. Managed Mode — 高权限操作通过 Broker 执行
-
-对于按 Guard SDK 编写的 Managed Extension，扩展注册的不再只是一个 Tool，而是一条明确的语义能力：
-
-```text
-toolName + provider + action + resource(args) + ttl
-```
-
-执行时，扩展向 `ctx.capabilities.execute()` 提交一个 `BrokerOperation`。Guard 会：
-
-1. 从可信 Tool Runtime 的 `run.name / run.arguments / run.agent.id` 重新计算期望能力；
-2. 比较 `provider / action / resource` 是否与注册定义完全一致；
-3. 校验对应 Managed Lease 是否有效；
-4. 交给受信任 Broker；
-5. Broker 检查 Provider Action Allowlist；
-6. **每次 Operation 重新**通过 `ctx.credentials.resolve(ref)` 解析 Credential；
-7. Provider 执行受控 API 请求并返回白名单结果。
-
-<p align="center">
-  <img src="assets/managed-broker-cn.svg" alt="Managed Capability Broker Flow" width="100%" />
-</p>
-
-这里的关键原则是：
-
-> **Extension 传递 Operation，Broker 持有 Authority；Secret 不需要成为 Extension 的长期状态。**
-
----
-
 ## 整体架构
 
-<p align="center">
-  <img src="assets/architecture-cn.svg" alt="DSH Capability Guard Architecture" width="100%" />
-</p>
+Guard 接在 DSH 原生工具与审批管线上，保持原有审批与沙箱职责。
 
-当前核心组件：
-
-| 组件 | 职责 |
-|---|---|
-| `UniversalGate` | 四个 hook 横切 DSH Tool Pipeline：只增强下游 `ask`、识别沙箱升级、签发与复用 Lease、回收授权 |
-| `SandboxGrantManager` | 会话沙箱模式的有界授权：提升、TTL 回滚、用户改动冲突检测 |
-| `PolicyResolver` | 解析全局和 Tool 级 TTL / Scope 策略，非法策略 Fail Closed |
-| `ScopeResolver` | 生成 `exact-arguments` / `fields` / `tool` / `sandbox-escalation` Scope |
-| `LeaseManager` | `issue` / `validate` / `findMatching` / `isLive` / `revoke` / `revokeSession` |
-| `CapabilityService` | 暴露 `ctx.capabilities`，管理 Managed Capability，并在执行前做双重校验 |
-| `CredentialBroker` | Provider 查找、Action Allowlist、per-operation Credential Resolution、超时和错误脱敏 |
-| `ProviderRegistry` | 管理可信 Provider Adapter；第三方 Extension 不直接注册 Secret-capable Provider |
-| `GitHubProvider` | 当前示例 Provider，支持 `issues.read` / `issues.create` |
-| `AuditService` | 内存 Ring Buffer，记录不含 Secret / 原始参数的安全事件（含模式提升与回滚） |
-| `GovernanceConsole` | 只读聚合 Plugins / Tools / Capabilities / Leases / Activity / Audit |
+- UniversalGate：四个 hook，关联 callId、观察审批、签发与复用 Lease。
+- ScopeResolver / PolicyResolver：确定性范围解析与 TTL 配置。
+- LeaseManager / MemoryLeaseStore：Session 绑定、有效期与撤销。
+- SandboxGrantManager：会话沙箱模式提升、失效回滚与用户改动冲突检测。
+- AuditService / GovernanceConsole：脱敏审计、授权剩余时间与运行期策略。
 
 ### 与 DSH 原生机制的边界
 
@@ -145,11 +103,11 @@ DSH Capsule **不是第二套 Harness**。它有意复用 DSH 已有机制：
 
 - Approval 仍由 DSH 原生 `approval/request` Answerer 决定（Guard 只观察结果，**从不合成**）；
 - Tool 最终是否允许执行仍受 DSH 其他 Gate / Guard 约束；
-- Credential 仍来自 DSH Credential Service；
+- 凭证管理仍由 DSH 原生服务或相关工具负责，Guard 不解析或注入凭证；
 - 进程 / 文件 / 网络隔离仍由 DSH Sandbox 或外部安全机制负责；
 - 沙箱档位本身仍由 DSH 的会话状态承载，Guard 只是**给它的变更加上时间边界与回滚**。
 
-Guard 只新增一件事：**把一次明确的授权变成受 Scope、Session 与 TTL 约束的短期 Capability，并在 Managed Mode 中把 Credential 解析集中到 Broker。**
+Guard 只新增一件事：**把一次明确的授权变成受 Scope、Session 与 TTL 约束的短期 Capability。**
 
 ---
 
@@ -161,24 +119,7 @@ Guard 只新增一件事：**把一次明确的授权变成受 Scope、Session �
 Session × Tool × Scope × TTL
 ```
 
-Managed Capability 的 Scope 进一步表达为：
-
-```text
-Provider × Resource × Action
-```
-
-例如：
-
-```text
-session:   agent/session-42
-tool:      guard_github_read_issue
-provider:  github
-resource:  repo:acme/platform
-action:    issues.read
-ttl:       60s
-```
-
-这表示：**这个 Session 在 Lease 有效期内，可以通过指定 Tool 对 `repo:acme/platform` 执行 `issues.read`，而不是“获得 GitHub 权限”。**
+默认 Scope 按工具名与 canonical JSON 参数生成 SHA-256；沙箱升级按工具名与目标模式生成 Scope。
 
 ### Lease 生命周期
 
@@ -202,10 +143,6 @@ ASK
 ---
 
 ## Scope：决定“授权可以复用到哪里”
-
-<p align="center">
-  <img src="assets/scope-model-cn.svg" alt="Capability Scope Model" width="100%" />
-</p>
 
 ### `exact-arguments` — 默认
 
@@ -246,43 +183,6 @@ SHA-256(toolName + 目标沙箱模式)
 ```
 
 授权真正生效依赖宿主服务（`ctx.sessionProjections` + `session.append("sandbox/mode", …)`）；服务缺失时该链路自动降级为"不提升"，即回到 DSH 原生逐次审批，**不会越权**。
-
-### `managed` — 业务语义 Scope
-
-Managed Extension 不依赖参数字符串猜测，而是由扩展确定性声明：
-
-```text
-provider + resource(args) + action
-```
-
-Guard 将其哈希为 Scope Key，并在实际执行前再次从 `run.arguments` 重算 resource，阻止 Extension 提交与注册能力不一致的 Operation。
-
----
-
-## Credential Broker 为什么仍然重要？
-
-即使当前版本不再提供 Docker 隔离 Runtime，Broker 依然有独立价值：**减少长期 Credential 的分发面，并把高权限 API 调用集中到可审核的可信路径。**
-
-当前 Broker 具备以下约束：
-
-- Provider 必须存在于 `ProviderRegistry`；
-- Action 必须在 Provider 的 `allowedActions` 中；
-- Credential **不跨 Operation 缓存**；
-- Provider 请求可配置超时，默认 `15s`；
-- Provider 错误从 Broker 出口统一包装，Credential 原文会被替换为 `***`；
-- Provider Result 由 Adapter 做字段白名单提取；
-- Extension SDK 不包含 Credential API。
-
-当前内置 GitHub Provider 只允许：
-
-```text
-issues.read
-issues.create
-```
-
-目标仓库必须来自已经通过 Lease 校验的 `repo:owner/repo` Resource，而不是任意 URL。
-
----
 
 ## Governance Console
 
@@ -385,8 +285,6 @@ Workspace：
 
 ```text
 @dsh-capsule/adapter
-@dsh-capsule/extension-sdk
-@dsh-capsule/github-demo
 ```
 
 ### 接入 DSH profile
@@ -485,79 +383,21 @@ dsh web
 
 ---
 
-## 开发 Managed Extension
-
-`@dsh-capsule/extension-sdk` 只提供类型和轻量 helper，不复制 Lease、Broker 或 Credential 逻辑。
-
-### 1. 注册 Capability
-
-```ts
-import { defineCapability } from "@dsh-capsule/extension-sdk";
-
-function repoResource(args: unknown): string {
-  const repo = (args as { repo?: unknown })?.repo;
-  if (typeof repo !== "string") throw new Error("repo is required");
-  return `repo:${repo}`;
-}
-
-const readIssue = defineCapability({
-  toolName: "guard_github_read_issue",
-  provider: "github",
-  action: "issues.read",
-  resource: repoResource,
-  ttlSeconds: 60,
-});
-
-const disposeCapability = ctx.capabilities.register(readIssue);
-```
-
-### 2. Tool 执行时提交 Operation
-
-```ts
-const args = run.arguments as { repo: string; issue_number: number };
-
-return await ctx.capabilities.execute(run, {
-  provider: "github",
-  resource: repoResource(args),
-  action: "issues.read",
-  input: { issue_number: args.issue_number },
-});
-```
-
-这里的 `resource` 不是“Extension 说了算”。`CapabilityService` 会再次调用注册时的 `resource(args)`，任何 Provider / Action / Resource 不一致都会抛出 `CAPABILITY_MISMATCH`。
-
-完整示例见：
-
-```text
-extensions/github-demo/
-```
-
----
-
 ## Fail-Closed 错误模型
 
 关键安全失败使用结构化错误码，而不是静默降级：
 
 ```text
-LEASE_REQUIRED
 LEASE_REVOKED
 LEASE_EXPIRED
 LEASE_TTL_INVALID
 LEASE_SCOPE_INVALID
 LEASE_POLICY_INVALID
-CAPABILITY_DENIED
-CAPABILITY_MISMATCH
-CAPABILITY_NOT_REGISTERED
-PROVIDER_NOT_FOUND
-ACTION_NOT_ALLOWED
-CREDENTIAL_NOT_CONFIGURED
-PROVIDER_TIMEOUT
-PROVIDER_ERROR
 ```
 
 核心原则：
 
-> **无法证明当前 Operation 被授权，就不执行。**
+> **无法校验身份、Scope 或 TTL 时，不签发或复用 Lease，保留原生审批语义。**
 
 沙箱升级链路同样遵循这一原则，且可审计的治理事件是完整的（放宽与收回都有记录）：
 
@@ -570,10 +410,6 @@ SANDBOX_MODE_SKIPPED_USER_OVERRIDE   检测到用户已手动改动模式，跳�
 ---
 
 ## 安全边界与非目标
-
-<p align="center">
-  <img src="assets/security-boundary-cn.svg" alt="Security Boundary" width="100%" />
-</p>
 
 这是当前项目最重要的边界说明：
 
@@ -590,33 +426,9 @@ SANDBOX_MODE_SKIPPED_USER_OVERRIDE   检测到用户已手动改动模式，跳�
 
 - 不能保证任意第三方插件看不到 Credential；
 - 不能阻止插件自己发网络请求；
-- 不能把任意第三方代码强制路由到 Broker；
 - 不提供进程、容器、VM 或 microVM 级恶意代码隔离；
 - **不能阻止其他插件认领 `approval/request`**：这是 DSH 的开放瀑布事件，"谁认领谁说了算"。任何插件都可以零交互返回 `allowed-once`，也可以抢先认领从而遮蔽 Guard 的观察位置。这是 DSH 事件模型的固有性质，不属于本插件能防御的范围；
 - **不能阻止其他插件直接改写会话权限状态**：`setSandboxMode(session, mode)`、`ctx.permissionPresets.set(...)`、`ctx.approval.setPolicy(...)` 在 DSH 中都是公开 API，Guard 只是选择"只用其中最小的一档并加上边界"。
-
-### Managed Mode 额外提供什么
-
-- Guard SDK 的 Managed Extension 不直接依赖 Credential API；
-- Broker 集中执行受控 Provider Operation；
-- Provider / Resource / Action 双重校验；
-- Provider Action Allowlist；
-- per-operation Credential Resolution；
-- Provider Error Secret Redaction。
-
-### ⚠️ 关于 Managed Mode 边界的如实说明（请先读这一段）
-
-上面那些约束**由 SDK 约定与代码评审保证，不是运行时强制**。
-
-同进程的任何一个插件都可以绕开 Broker 自己去读 `process.env`、自己 `fetch`、自己调用上面那些权限改写 API。因此：
-
-- Managed Mode 的真实价值是**防止误用与集中审计**——让凭证只在一个可信路径里被解析、让外部调用留下统一记录、让凭证不会因为一个手滑的 `console.log` 泄漏；
-- 它**不是**"第三方插件拿不到凭证"的保证，也不是恶意代码隔离；
-- 需要不可信代码隔离时，应组合 DSH 原生 Sandbox、容器或独立进程等外部机制。运行时的强制边界是 **DSH 进程本身**，不是本插件。
-
-把这条写清楚，是因为把"架构约定"当成"安全边界"来宣传，是这类项目最常见也最危险的错误。
-
----
 
 ## 当前状态
 
@@ -629,17 +441,11 @@ SANDBOX_MODE_SKIPPED_USER_OVERRIDE   检测到用户已手动改动模式，跳�
 | 权限生命周期端到端集成测试（ask→签发→复用→过期/撤销） | ✅ 已实现（`integration/permission-lifecycle.test.ts`） |
 | DSH 行为基线核实（逐行核对已安装版本源码） | ✅ 已完成（`docs/集成基线-真实DSH行为.md`） |
 | 治理台：授权剩余时间 / 审计 / 范围挡位 | ✅ 已实现（Web GUI 面板 + 独立页面 + `/guard/` 同源路由） |
-| Managed Capability Service | ✅ 已实现（权限代理链路按项目决策暂不实跑） |
-| Credential Broker | ✅ 已实现（同上） |
-| GitHub `issues.read` / `issues.create` Provider | ✅ 已实现 |
 | Secret-safe Audit | ✅ 已实现 |
-| TypeScript Extension SDK | ✅ 已实现 |
-| GitHub Managed Extension Demo | ✅ 已实现 |
 | Ubuntu / Windows / macOS CI workflow | ✅ 已配置 |
 | 在真实 profile 中安装并实跑（hook 挂载 + 治理台 + 面板注册） | ✅ 已完成（本机 desktop profile） |
 | 可直接安装的公开 DSH Release Package（`dsh.bundle.patch`） | ✅ 已具备（`dsh.bundle.patch` + `dsh.client`） |
 | Durable Lease Store | 🗺️ Roadmap |
-| 更多 Trusted Providers | 🗺️ Roadmap |
 
 DeepSeek Harness 本身也处于 Developer Preview 并快速迭代，因此正式接入时应始终以当前安装版本的 TypeScript 类型为准，而不是把事件签名硬编码为长期兼容承诺。**升级 DSH 后请重跑 `docs/集成基线-真实DSH行为.md` 第 10 节的检查清单。**
 
@@ -648,40 +454,17 @@ DeepSeek Harness 本身也处于 Developer Preview 并快速迭代，因此正�
 ## 仓库结构
 
 ```text
-.
-├── adapter/
-│   ├── client.js                    # DSH 客户端半边：治理台面板（main + sidebar.panellist）
-│   ├── cordis.patch.yml             # bundle patch：插入 capability-guard 行（含默认规则）
-│   └── src/
-│       ├── index.ts                 # Guard 插件装配入口 + buildSandboxContext 宿主适配器
-│       ├── capability/
-│       │   ├── universal-gate.ts    # 四个 hook：pre-execute / execute / approval / result
-│       │   ├── escalation.ts        # 沙箱升级的确定性识别与语义 Scope
-│       │   ├── sandbox-grant.ts     # 会话沙箱模式的有界授权（提升 / 回滚 / 冲突检测）
-│       │   ├── scope-modes.ts       # 范围挡位的唯一事实来源（枚举 + 文案 + 可默认白名单）
-│       │   ├── policy.ts            # TTL / Scope Policy（支持运行期实时读取配置）
-│       │   ├── scope-resolver.ts    # Universal Scope（含 sandbox-escalation）
-│       │   ├── lease-manager.ts     # Lease 生命周期
-│       │   ├── lease-store.ts       # MemoryLeaseStore
-│       │   └── pending.ts           # callId 并发隔离
-│       ├── integration/
-│       │   ├── cordis-pipeline.test.ts        # 真 cordis：hook 接线与瀑布认领语义
-│       │   └── permission-lifecycle.test.ts   # 真 cordis：完整权限生命周期端到端
-│       ├── service/
-│       │   └── capability-service.ts
-│       ├── broker/
-│       │   ├── broker.ts
-│       │   ├── registry.ts
-│       │   └── providers/github.ts
-│       ├── audit/
-│       └── console/
-│           ├── console-service.ts   # 治理聚合（Plugins/Tools/Capabilities/Leases/Activity）
-│           ├── policy.ts            # 运行期策略（挡位/TTL）与 Fail Closed 校验
-│           ├── http-server.ts       # 独立端口 + /guard 同源路由 + 写接口安全闸门
-│           └── console-ui.ts        # 共享前端（面板与独立页面同一份）
-├── sdk/typescript/                  # @dsh-capsule/extension-sdk
-├── extensions/github-demo/          # Managed Extension 示例
-└── .github/workflows/ci.yml         # 三平台 build + test
+adapter/
+├── client.js                 # DSH 治理台面板与侧栏入口
+├── cordis.patch.yml          # 插件配置与默认沙箱升级规则
+└── src/
+    ├── index.ts              # 插件装配与宿主适配
+    ├── capability/           # 四个 hook、Scope、Lease、沙箱提升与回滚
+    ├── integration/          # 真 cordis 接线与权限生命周期测试
+    ├── audit/                # 脱敏审计
+    └── console/              # 共享治理视图、接口与运行期策略
+scripts/smoke-console.mjs     # 治理台冒烟脚本
+.github/workflows/ci.yml      # Windows / macOS / Linux 构建与测试
 ```
 
 ---
@@ -692,15 +475,13 @@ DeepSeek Harness 本身也处于 Developer Preview 并快速迭代，因此正�
 
 **Short-lived authority.** 权限必须有明确 Session、Scope 与 TTL，而不是永久授权。
 
-**Capabilities over credentials.** Managed Extension 请求业务操作，不直接持有长期 Secret。
+**Deterministic scope.** 安全边界来自确定性规则，不让 LLM 猜授权范围。
 
-**Deterministic scope.** 安全边界来自确定性规则，不让 LLM 猜 Provider / Resource / Action。
-
-**Fail closed.** 身份、Scope、TTL、Provider、Action、Credential 任一无法验证就拒绝执行。
+**Fail closed.** 身份、Scope 或 TTL 无法验证时不签发或复用授权。
 
 **Secret-safe observability.** Audit 与 Console 只保留治理所需的白名单字段。
 
-**Small trusted core.** Provider 属于可信 Guard Core；Extension SDK 保持薄，不复制核心安全逻辑。
+**Small trusted core.** 核心只负责短期授权生命周期，不代管凭证或执行外部业务。
 
 ---
 
@@ -710,13 +491,9 @@ DeepSeek Harness 本身也处于 Developer Preview 并快速迭代，因此正�
 
 RBAC 更适合回答“这个角色通常拥有什么权限”。Capability Lease 回答的是：**这个 Session 在当前 TTL 内，是否允许这个 Tool 对这个 Scope 执行当前操作。** 它更适合 Agent 的动态、短时工作流。
 
-### 没有 Docker 以后，Broker 还有意义吗？
-
-有，但要如实定位：Broker 的核心价值是**防误用 + 可审计**——减少长期 Secret 的分发面、把高权限 API 调用收敛到一条可信路径、统一 Provider Policy 与错误脱敏。**它不防恶意**：同进程插件完全可以绕开它。没有 OS 隔离时它是架构约定，不应宣传成恶意代码强隔离（详见[安全边界](#-关于-managed-mode-边界的如实说明请先读这一段)）。
-
 ### Universal Mode 能保护所有第三方插件吗？
 
-它可以零改造地为**原本会触发 DSH `ask`** 的 Tool，以及**沙箱升级**，增加短期 Lease；但不能强制第三方插件使用 Broker，不能阻止其他插件认领 `approval/request`，也不能阻止插件访问其进程本身已经拥有的资源。
+它可以零改造地为**原本会触发 DSH `ask`** 的 Tool，以及**沙箱升级**，增加短期 Lease；但不能阻止其他插件认领 `approval/request`，也不能阻止插件访问其进程本身已经拥有的资源。
 
 ### 为什么默认 Scope 是 `exact-arguments`？
 
@@ -740,14 +517,7 @@ RBAC 更适合回答“这个角色通常拥有什么权限”。Capability Leas
 
 ## Roadmap
 
-近期优先级：
-
-1. **Managed Mode / 权限代理端到端**：Broker 与 Provider 已实现，但按项目决策暂不接入实跑；
-2. 将 `MemoryLeaseStore` 抽象落到可选持久化实现，并让 Audit 可导出（合规场景依赖它）；
-3. 增加更多窄 Action Schema 的 Trusted Provider；
-4. 为宽 Scope（`tool`）增加次数配额（`maxUses`），只有 TTL 不够；
-5. 强化 Console 的只读治理与可观测性，但不把它变成权限修改入口；
-6. 发布稳定的 Extension SDK 与最小 Managed Extension 模板。
+近期聚焦授权范围与状态展示、生命周期异常恢复、审计与 DSH 版本兼容性。新增撤销界面、续期或更细范围前，需先更新规格并验证宿主执行边界；当前不承诺这些功能已经实现。
 
 ---
 
@@ -757,12 +527,11 @@ RBAC 更适合回答“这个角色通常拥有什么权限”。Capability Leas
 
 - Lease / Scope / Session 隔离测试；
 - 并发 `callId`、取消与生命周期 Race 测试；
-- Credential 泄漏回归测试；
-- 窄 Action Schema 的 Trusted Provider；
+- 审计脱敏回归测试；
 - DSH 版本兼容性验证；
 - 文档、Demo 与可复现集成样例。
 
-如果一个改动会扩大可信计算面、让 Extension 直接接触 Secret，或试图绕开 DSH 原生 Approval / Sandbox，请先讨论设计再实现。
+如果一个改动会扩大可信计算面、引入凭证执行链路，或试图绕开 DSH 原生 Approval / Sandbox，请先讨论设计再实现。
 
 ---
 
@@ -772,5 +541,5 @@ MIT License. See [`LICENSE`](LICENSE).
 
 <p align="center">
   <b>DSH Capsule</b><br/>
-  <sub>Short-lived capabilities · Brokered credentials · Fail-closed by design</sub>
+  <sub>Short-lived authorization · Sandbox rollback · Fail-closed by design</sub>
 </p>

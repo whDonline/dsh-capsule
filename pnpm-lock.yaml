@@ -23,40 +23,6 @@ importers:
         specifier: ^2.1
         version: 2.1.9(@types/node@22.20.1)
 
-  extensions/github-demo:
-    dependencies:
-      '@dsh-capsule/extension-sdk':
-        specifier: workspace:*
-        version: link:../../sdk/typescript
-    devDependencies:
-      '@deepseek-ai/cordis':
-        specifier: 4.0.2
-        version: 4.0.2
-      '@dsh-capsule/adapter':
-        specifier: workspace:*
-        version: link:../../adapter
-      '@types/node':
-        specifier: ^22
-        version: 22.20.1
-      typescript:
-        specifier: ^5.6
-        version: 5.9.3
-      vitest:
-        specifier: ^2.1
-        version: 2.1.9(@types/node@22.20.1)
-
-  sdk/typescript:
-    devDependencies:
-      '@types/node':
-        specifier: ^22
-        version: 22.20.1
-      typescript:
-        specifier: ^5.6
-        version: 5.9.3
-      vitest:
-        specifier: ^2.1
-        version: 2.1.9(@types/node@22.20.1)
-
 packages:
 
   '@deepseek-ai/cordis@4.0.2':

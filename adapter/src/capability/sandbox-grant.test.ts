@@ -20,7 +20,7 @@ function makeSandboxHost(initial: SandboxMode = "workspace-write") {
   };
   return { host, writes, modes, modeOf: (sessionId: string) => modes.get(sessionId) };
 }
-const scope: CapabilityScope = { kind: "managed", key: "k", display: "d" };
+const scope: CapabilityScope = { kind: "sandbox-escalation", key: "k", display: "d" };
 async function seedLease(leases: LeaseManager, sessionId: string, ttlSeconds = 60) {
   return await leases.issue({ sessionId, toolName: "pwsh", scope, ttlSeconds, kind: "sandbox-mode", sourceCallId: "c1" });
 }
