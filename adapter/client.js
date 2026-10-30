@@ -79,11 +79,6 @@ window.__ModuleLoader__.load({
       });
     }
 
-    /** 档位的中文说法——界面里绝不出现 read-only / danger-full-access 这类内部标识。 */
-    const MODE_TEXT = { 'read-only': '只读', 'workspace-write': '工作区可写', 'danger-full-access': '完全访问' };
-    function modeText(mode) {
-      return MODE_TEXT[mode] || '未知';
-    }
     /** 作用：把剩余毫秒说成人话（4 分 12 秒 / 1 小时 5 分 / 8 秒）。 */
     function fmtCn(ms) {
       if (!(ms > 0)) return '0 秒';
@@ -103,22 +98,13 @@ window.__ModuleLoader__.load({
       };
       return pad(date.getHours()) + ':' + pad(date.getMinutes()) + ':' + pad(date.getSeconds());
     }
-    /** 审计决策的中文标签（与治理台保持一致）。 */
-    const DECISION_LABELS = {
-      ASK: '已询问',
-      LEASE_ISSUED: '已签发临时授权',
-      LEASE_REUSED: '复用临时授权',
-      LEASE_REVOKED: '已提前收回',
-      WINDOW_OPENED: '开启免打扰窗口',
-      APPROVAL_REJECTED: '你拒绝了',
-      PASSTHROUGH_ALLOW: '原生放行',
-      PASSTHROUGH_DENY: '原生拒绝',
-      TOOL_SUCCESS: '执行成功',
-      TOOL_ERROR: '执行失败',
-      SANDBOX_MODE_RAISED: '权限级别提升',
-      SANDBOX_MODE_RESTORED: '权限级别恢复',
-      SANDBOX_MODE_SKIPPED_USER_OVERRIDE: '跳过恢复（你手动改过）',
-    };
+    /** 作用：取档位中文名——宿主已在快照里下发 currentModeText / baselineModeText，
+     * 前端刻意不再维护「只读 / 工作区可写 / 完全访问」的映射表；缺失时退回机器值。 */
+    function sandboxModeName(sandbox, field) {
+      if (!sandbox) return '未知';
+      if (field === 'baseline') return sandbox.baselineModeText || sandbox.baselineMode || '未知';
+      return sandbox.currentModeText || sandbox.currentMode || '未知';
+    }
 
     /** 作用：注入提示条样式（只注入一次；带令牌兜底，脱离主题也能读）。 */
     function injectDockStyles(doc) {
@@ -165,7 +151,7 @@ window.__ModuleLoader__.load({
         return {
           tone: 'warn',
           dot: '⚠',
-          title: '临时授权已经到期，但权限还停在「' + modeText(sandbox.currentMode) + '」，没有收回。',
+          title: '临时授权已经到期，但权限还停在「' + sandboxModeName(sandbox) + '」，没有收回。',
           sub: '点「现在收回」可以立刻恢复；不点的话，下次执行命令时也会自动收回。',
           action: { kind: 'stop', label: '现在收回', mode: 'restore-sandbox' },
         };
@@ -197,7 +183,7 @@ window.__ModuleLoader__.load({
         return {
           tone: 'done',
           dot: '✓',
-          title: '已收回：本会话的临时授权结束了，权限已回到「' + modeText(sandbox.currentMode) + '」。',
+          title: '已收回：本会话的临时授权结束了，权限已回到「' + sandboxModeName(sandbox) + '」。',
           sub: '之后的同类操作会重新征求你的同意。',
         };
       }
@@ -209,7 +195,7 @@ window.__ModuleLoader__.load({
         return {
           tone: 'done',
           dot: '·',
-          title: '你手动把权限改成了「' + modeText(sandbox.currentMode) + '」，临时授权不会覆盖你的设置。',
+          title: '你手动把权限改成了「' + sandboxModeName(sandbox) + '」，临时授权不会覆盖你的设置。',
           sub: '之后的同类操作会重新征求你的同意。',
         };
       }
@@ -408,11 +394,11 @@ window.__ModuleLoader__.load({
     }
     function sandboxPill(sandbox) {
       const state = sandbox ? sandbox.state : 'not-involved';
-      if (state === 'raised') return pill('已提升：' + modeText(sandbox.currentMode), 'ok');
+      if (state === 'raised') return pill('已提升：' + sandboxModeName(sandbox), 'ok');
       if (state === 'unchanged') return pill('未改动（本来就够宽）', 'idle');
-      if (state === 'user-override') return pill('由你设定：' + modeText(sandbox.currentMode), 'idle');
-      if (state === 'pending-restore') return pill('待回滚：仍为 ' + modeText(sandbox.currentMode), 'warn');
-      if (state === 'restored') return pill('已恢复：' + modeText(sandbox.currentMode), 'idle');
+      if (state === 'user-override') return pill('由你设定：' + sandboxModeName(sandbox), 'idle');
+      if (state === 'pending-restore') return pill('待回滚：仍为 ' + sandboxModeName(sandbox), 'warn');
+      if (state === 'restored') return pill('已恢复：' + sandboxModeName(sandbox), 'idle');
       if (state === 'unknown') return pill('无法确认', 'idle');
       return pill('不涉及', 'idle');
     }
@@ -420,16 +406,16 @@ window.__ModuleLoader__.load({
       const sandbox = view.sandbox || { state: 'not-involved' };
       const auth = view.auth || { state: 'none', activeCount: 0 };
       if (sandbox.state === 'pending-restore') {
-        return '授权已经失效，但权限还停在「' + modeText(sandbox.currentMode) + '」。点「立即回滚档位」可以马上恢复；否则会在下次执行命令时自动收回。';
+        return '授权已经失效，但权限还停在「' + sandboxModeName(sandbox) + '」。点「立即回滚档位」可以马上恢复；否则会在下次执行命令时自动收回。';
       }
       if (auth.activeCount > 0) {
         if (sandbox.state === 'raised' || sandbox.state === 'unchanged') {
-          return '到期后会自动收回，权限回到「' + modeText(sandbox.baselineMode) + '」，之后的同类操作会重新征求你的同意。';
+          return '到期后会自动收回，权限回到「' + sandboxModeName(sandbox, 'baseline') + '」，之后的同类操作会重新征求你的同意。';
         }
         if (sandbox.state === 'user-override') return '到期后不会改动你自己设置的权限；之后的同类操作会重新征求你的同意。';
         return '到期后同类操作会重新征求你的同意。';
       }
-      if (sandbox.state === 'restored') return '授权已结束，权限已恢复到「' + modeText(sandbox.currentMode) + '」。';
+      if (sandbox.state === 'restored') return '授权已结束，权限已恢复到「' + sandboxModeName(sandbox) + '」。';
       if (sandbox.state === 'user-override') return '你自己设置的权限不会被改动。';
       if (sandbox.state === 'unknown') return '当前无法读取权限级别；授权本身已经结束。';
       return '本会话当前没有临时授权；工具调用会照常征求你的同意。';
@@ -573,7 +559,7 @@ window.__ModuleLoader__.load({
           { style: Object.assign({}, S.row, { borderBottom: 'none' }) },
           h('div', { style: S.key }, '权限级别'),
           h('div', null, sandboxPill(sandbox)),
-          h('div', { style: S.main }, sandbox.baselineMode ? '你的默认是「' + modeText(sandbox.baselineMode) + '」' : ''),
+          h('div', { style: S.main }, sandbox.baselineMode ? '你的默认是「' + sandboxModeName(sandbox, 'baseline') + '」' : ''),
           h('div', { style: S.side }, sandbox.checkedAt ? '核对时间 ' + fmtTime(sandbox.checkedAt) : ''),
         ),
         // 价值指标：让「这个插件到底帮我省了什么」一眼可见（少点的批准次数是最硬的那个数）
@@ -663,6 +649,17 @@ window.__ModuleLoader__.load({
           return rule.match;
         });
       const maxTtl = policy && Number.isInteger(policy.maxTtlSeconds) ? policy.maxTtlSeconds : 1800;
+      // 窗口档位选项来自宿主下发的 catalog.sandboxModes（read-only 不作为放宽目标）
+      const catalogModes = config && config.catalog && Array.isArray(config.catalog.sandboxModes) ? config.catalog.sandboxModes : [];
+      const windowModes = catalogModes.filter(function (item) {
+        return item.id !== 'read-only';
+      });
+      const windowModeLabel = function (id) {
+        for (const item of windowModes) {
+          if (item.id === id) return item.label;
+        }
+        return id;
+      };
       const durationOptions = [15, 30, 60].filter(function (m) {
         return m * 60 <= maxTtl;
       });
@@ -671,7 +668,7 @@ window.__ModuleLoader__.load({
       const openWindowNow = async function () {
         if (winBusy || !host || !toolValue) return;
         const text =
-          '接下来 ' + minutesValue + ' 分钟，本会话的 ' + toolValue + ' 可以升到「' + modeText(winMode) + '」，期间不再询问你。到期会自动收回，也可以随时提前收回。确定开启？';
+          '接下来 ' + minutesValue + ' 分钟，本会话的 ' + toolValue + ' 可以升到「' + windowModeLabel(winMode) + '」，期间不再询问你。到期会自动收回，也可以随时提前收回。确定开启？';
         if (typeof window !== 'undefined' && typeof window.confirm === 'function' && !window.confirm(text)) return;
         setWinBusy(true);
         setWinMsg('');
@@ -712,8 +709,9 @@ window.__ModuleLoader__.load({
               h(
                 'select',
                 { value: winMode, onChange: function (e) { setWinMode(e.target.value); }, style: S.select },
-                h('option', { value: 'danger-full-access' }, '升到「完全访问」'),
-                h('option', { value: 'workspace-write' }, '升到「工作区可写」'),
+                windowModes.map(function (item) {
+                  return h('option', { key: item.id, value: item.id }, '升到「' + item.label + '」');
+                }),
               ),
               h(
                 'select',
@@ -754,7 +752,7 @@ window.__ModuleLoader__.load({
           const state = record.outcome === 'active' ? '生效中' : record.outcome === 'revoked' ? '已收回' : '已到期';
           lines.push('- ' + fmtTime(record.grantedAt) + ' ' + record.capability + '（' + record.ttlSeconds + ' 秒，' + state + '）');
           if (record.uses > 0) lines.push('  - 被复用 ' + record.uses + ' 次，最后一次 ' + (record.lastUsedAt ? fmtTime(record.lastUsedAt) : '-'));
-          if (record.sandbox && record.sandbox.raisedTo) lines.push('  - 权限级别：' + modeText(record.sandbox.raisedTo) + (record.sandbox.restoredAt ? ' → ' + fmtTime(record.sandbox.restoredAt) + ' 已恢复' : record.sandbox.skipped ? ' → 你手动改过，未回滚' : ''));
+          if (record.sandbox && record.sandbox.raisedTo) lines.push('  - 权限级别：' + record.sandbox.raisedToText || record.sandbox.raisedTo + (record.sandbox.restoredAt ? ' → ' + fmtTime(record.sandbox.restoredAt) + ' 已恢复' : record.sandbox.skipped ? ' → 你手动改过，未回滚' : ''));
         }
         copyText(lines.join('\n'), ' Markdown');
       };
@@ -785,9 +783,9 @@ window.__ModuleLoader__.load({
                   : fmtTime(record.endedAt) + (record.outcome === 'revoked' ? '（' + (record.revokedReason || '提前收回') + '）' : '（到期）');
               const sandboxLine =
                 record.sandbox && record.sandbox.raisedTo
-                  ? '权限级别：提升到「' + modeText(record.sandbox.raisedTo) + '」' +
+                  ? '权限级别：提升到「' + record.sandbox.raisedToText || record.sandbox.raisedTo + '」' +
                     (record.sandbox.restoredAt
-                      ? ' · ' + fmtTime(record.sandbox.restoredAt) + ' 已恢复到「' + modeText(record.sandbox.restoredTo) + '」'
+                      ? ' · ' + fmtTime(record.sandbox.restoredAt) + ' 已恢复到「' + record.sandbox.restoredToText || record.sandbox.restoredTo + '」'
                       : record.sandbox.skipped
                         ? ' · 你手动改过，Guard 未回滚'
                         : record.outcome === 'active'
@@ -833,7 +831,7 @@ window.__ModuleLoader__.load({
                   'div',
                   { key: event.id, style: S.auditRow },
                   h('span', null, fmtTime(event.timestamp)),
-                  h('span', null, DECISION_LABELS[event.decision] || event.decision),
+                  h('span', null, event.decisionLabel || event.decision),
                   h('span', { style: S.code }, (event.toolName || '') + (event.leaseId ? ' · ' + String(event.leaseId).slice(0, 8) : '')),
                 );
               })

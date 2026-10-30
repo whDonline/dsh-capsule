@@ -1,5 +1,5 @@
 import type { ToolAuditEvent } from "../audit/types.js";
-import type { SandboxMode } from "../capability/escalation.js";
+import { sandboxModeLabel, type SandboxMode } from "../capability/escalation.js";
 import type { CapabilityLease, LeaseKind, ScopeKind } from "../capability/types.js";
 import type { SessionGrantState } from "../capability/sandbox-grant.js";
 // 作用：把「审计事件流」折叠成「授权决策日志」——一条授权 = 一条记录，回答四个问题：
@@ -14,9 +14,12 @@ export interface DecisionSandboxEffect {
   requestedMode?: SandboxMode;
   /** 实际提升到的档位（未提升则缺省） */
   raisedTo?: SandboxMode;
+  /** 提升档位的中文说法（服务端下发，前端不再自己映射） */
+  raisedToText?: string;
   /** 权限级别被收回的时间与落点 */
   restoredAt?: number;
   restoredTo?: SandboxMode;
+  restoredToText?: string;
   /** 权限级别被用户改过，Guard 主动跳过回滚 */
   skipped?: boolean;
 }
@@ -76,20 +79,14 @@ export interface DecisionBuildInput {
 /** 作用：把 Scope 翻译成一句人话——用户不需要知道 exact-arguments / SHA-256 是什么。 */
 export function describeCapability(lease: CapabilityLease, targetMode?: SandboxMode): string {
   if (lease.kind === "sandbox-mode") {
-    return targetMode ? `${lease.toolName} 可以免审批升到「${modeText(targetMode)}」` : `${lease.toolName} 的沙箱升级已获批准`;
+    return targetMode ? `${lease.toolName} 可以免审批升到「${sandboxModeLabel(targetMode)}」` : `${lease.toolName} 的沙箱升级已获批准`;
   }
   if (lease.scope.kind === "exact-arguments") return `${lease.toolName} 可以用与上次完全相同的参数重试，不再询问`;
   if (lease.scope.kind === "fields") return `${lease.toolName} 在相同字段范围内重试，不再询问`;
   if (lease.scope.kind === "tool") return `${lease.toolName} 的任何调用都不再询问（范围最宽）`;
   return `${lease.toolName} 的同类调用不再询问`;
 }
-/** 作用：档位的中文说法——界面里绝不出现 read-only / danger-full-access 这类内部标识。 */
-export function modeText(mode: SandboxMode | undefined): string {
-  if (mode === "read-only") return "只读";
-  if (mode === "workspace-write") return "工作区可写";
-  if (mode === "danger-full-access") return "完全访问";
-  return "未知";
-}
+/** 作用：档位中文名的唯一来源在 `capability/escalation.ts`（`sandboxModeLabel`），本模块不再维护第二份映射。 */
 export function buildDecisions(input: DecisionBuildInput): DecisionRecord[] {
   // 作用：按 leaseId 归并事件，生成「一条授权一份记录」的决策日志。
   // 授予来源：Lease 本身（权威时间与状态）；使用次数与结束方式：审计事件；权限级别效果：沙箱状态投影。
@@ -121,8 +118,10 @@ export function buildDecisions(input: DecisionBuildInput): DecisionRecord[] {
       ? {
           requestedMode: grant.requestedMode,
           raisedTo: grant.raised ? grant.writtenMode : undefined,
+          raisedToText: grant.raised ? sandboxModeLabel(grant.writtenMode) : undefined,
           restoredAt: restored?.timestamp,
           restoredTo: restored ? restoredMode(restored) : undefined,
+          restoredToText: restored ? sandboxModeLabel(restoredMode(restored)) : undefined,
           skipped: skipped || undefined,
         }
       : undefined;

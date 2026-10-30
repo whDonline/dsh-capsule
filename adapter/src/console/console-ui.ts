@@ -18,23 +18,8 @@ export const CONSOLE_CLIENT_JS = String.raw`(function (root, factory) {
   else { root.DshGuardConsole = factory(); }
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
-  var DECISIONS = ["PASSTHROUGH_ALLOW", "PASSTHROUGH_DENY", "ASK", "LEASE_REUSED", "LEASE_ISSUED", "LEASE_REVOKED", "APPROVAL_REJECTED", "TOOL_SUCCESS", "TOOL_ERROR", "SANDBOX_MODE_RAISED", "SANDBOX_MODE_RESTORED", "SANDBOX_MODE_SKIPPED_USER_OVERRIDE"];
-  var DECISION_LABELS = {
-    ASK: "已询问",
-    LEASE_ISSUED: "已签发授权",
-    LEASE_REUSED: "复用授权",
-    LEASE_REVOKED: "已收回授权",
-    APPROVAL_REJECTED: "已拒绝",
-    PASSTHROUGH_ALLOW: "原生放行",
-    PASSTHROUGH_DENY: "原生拒绝",
-    TOOL_SUCCESS: "执行成功",
-    TOOL_ERROR: "执行失败",
-    SANDBOX_MODE_RAISED: "沙箱档位提升",
-    SANDBOX_MODE_RESTORED: "沙箱档位回滚",
-    SANDBOX_MODE_SKIPPED_USER_OVERRIDE: "跳过回滚（用户已改动）"
-  };
-  var STATUS_LABELS = { ACTIVE: "生效中", EXPIRED: "已过期", REVOKED: "已撤销" };
-  var MODE_LABELS = { "read-only": "只读", "workspace-write": "工作区可写", "danger-full-access": "完全访问" };
+  // 决策 id 与中文名、沙箱档位中文名都由宿主下发（/api/config 的 catalog 与 /api/audit 的 decisionLabel），
+  // 前端刻意不再维护任何映射表——唯一来源是 audit/catalog.ts 与 capability/escalation.ts。
   function el(tag, className, text) {
     var node = document.createElement(tag);
     if (className) node.className = className;
@@ -56,7 +41,12 @@ export const CONSOLE_CLIENT_JS = String.raw`(function (root, factory) {
     if (m > 0) return m + "m" + (s < 10 ? "0" : "") + s + "s";
     return s + "s";
   }
-  function modeLabel(mode) { return mode ? (MODE_LABELS[mode] || mode) : "未知"; }
+  function modeLabelOf(sandbox, field) {
+    // 作用：取服务端下发的档位中文名；缺失时退回机器值（绝不自己编造）
+    if (!sandbox) return "未知";
+    if (field === "baseline") return sandbox.baselineModeText || sandbox.baselineMode || "未知";
+    return sandbox.currentModeText || sandbox.currentMode || "未知";
+  }
   function injectStyles(doc) {
     if (doc.getElementById("dsh-guard-console-style")) return;
     var style = doc.createElement("style");
@@ -300,14 +290,10 @@ export const CONSOLE_CLIENT_JS = String.raw`(function (root, factory) {
       var node = el(tag || "input");
       node.name = name;
       if (tag === "select") {
+        // 选项在 renderConfig 里按宿主下发的 catalog.decisions 填充（含中文名），这里只建空壳
         var all = el("option", null, "全部");
         all.value = "";
         node.appendChild(all);
-        DECISIONS.forEach(function (decision) {
-          var option = el("option", null, DECISION_LABELS[decision] ? DECISION_LABELS[decision] + " (" + decision + ")" : decision);
-          option.value = decision;
-          node.appendChild(option);
-        });
       } else {
         node.placeholder = placeholder;
         node.autocomplete = "off";
@@ -514,11 +500,11 @@ export const CONSOLE_CLIENT_JS = String.raw`(function (root, factory) {
     }
     function sandboxText(sandbox) {
       if (!sandbox) return "不涉及沙箱档位";
-      if (sandbox.state === "raised") return "已提升：" + modeLabel(sandbox.currentMode);
-      if (sandbox.state === "unchanged") return "未改动（本来就够宽）：" + modeLabel(sandbox.currentMode);
-      if (sandbox.state === "user-override") return "由你设定：" + modeLabel(sandbox.currentMode);
-      if (sandbox.state === "pending-restore") return "待回滚：仍为 " + modeLabel(sandbox.currentMode);
-      if (sandbox.state === "restored") return "已恢复：" + modeLabel(sandbox.currentMode);
+      if (sandbox.state === "raised") return "已提升：" + modeLabelOf(sandbox);
+      if (sandbox.state === "unchanged") return "未改动（本来就够宽）：" + modeLabelOf(sandbox);
+      if (sandbox.state === "user-override") return "由你设定：" + modeLabelOf(sandbox);
+      if (sandbox.state === "pending-restore") return "待回滚：仍为 " + modeLabelOf(sandbox);
+      if (sandbox.state === "restored") return "已恢复：" + modeLabelOf(sandbox);
       if (sandbox.state === "unknown") return "无法确认";
       return "不涉及沙箱档位";
     }
@@ -542,17 +528,17 @@ export const CONSOLE_CLIENT_JS = String.raw`(function (root, factory) {
       if (!view) return "";
       var sandbox = view.sandbox;
       if (sandbox && sandbox.state === "pending-restore") {
-        return "授权已经失效，但档位还停在 " + modeLabel(sandbox.currentMode) + "；点「立即回滚档位」可以马上收回。";
+        return "授权已经失效，但档位还停在 " + modeLabelOf(sandbox) + "；点「立即回滚档位」可以马上收回。";
       }
       if (view.auth.state === "active" || view.auth.state === "expiring") {
         if (sandbox && (sandbox.state === "raised" || sandbox.state === "unchanged")) {
           var seconds = state.config && state.config.sweep && state.config.sweep.intervalMs > 0 ? Math.round(state.config.sweep.intervalMs / 1000) : 0;
           var tail = seconds > 0 ? "（最多 " + seconds + " 秒内自动回滚）" : "（会在你下次调用工具时回滚）";
-          return "到期后：同类请求会重新询问；沙箱档位会回滚到 " + modeLabel(sandbox.baselineMode) + tail + "。";
+          return "到期后：同类请求会重新询问；沙箱档位会回滚到 " + modeLabelOf(sandbox, "baseline") + tail + "。";
         }
         return "到期后：同类请求会重新询问。";
       }
-      if (sandbox && sandbox.state === "restored") return "授权已失效，档位已恢复到 " + modeLabel(sandbox.currentMode) + "。";
+      if (sandbox && sandbox.state === "restored") return "授权已失效，档位已恢复到 " + modeLabelOf(sandbox) + "。";
       if (view.auth.state === "revoked") return "授权已被收回；同类请求会重新询问。";
       if (view.auth.state === "expired") return "授权已到期；同类请求会重新询问。";
       return "本会话当前没有任何临时授权。";
@@ -595,7 +581,7 @@ export const CONSOLE_CLIENT_JS = String.raw`(function (root, factory) {
       var sandbox = view.sandbox || null;
       sandboxRow.pill.textContent = sandboxText(sandbox);
       sandboxRow.pill.className = sandboxPillClass(sandbox);
-      sandboxRow.main.textContent = sandbox && sandbox.baselineMode ? ("你的默认档位是 " + modeLabel(sandbox.baselineMode)) : "";
+      sandboxRow.main.textContent = sandbox && sandbox.baselineMode ? ("你的默认档位是 " + modeLabelOf(sandbox, "baseline")) : "";
       sandboxRow.side.textContent = sandbox && sandbox.checkedAt ? "核对于 " + new Date(sandbox.checkedAt).toLocaleTimeString() : "";
       var grants = view.auth && view.auth.grants ? view.auth.grants : [];
       if (grants.length === 0) {
@@ -706,7 +692,7 @@ export const CONSOLE_CLIENT_JS = String.raw`(function (root, factory) {
       state.audit.forEach(function (event) {
         var row = el("tr");
         row.appendChild(el("td", null, fmtTime(event.timestamp)));
-        row.appendChild(el("td", null, (DECISION_LABELS[event.decision] || event.decision) + " (" + event.decision + ")"));
+        row.appendChild(el("td", null, (event.decisionLabel || event.decision) + " (" + event.decision + ")"));
         row.appendChild(el("td", null, event.toolName || "-"));
         row.appendChild(el("td", "dgc-code", short(event.sessionId, 12)));
         row.appendChild(el("td", null, short(event.scopeDisplay, 60)));
@@ -731,6 +717,20 @@ export const CONSOLE_CLIENT_JS = String.raw`(function (root, factory) {
       var document_ = state.config;
       var policy = document_ && document_.policy ? document_.policy : null;
       var modes = document_ && document_.modes ? document_.modes : [];
+      var catalog = document_ && document_.catalog ? document_.catalog : {};
+      // 审计过滤下拉的选项来自宿主下发的 catalog.decisions（含中文名），前端不再硬编码
+      var decisions = Array.isArray(catalog.decisions) ? catalog.decisions : [];
+      var previous = auditDecision.value;
+      auditDecision.textContent = "";
+      var allOption = el("option", null, "全部");
+      allOption.value = "";
+      auditDecision.appendChild(allOption);
+      decisions.forEach(function (item) {
+        var option = el("option", null, item.label + " (" + item.id + ")");
+        option.value = item.id;
+        auditDecision.appendChild(option);
+      });
+      auditDecision.value = previous;
       scopeSelect.textContent = "";
       modes.forEach(function (mode) {
         var option = el("option", null, mode.label + (mode.defaultable ? "" : "（不可作为默认值）"));

@@ -156,7 +156,7 @@ describe("治理台共享 UI（真实治理接口 + 最小 DOM）", () => {
       expect(rendered.join("|")).toContain("tool=pwsh 沙箱升级至 danger-full-access");
       expect(rendered.join("|")).toContain("生效中");
       expect(rendered.some((text) => /^\d+m\d+s$|^\d+s$/.test(text))).toBe(true); // 剩余时间倒计时
-      expect(rendered.join("|")).toContain("已签发授权");
+      expect(rendered.join("|")).toContain("已签发临时授权");
       expect(rendered.join("|")).toContain("defaultScope");
       ui.dispose();
       expect(container.children).toHaveLength(0);
@@ -304,7 +304,7 @@ describe("DSH 客户端半边（adapter/client.js）", () => {
     expect(idle?.title).toContain("没有临时放开");
     // ② 生效中：说清「放开了什么 + 还剩多久 + 到期会怎样」
     const active = describe(
-      { sessionId: "s", auth: { state: "active", activeCount: 1, nextExpiresAt: 61_000, grants: [{ capabilityText: "pwsh 可以免审批升到「完全访问」" }] }, sandbox: { state: "raised", currentMode: "danger-full-access" } },
+      { sessionId: "s", auth: { state: "active", activeCount: 1, nextExpiresAt: 61_000, grants: [{ capabilityText: "pwsh 可以免审批升到「完全访问」" }] }, sandbox: { state: "raised", currentMode: "danger-full-access", currentModeText: "完全访问" } },
       1_000,
     );
     expect(active?.tone).toBe("active");
@@ -312,13 +312,13 @@ describe("DSH 客户端半边（adapter/client.js）", () => {
     expect(active?.sub).toContain("还剩 1 分 00 秒");
     expect(active?.action?.mode).toBe("revoke");
     // ③ 授权已到期但权限没收回：必须是醒目告警 + 独立按钮
-    const pending = describe({ sessionId: "s", auth: { state: "expired", activeCount: 0, grants: [] }, sandbox: { state: "pending-restore", currentMode: "danger-full-access" } }, 1_000);
+    const pending = describe({ sessionId: "s", auth: { state: "expired", activeCount: 0, grants: [] }, sandbox: { state: "pending-restore", currentMode: "danger-full-access", currentModeText: "完全访问" } }, 1_000);
     expect(pending?.tone).toBe("warn");
     expect(pending?.title).toContain("没有收回");
     expect(pending?.title).toContain("完全访问");
     expect(pending?.action?.mode).toBe("restore-sandbox");
     // ④ 已收回：给一句确认，之后由调用方按时间自然隐藏
-    const restored = describe({ sessionId: "s", auth: { state: "expired", activeCount: 0, grants: [] }, sandbox: { state: "restored", currentMode: "workspace-write", lastOutcomeAt: 99_500 } }, 100_000);
+    const restored = describe({ sessionId: "s", auth: { state: "expired", activeCount: 0, grants: [] }, sandbox: { state: "restored", currentMode: "workspace-write", currentModeText: "工作区可写", lastOutcomeAt: 99_500 } }, 100_000);
     expect(restored?.tone).toBe("done");
     expect(restored?.title).toContain("已收回");
     // ⑤ 连会话数据都没有（接口不可达）：不占位

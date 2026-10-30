@@ -175,6 +175,13 @@ assets/                      # README 用示意图（结构示意，非截图）
     与会话内 tab 共用；`PASSTHROUGH_*` / `TOOL_*` 属遥测，默认折叠在「原始事件（排障用）」里，
     不得再当作"审计"摆给用户看。会话统计中的 `savedApprovals` = 该会话 `LEASE_REUSED` 次数，
     它是**价值指标**（用户少点了几次批准），不是安全指标，不得用于任何权限判定。
+13. **文案只有一份来源（2026-10-31，C 类收敛）**：审计决策的 id/类型/中文名在 `audit/catalog.ts`
+    （`AUDIT_DECISIONS` / `AuditDecision` / `AUDIT_DECISION_LABELS`），沙箱档位中文名在
+    `capability/escalation.ts`（`SANDBOX_MODE_LABELS` / `sandboxModeLabel`）。
+    接口负责把**结果文本**下发：`/api/config.catalog`（决策目录 + 沙箱档位目录）、
+    `/api/audit` 的 `decisionLabel`、`/api/snapshot` 的 `currentModeText`/`baselineModeText`/`targetModeText`。
+    **前端（`client.js` / `console-ui.ts`）禁止再维护任何决策或档位映射表**——新增一个 decision 只应改
+    `catalog.ts` 一处；历史缺陷正是"加一个决策要改三个文件，漏一处就静默不显示"。
 
 ## 7.2 当前验收基线
 

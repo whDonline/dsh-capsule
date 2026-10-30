@@ -47,10 +47,14 @@ export interface ConsoleSandboxView {
   state: ConsoleSandboxState;
   /** 宿主实时读到的当前档位；undefined = 读不到（不许推断为「已恢复」） */
   currentMode?: SandboxMode;
+  /** 档位的中文说法（服务端下发，前端不再自己维护映射表） */
+  currentModeText?: string;
   /** Guard 介入前的档位（回滚落点） */
   baselineMode?: SandboxMode;
+  baselineModeText?: string;
   /** 被授权允许的最高档位 */
   targetMode?: SandboxMode;
+  targetModeText?: string;
   /** 本次读数的产生时间——UI 据此展示「核对中」，而不是拿倒计时推断 */
   checkedAt: number;
   lastOutcomeAt?: number;

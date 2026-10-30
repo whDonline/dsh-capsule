@@ -70,3 +70,14 @@ export function isModeWiderThan(candidate: SandboxMode, current: SandboxMode): b
   // 使用 SANDBOX_MODES 的声明顺序（从最严到最宽）做确定性比较，避免维护第二张映射表。
   return SANDBOX_MODES.indexOf(candidate) > SANDBOX_MODES.indexOf(current);
 }
+/** 档位的中文说法——**唯一事实来源**：宿主侧（决策记录 / 动作 / 治理视图）都从这里取，
+ * 前端不再自己维护映射表（服务端会把文本随快照下发）。 */
+export const SANDBOX_MODE_LABELS: Record<SandboxMode, string> = {
+  "read-only": "只读",
+  "workspace-write": "工作区可写",
+  "danger-full-access": "完全访问",
+};
+export function sandboxModeLabel(mode: SandboxMode | undefined): string {
+  // 作用：未知/缺失时给「未知」而不是编造——UI 文案不得猜测宿主状态
+  return mode ? (SANDBOX_MODE_LABELS[mode] ?? mode) : "未知";
+}

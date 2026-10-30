@@ -1,5 +1,5 @@
 import type { AuditService } from "../audit/audit-service.js";
-import { escalationScopeDisplay, escalationScopeKey, isSandboxMode, SANDBOX_MODES, type SandboxMode } from "../capability/escalation.js";
+import { escalationScopeDisplay, escalationScopeKey, isSandboxMode, sandboxModeLabel, SANDBOX_MODES, type SandboxMode } from "../capability/escalation.js";
 import type { LeaseManager } from "../capability/lease-manager.js";
 import { recordSandboxOutcome } from "../capability/sandbox-audit.js";
 import type { SandboxGrantManager } from "../capability/sandbox-grant.js";
@@ -117,7 +117,7 @@ export class GuardActions implements ConsoleActions {
       rootCallId: "",
       toolName: request.toolName,
       scopeKey: scope.key,
-      scopeDisplay: `用户在治理台开启免打扰窗口：${request.toolName} 可升至「${modeText(mode)}」，${ttlSeconds} 秒后自动收回`,
+      scopeDisplay: `用户在治理台开启免打扰窗口：${request.toolName} 可升至「${sandboxModeLabel(mode)}」，${ttlSeconds} 秒后自动收回`,
       decision: "WINDOW_OPENED",
     });
     try {
@@ -136,9 +136,4 @@ function assertSessionId(sessionId: string): void {
   if (typeof sessionId !== "string" || sessionId.length === 0) {
     throw new Error("GUARD_CONSOLE_INVALID: sessionId must be a non-empty string");
   }
-}
-function modeText(mode: SandboxMode): string {
-  if (mode === "read-only") return "只读";
-  if (mode === "workspace-write") return "工作区可写";
-  return "完全访问";
 }

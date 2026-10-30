@@ -1,8 +1,8 @@
 import type { ToolAuditEvent } from "../audit/types.js";
-import { SANDBOX_MODES, type SandboxMode } from "../capability/escalation.js";
+import { SANDBOX_MODES, sandboxModeLabel, type SandboxMode } from "../capability/escalation.js";
 import type { CapabilityLease } from "../capability/types.js";
 import type { SessionGrantState } from "../capability/sandbox-grant.js";
-import { buildDecisions, describeCapability, modeText, summarizeDecisions, type DecisionRecord, type DecisionSummary } from "./decisions.js";
+import { buildDecisions, describeCapability, summarizeDecisions, type DecisionRecord, type DecisionSummary } from "./decisions.js";
 import type { ConsoleAuditQuery, ConsoleAuditSource, ConsoleAuthState, ConsoleFocus, ConsoleGrantView, ConsoleLeaseSource, ConsoleSandboxState, ConsoleSandboxView, ConsoleSessionAuth, ConsoleSessionView, GovernanceConsoleDeps, GovernanceSnapshot, GovernanceSummary, SnapshotOptions } from "./types.js";
 /** 剩余时间进入「即将到期」的阈值（毫秒）——只影响展示文案，不影响任何授权判定。 */
 const EXPIRING_THRESHOLD_MS = 30_000;
@@ -115,7 +115,7 @@ export class GovernanceConsole {
     for (const [sessionId, sessionLeases] of bySession) {
       const state = sandboxStates.get(sessionId);
       const auth = this.projectAuth(sessionLeases, state, now);
-      const sandbox = this.projectSandbox(sessionId, state, sessionLeases, auth, now);
+      const sandbox = withModeText(this.projectSandbox(sessionId, state, sessionLeases, auth, now));
       const descriptor = this.describeSession(sessionId);
       const activityAt = Math.max(lastAuditAt.get(sessionId) ?? 0, ...sessionLeases.map((lease) => lease.issuedAt), state?.lastOutcome?.at ?? 0);
       views.push({
@@ -214,7 +214,7 @@ export class GovernanceConsole {
         targetMode,
         checkedAt: now,
         lastOutcomeAt: last.at,
-        note: last.outcome === "RESTORED" ? `Guard 已在 ${formatClock(last.at)} 把权限恢复到「${modeText(last.mode)}」` : `权限由你自己设定为「${modeText(last.mode)}」，Guard 未改动`,
+        note: last.outcome === "RESTORED" ? `Guard 已在 ${formatClock(last.at)} 把权限恢复到「${sandboxModeLabel(last.mode)}」` : `权限由你自己设定为「${sandboxModeLabel(last.mode)}」，Guard 未改动`,
       };
     }
     const current = state.currentMode;
@@ -223,7 +223,7 @@ export class GovernanceConsole {
     }
     if (state.liveCount > 0) {
       if (state.status === "skipped" || (state.lastWritten !== undefined && current !== state.lastWritten)) {
-        return { state: "user-override", currentMode: current, baselineMode: state.baseline, targetMode, checkedAt: now, note: `权限现在是「${modeText(current)}」（由你设定），Guard 不会覆盖你的选择` };
+        return { state: "user-override", currentMode: current, baselineMode: state.baseline, targetMode, checkedAt: now, note: `权限现在是「${sandboxModeLabel(current)}」（由你设定），Guard 不会覆盖你的选择` };
       }
       if (state.lastWritten === undefined) {
         return { state: "unchanged", currentMode: current, baselineMode: state.baseline, targetMode, checkedAt: now, note: "档位本来就足够宽，Guard 没有修改" };
@@ -238,7 +238,7 @@ export class GovernanceConsole {
       return { state: "restored", currentMode: current, baselineMode: state.baseline, targetMode, checkedAt: now, lastOutcomeAt: state.lastOutcome?.at };
     }
     if (state.status === "skipped") {
-      return { state: "user-override", currentMode: current, baselineMode: state.baseline, targetMode, checkedAt: now, note: `权限是「${modeText(current)}」（由你设定），Guard 不会覆盖你的选择` };
+      return { state: "user-override", currentMode: current, baselineMode: state.baseline, targetMode, checkedAt: now, note: `权限是「${sandboxModeLabel(current)}」（由你设定），Guard 不会覆盖你的选择` };
     }
     return {
       state: "pending-restore",
@@ -267,6 +267,19 @@ export class GovernanceConsole {
     if (!first) return { source: "none" };
     return { sessionId: first.sessionId, source: "recent-activity" };
   }
+}
+/**
+ * 作用：把沙箱视图里的档位补成「机器值 + 中文文本」两份。
+ * 为什么放在投影末尾而不是每个 return 各自写：前端（对话内提示条 / 独立页面）不再维护档位映射表，
+ * 文案的唯一来源是 `capability/escalation.ts`，这里统一附加，避免出现第 N 份映射。
+ */
+function withModeText(view: ConsoleSandboxView): ConsoleSandboxView {
+  return {
+    ...view,
+    currentModeText: view.currentMode ? sandboxModeLabel(view.currentMode) : undefined,
+    baselineModeText: view.baselineMode ? sandboxModeLabel(view.baselineMode) : undefined,
+    targetModeText: view.targetMode ? sandboxModeLabel(view.targetMode) : undefined,
+  };
 }
 /** 取最宽的档位——同一会话可能有多条不同目标的授权，展示时取最宽的那个（顺序以 SANDBOX_MODES 为准）。 */
 function widestMode(modes: readonly SandboxMode[]): SandboxMode | undefined {

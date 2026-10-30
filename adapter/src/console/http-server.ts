@@ -8,9 +8,9 @@
 //      自定义头会先发预检，而预检在此被拒绝，因此恶意页面无法用简单请求伪造写入（CSRF 防护）；
 //   3. 非 GET/PATCH 一律 405；未知路径 404；任何异常 Fail Closed 返回 500（细节只写 stderr）。
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { AuditDecision } from "../audit/types.js";
+import { AUDIT_DECISIONS, AUDIT_DECISION_LABELS, isAuditDecision } from "../audit/catalog.js";
 import { SCOPE_MODES, DEFAULTABLE_SCOPE_MODES, isScopeMode, type ScopeMode } from "../capability/scope-modes.js";
-import { isSandboxMode } from "../capability/escalation.js";
+import { isSandboxMode, SANDBOX_MODE_LABELS, SANDBOX_MODES } from "../capability/escalation.js";
 import { CONSOLE_HTML, CONSOLE_CLIENT_JS } from "./console-ui.js";
 import { GovernancePolicy, type ConsolePolicySnapshot } from "./policy.js";
 import type { DecisionQuery, GovernanceConsole } from "./console-service.js";
@@ -40,7 +40,6 @@ export const GUARD_WRITE_HEADER = "x-dsh-guard";
 export const GUARD_WEB_PREFIX = "/guard";
 /** 同源路径与路径映射表——同一份路由同时服务独立端口与 DSH 同源前缀，避免两套实现漂移。 */
 const ROUTES: readonly string[] = ["/", "/index.html", "/console.js", "/api/snapshot", "/api/audit", "/api/decisions", "/api/config", "/api/revoke", "/api/window"];
-const AUDIT_DECISIONS: readonly string[] = ["PASSTHROUGH_ALLOW", "PASSTHROUGH_DENY", "ASK", "LEASE_REUSED", "LEASE_ISSUED", "LEASE_REVOKED", "APPROVAL_REJECTED", "TOOL_SUCCESS", "TOOL_ERROR", "SANDBOX_MODE_RAISED", "SANDBOX_MODE_RESTORED", "SANDBOX_MODE_SKIPPED_USER_OVERRIDE"];
 const LOOPBACK_HOSTNAMES: readonly string[] = ["127.0.0.1", "localhost", "[::1]", "::1"];
 /** 允许被跨源读取的来源——只放行本机页面（http://127.0.0.1:任意端口 / http://localhost:任意端口）。
  * 为什么需要：DSH Web GUI 运行在 http://127.0.0.1:<DSH 端口>，与独立 Console 端口不同源；
@@ -150,7 +149,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, govConso
           sendJson(res, 400, { error: "INVALID_QUERY" });
           return;
         }
-        sendJson(res, 200, govConsole.queryAudit(query));
+        // 事件随响应附带中文决策名：前端不再维护自己的映射表（唯一来源 audit/catalog.ts）
+        sendJson(res, 200, govConsole.queryAudit(query).map((event) => ({ ...event, decisionLabel: AUDIT_DECISION_LABELS[event.decision] })));
         return;
       }
       if (pathname === "/api/decisions") {
@@ -450,10 +450,15 @@ function policyDocument(policy: GovernancePolicy | undefined, routeOptions: Cons
   const routes = { ...guardRouteStatus };
   const actions = { revoke: routeOptions.actions !== undefined, restoreSandbox: routeOptions.actions !== undefined };
   const sweep = { intervalMs: routeOptions.sweepIntervalMs ?? 0 };
+  // 沙箱档位目录：前端不再自己维护「只读 / 工作区可写 / 完全访问」的映射，一律从这里取
+  const sandboxModes = SANDBOX_MODES.map((mode) => ({ id: mode, label: SANDBOX_MODE_LABELS[mode] }));
+  // 审计决策目录：前端不再自己维护决策 id + 中文名（唯一来源 audit/catalog.ts）
+  const decisions = AUDIT_DECISIONS.map((id) => ({ id, label: AUDIT_DECISION_LABELS[id] }));
+  const catalog = { sandboxModes, decisions };
   if (!policy) {
-    return { policy: undefined, modes: modeCatalog(), writable: [], immutable: ["enabled", "rules"], routes, actions, sweep };
+    return { policy: undefined, modes: modeCatalog(), catalog, writable: [], immutable: ["enabled", "rules"], routes, actions, sweep };
   }
-  return { policy: policy.snapshot(), modes: modeCatalog(), writable: ["defaultScope", "defaultTtlSeconds", "maxTtlSeconds"], immutable: ["enabled", "rules"], routes, actions, sweep };
+  return { policy: policy.snapshot(), modes: modeCatalog(), catalog, writable: ["defaultScope", "defaultTtlSeconds", "maxTtlSeconds"], immutable: ["enabled", "rules"], routes, actions, sweep };
 }
 function modeCatalog(): unknown {
   // 作用：挡位目录投影——供前端渲染下拉框；defaultable 标记哪些挡位允许作为默认值（tool 不允许）
@@ -658,8 +663,8 @@ function parseAuditQuery(params: URLSearchParams): ConsoleAuditQuery | undefined
   if (sessionId) query.sessionId = sessionId;
   if (toolName) query.toolName = toolName;
   if (decision) {
-    if (!AUDIT_DECISIONS.includes(decision)) return undefined;
-    query.decision = decision as AuditDecision;
+    if (!isAuditDecision(decision)) return undefined;
+    query.decision = decision;
   }
   if (limit) {
     const parsed = Number.parseInt(limit, 10);
