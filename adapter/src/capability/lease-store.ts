@@ -13,7 +13,6 @@ export interface LeaseStore {
   findMatching(query: LeaseQuery): CapabilityLease | undefined | Promise<CapabilityLease | undefined>;
   get(id: string): CapabilityLease | undefined | Promise<CapabilityLease | undefined>;
   revoke(id: string, reason?: string): boolean | Promise<boolean>;
-  revokeSession(sessionId: string, reason?: string): number | Promise<number>;
   list(): CapabilityLease[] | Promise<CapabilityLease[]>;
 }
 export class MemoryLeaseStore implements LeaseStore {
@@ -53,31 +52,8 @@ export class MemoryLeaseStore implements LeaseStore {
     lease.revokeReason = reason;
     return true;
   }
-  revokeSession(sessionId: string, reason?: string): number {
-    // 作用：撤销某 Session 全部 ACTIVE Lease（Session disposed 时调用），返回撤销数量
-    let count = 0;
-    for (const lease of this.byId.values()) {
-      if (lease.sessionId === sessionId && lease.status === "ACTIVE") {
-        lease.status = "REVOKED";
-        lease.revokedAt = this.now();
-        lease.revokeReason = reason;
-        count += 1;
-      }
-    }
-    return count;
-  }
   list(): CapabilityLease[] {
     return [...this.byId.values()];
-  }
-  gc(now: number = this.now(), maxAgeMs: number = 3_600_000): number {
-    // 作用：低频内存回收——删除过期超过 1 小时的记录（规格第 5.8 节）；
-    // GC 只是内存回收不是安全机制，正确性完全依赖 find/validate 时的实时时间比较
-    const doomed: CapabilityLease[] = [];
-    for (const lease of this.byId.values()) {
-      if (lease.expiresAt + maxAgeMs <= now) doomed.push(lease);
-    }
-    for (const lease of doomed) this.remove(lease);
-    return doomed.length;
   }
   private remove(lease: CapabilityLease): void {
     // 作用：从 byId 与所属桶中移除一条记录

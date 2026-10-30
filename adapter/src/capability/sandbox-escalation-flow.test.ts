@@ -218,7 +218,7 @@ describe("P0-2 授权回收（settle 与回滚）", () => {
     await gate.handleExecute(execOf("c1", ESCALATION_ARGS("x")), echo);
     await gate.handleApprovalRequest({ callId: "c1" }, approveOnce);
     setModeFor("s1", "read-only");
-    await leases.revokeSession("s1", "user revoke");
+    for (const lease of (await leases.list()).filter((item) => item.status === "ACTIVE")) await leases.revoke(lease.id, "user revoke");
     await gate.handleExecute(execOf("c2", { command: "Get-Date" }), echo);
     expect(modeOf("s1")).toBe("read-only");
     expect(audit.list().some((e) => e.decision === "SANDBOX_MODE_SKIPPED_USER_OVERRIDE")).toBe(true);

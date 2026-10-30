@@ -3,7 +3,7 @@ import { SANDBOX_MODES, type SandboxMode } from "../capability/escalation.js";
 import type { CapabilityLease } from "../capability/types.js";
 import type { SessionGrantState } from "../capability/sandbox-grant.js";
 import { buildDecisions, describeCapability, modeText, summarizeDecisions, type DecisionRecord, type DecisionSummary } from "./decisions.js";
-import type { ConsoleAuditQuery, ConsoleAuditSource, ConsoleAuthState, ConsoleFocus, ConsoleGrantView, ConsoleLeaseSource, ConsoleLeaseView, ConsolePluginView, ConsoleSandboxState, ConsoleSandboxView, ConsoleSessionAuth, ConsoleSessionView, ConsoleToolStat, GovernanceConsoleDeps, GovernanceSnapshot, GovernanceSummary, SnapshotOptions } from "./types.js";
+import type { ConsoleAuditQuery, ConsoleAuditSource, ConsoleAuthState, ConsoleFocus, ConsoleGrantView, ConsoleLeaseSource, ConsoleSandboxState, ConsoleSandboxView, ConsoleSessionAuth, ConsoleSessionView, GovernanceConsoleDeps, GovernanceSnapshot, GovernanceSummary, SnapshotOptions } from "./types.js";
 /** 剩余时间进入「即将到期」的阈值（毫秒）——只影响展示文案，不影响任何授权判定。 */
 const EXPIRING_THRESHOLD_MS = 30_000;
 /** 决策日志查询参数（与治理接口的 ?sessionId= / ?toolName= / ?limit= 一一对应）。 */
@@ -19,41 +19,32 @@ export interface DecisionQuery {
 export class GovernanceConsole {
   private readonly now: () => number;
   private readonly guardName: string;
-  private readonly activityLimit: number;
   constructor(private readonly deps: GovernanceConsoleDeps) {
-    // 作用：构造校验（Fail Closed）——activityLimit 必须为正整数，非法配置直接拒绝启动
     this.now = deps.now ?? Date.now;
     this.guardName = deps.guardName ?? "dsh-capability-guard";
-    this.activityLimit = deps.activityLimit ?? 50;
-    if (!Number.isInteger(this.activityLimit) || this.activityLimit <= 0) {
-      throw new Error("GUARD_CONSOLE_INVALID: activityLimit must be a positive integer");
-    }
   }
   async snapshot(options?: SnapshotOptions): Promise<GovernanceSnapshot> {
-    // 作用：生成授权白名单投影、按 callId 去重的工具统计、最近审计活动，以及【会话视图】。
-    // 会话视图是治理台首屏的唯一数据来源：它把「还剩多久」与「档位收回了没有」分成两行状态。
+    // 作用：生成会话视图与计数摘要（会话视图是治理界面唯一的数据来源：它把「还剩多久」与
+    // 「权限级别收回了没有」分成两行状态）。原始事件与逐条授权明细不再塞进快照：
+    // 前者用 /api/audit，后者看 sessions[].auth.grants 与 /api/decisions。
     const now = this.now();
     const events = this.deps.audit.list();
     const leases = await this.deps.leases.list();
-    const leaseViews = leases.map((lease) => this.projectLease(lease, now));
+    const isLive = (lease: CapabilityLease): boolean => lease.status === "ACTIVE" && now < lease.expiresAt;
     const summary: GovernanceSummary = {
-      leasesTotal: leaseViews.length,
-      leasesActive: leaseViews.filter((lease) => lease.status === "ACTIVE").length,
-      leasesRevoked: leaseViews.filter((lease) => lease.status === "REVOKED").length,
-      leasesExpired: leaseViews.filter((lease) => lease.status === "EXPIRED").length,
+      leasesTotal: leases.length,
+      leasesActive: leases.filter(isLive).length,
+      leasesRevoked: leases.filter((lease) => lease.status === "REVOKED").length,
+      leasesExpired: leases.filter((lease) => lease.status !== "REVOKED" && !isLive(lease)).length,
       auditedEvents: events.length,
     };
     const requested = typeof options?.sessionId === "string" && options.sessionId.length > 0 ? options.sessionId : undefined;
     const sessions = this.buildSessions(leases, events, now, requested);
     return {
-      schemaVersion: 2,
+      schemaVersion: 3,
       generatedAt: now,
       guardName: this.guardName,
       summary,
-      plugins: this.buildPlugins(),
-      tools: this.toolStats(events),
-      activity: [...events].reverse().slice(0, this.activityLimit),
-      leases: leaseViews,
       focus: this.resolveFocus(requested, sessions),
       sessions,
     };
@@ -91,28 +82,6 @@ export class GovernanceConsole {
       limit: query?.limit,
     });
     return { summary: summarizeDecisions(records), records };
-  }
-  private buildPlugins(): ConsolePluginView[] {
-    // 作用：仅展示当前 Guard 插件，不枚举宿主的其他插件。
-    return [{ id: this.guardName, kind: "guard" }];
-  }
-  private projectLease(lease: CapabilityLease, now: number): ConsoleLeaseView {
-    // 作用：Lease 白名单投影——scope 只保留 kind 与脱敏 display（key 是参数哈希、无 Secret，保留
-    // 供治理比对）；视图层把已过期但未被惰性标记的 ACTIVE 修正为 EXPIRED 仅供展示，不回写 store
-    return {
-      id: lease.id,
-      kind: lease.kind,
-      sessionId: lease.sessionId,
-      toolName: lease.toolName,
-      scopeKind: lease.scope.kind,
-      scopeDisplay: lease.scope.display,
-      issuedAt: lease.issuedAt,
-      expiresAt: lease.expiresAt,
-      status: lease.status === "ACTIVE" && now >= lease.expiresAt ? "EXPIRED" : lease.status,
-      remainingMs: Math.max(0, lease.expiresAt - now),
-      revokedAt: lease.revokedAt,
-      revokeReason: lease.revokeReason,
-    };
   }
   private buildSessions(leases: readonly CapabilityLease[], events: readonly ToolAuditEvent[], now: number, requested: string | undefined): ConsoleSessionView[] {
     // 作用：按会话聚合授权与沙箱状态——会话来源只有两个（有授权的会话 / 有档位记录的会话），
@@ -297,30 +266,6 @@ export class GovernanceConsole {
     const first = sessions[0];
     if (!first) return { source: "none" };
     return { sessionId: first.sessionId, source: "recent-activity" };
-  }
-  private toolStats(events: ToolAuditEvent[]): ConsoleToolStat[] {
-    // 作用：Tools 维度统计——按 toolName 聚合各决策计数；invocations 按 callId 去重（一次调用链
-    // ASK→LEASE_ISSUED→TOOL_SUCCESS 产生多条事件但只算一次调用）；lastActivityAt 取最新时间戳
-    const stats = new Map<string, ConsoleToolStat & { callIds: Set<string> }>();
-    for (const event of events) {
-      const existing = stats.get(event.toolName);
-      const entry = existing ?? { toolName: event.toolName, invocations: 0, ask: 0, leaseIssued: 0, leaseReused: 0, approvalRejected: 0, passthroughAllow: 0, passthroughDeny: 0, toolSuccess: 0, toolError: 0, lastActivityAt: 0, callIds: new Set<string>() };
-      if (event.callId && !entry.callIds.has(event.callId)) {
-        entry.callIds.add(event.callId);
-        entry.invocations += 1;
-      }
-      entry.lastActivityAt = Math.max(entry.lastActivityAt, event.timestamp);
-      if (event.decision === "ASK") entry.ask += 1;
-      else if (event.decision === "LEASE_ISSUED") entry.leaseIssued += 1;
-      else if (event.decision === "LEASE_REUSED") entry.leaseReused += 1;
-      else if (event.decision === "APPROVAL_REJECTED") entry.approvalRejected += 1;
-      else if (event.decision === "PASSTHROUGH_ALLOW") entry.passthroughAllow += 1;
-      else if (event.decision === "PASSTHROUGH_DENY") entry.passthroughDeny += 1;
-      else if (event.decision === "TOOL_SUCCESS") entry.toolSuccess += 1;
-      else if (event.decision === "TOOL_ERROR") entry.toolError += 1;
-      stats.set(event.toolName, entry);
-    }
-    return [...stats.values()].map(({ callIds, ...stat }) => stat);
   }
 }
 /** 取最宽的档位——同一会话可能有多条不同目标的授权，展示时取最宽的那个（顺序以 SANDBOX_MODES 为准）。 */

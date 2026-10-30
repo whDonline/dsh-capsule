@@ -47,8 +47,14 @@ export const SCOPE_MODE_IDS: readonly ScopeMode[] = SCOPE_MODES.map((mode) => mo
  * 允许作为「默认范围挡位」的挡位。
  * 【为什么不包含 tool】规格第 7 条强制规则：`tool` 宽 scope 只允许用户显式按工具配置，
  * 禁止作为默认值——否则任意一次批准都会变成「该工具在本会话内随便用」。
+ * 【为什么不包含 fields（2026-10-31）】fields 需要「具体字段路径」才有意义：
+ *   - 兜底路径是 `path` / `file_path`，而绝大多数工具（如 pwsh）的参数里没有这两个字段；
+ *   - `ScopeResolver.resolveFields` 遇到缺失字段会 **Fail Closed 抛错**，Guard 因此不接管本次调用，
+ *     结果不是"复用键更窄"，而是**这条授权永远用不上、每次都要问**——比默认挡位还吵。
+ *   fields 仍然可以在 `rules[].scope.mode = "fields"` 里按工具显式配置（那时 paths 是明确的），
+ *   只是不能作为"一键默认值"。
  */
-export const DEFAULTABLE_SCOPE_MODES: readonly ScopeMode[] = ["exact-arguments", "fields", "sandbox-escalation"];
+export const DEFAULTABLE_SCOPE_MODES: readonly ScopeMode[] = ["exact-arguments", "sandbox-escalation"];
 export function isScopeMode(value: unknown): value is ScopeMode {
   return typeof value === "string" && (SCOPE_MODE_IDS as readonly string[]).includes(value);
 }

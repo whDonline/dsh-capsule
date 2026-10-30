@@ -95,10 +95,6 @@ export class LeaseManager {
     // 作用：撤销单个 Lease——下一次同 Scope 调用重新 Ask（规格 22.11）
     return await Promise.resolve(this.store.revoke(leaseId, reason));
   }
-  async revokeSession(sessionId: string, reason?: string): Promise<number> {
-    // 作用：撤销某 Session 全部 Lease（Session disposed / 用户主动收回时调用）
-    return await Promise.resolve(this.store.revokeSession(sessionId, reason));
-  }
   async list(): Promise<CapabilityLease[]> {
     return await Promise.resolve(this.store.list());
   }

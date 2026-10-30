@@ -83,42 +83,20 @@ async function makeGov(): Promise<GovernanceConsole> {
   return (await makeConsole()).gov;
 }
 describe("GovernanceConsole 聚合（规格第 24 节 Phase 4）", () => {
-  it("snapshot 聚合授权与审计：summary 计数、Guard 投影、activity 最新在前", async () => {
+  it("snapshot 只保留会话视图与计数摘要（原 plugins/tools/activity/leases 已移除）", async () => {
     const { gov } = await makeConsole();
     const snap = await gov.snapshot();
+    expect(snap.schemaVersion).toBe(3);
     expect(snap.guardName).toBe("dsh-capability-guard");
     expect(snap.summary).toMatchObject({ leasesTotal: 1, leasesActive: 1, leasesRevoked: 0, leasesExpired: 0, auditedEvents: 5 });
-    expect(snap.plugins).toEqual([
-      { id: "dsh-capability-guard", kind: "guard" },
-    ]);
-    expect(snap).not.toHaveProperty("capabilities");
-    expect(snap.summary).not.toHaveProperty("providers");
-    expect(snap.activity.map((event) => event.decision)).toEqual(["PASSTHROUGH_DENY", "LEASE_REUSED", "TOOL_SUCCESS", "LEASE_ISSUED", "ASK"]);
-  });
-  it("activityLimit 截断最近活动，非法值构造 Fail Closed 抛错", async () => {
-    let now = 10_000;
-    const audit = new AuditService();
-    const leases = new LeaseManager(new MemoryLeaseStore(), () => now);
-    for (let i = 0; i < 8; i += 1) {
-      recordEvent(audit, { callId: `call-${i}`, toolName: "t", decision: "ASK" });
+    expect(snap.sessions).toHaveLength(1);
+    expect(snap.sessions[0]?.sessionId).toBe("sess-1");
+    // 明确断言这些"没人读"的字段已经不在契约里（需要原始事件请用 /api/audit）
+    for (const removed of ["plugins", "tools", "activity", "leases", "capabilities", "providers"]) {
+      expect(snap).not.toHaveProperty(removed);
     }
-    const gov = new GovernanceConsole({ audit, leases, activityLimit: 3, now: () => now });
-    const snap = await gov.snapshot();
-    expect(snap.activity).toHaveLength(3);
-    expect(snap.activity[0].callId).toBe("call-7");
-    expect(() => new GovernanceConsole({ audit, leases, activityLimit: 0 })).toThrow(/GUARD_CONSOLE_INVALID/);
   });
-  it("Tool 统计按 callId 去重：调用链多事件只计 1 次 invocations，各决策计数正确", async () => {
-    const { gov } = await makeConsole();
-    const snap = await gov.snapshot();
-    const tool = snap.tools.find((stat) => stat.toolName === "deploy.preview");
-    expect(tool).toBeDefined();
-    expect(tool).toMatchObject({ invocations: 2, ask: 1, leaseIssued: 1, leaseReused: 1, approvalRejected: 0, passthroughAllow: 0, passthroughDeny: 0, toolSuccess: 1, toolError: 0 });
-    const fs = snap.tools.find((stat) => stat.toolName === "fs.write");
-    expect(fs).toMatchObject({ invocations: 1, passthroughDeny: 1 });
-    expect(tool?.lastActivityAt).toBeGreaterThan(0);
-  });
-  it("Lease 视图实时投影：剩余毫秒正确，已过期未标记的 ACTIVE 在视图层修正为 EXPIRED", async () => {
+  it("摘要计数随撤销与过期实时变化（过期在读取时判定，不依赖后台 GC）", async () => {
     const { gov, leases, advance } = await makeConsole();
     const scope = { kind: "exact-arguments" as const, key: "hash-2", display: "d2" };
     const revocable = await leases.issue({ sessionId: "sess-2", toolName: "t2", scope, ttlSeconds: 60 });
@@ -126,13 +104,11 @@ describe("GovernanceConsole 聚合（规格第 24 节 Phase 4）", () => {
     await leases.issue({ sessionId: "sess-3", toolName: "t3", scope, ttlSeconds: 10 });
     advance(20_000);
     const snap = await gov.snapshot();
-    const views = new Map(snap.leases.map((lease) => [lease.id, lease]));
-    expect(views.get(revocable.id)).toMatchObject({ status: "REVOKED", revokeReason: "manual" });
-    const active = snap.leases.find((lease) => lease.status === "ACTIVE");
-    expect(active?.remainingMs).toBe(40_000);
-    const expired = snap.leases.find((lease) => lease.sessionId === "sess-3");
-    expect(expired).toMatchObject({ status: "EXPIRED", remainingMs: 0 });
-    expect(snap.summary.leasesTotal).toBe(3);
+    expect(snap.summary).toMatchObject({ leasesTotal: 3, leasesActive: 1, leasesRevoked: 1, leasesExpired: 1 });
+    // 会话视图里同样能分辨：撤销的是 revoked，过期的是 expired（不是靠剩余时间归零推断的）
+    const bySession = new Map(snap.sessions.map((view) => [view.sessionId, view]));
+    expect(bySession.get("sess-2")?.auth.state).toBe("revoked");
+    expect(bySession.get("sess-3")?.auth.state).toBe("expired");
   });
   it("queryAudit 按 sessionId/toolName/decision 过滤（最新在前）并支持 limit；非法 limit Fail Closed", async () => {
     const { gov } = await makeConsole();
@@ -305,6 +281,9 @@ describe("治理策略写接口（默认范围挡位与 TTL）", () => {
       expect((await patch(handle, { rules: [] })).status).toBe(400);
       // tool 挡位禁止作为默认值（规格第 7 条）→ 400
       expect((await patch(handle, { defaultScope: "tool" })).status).toBe(400);
+      // fields 也不能作为默认值：兜底路径对多数工具缺失，只会让它永远无法复用（2026-10-31）
+      expect((await patch(handle, { defaultScope: "fields" })).status).toBe(400);
+      expect(body.modes.find((mode) => mode.id === "fields")?.defaultable).toBe(false);
       // 非法值 → 409（策略层 Fail Closed）
       expect((await patch(handle, { defaultTtlSeconds: 99999 })).status).toBe(409);
       // 未做任何成功变更之外的状态改动

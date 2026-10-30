@@ -102,7 +102,10 @@ export class PolicyResolver {
 }
 export function defaultScopeConfig(config: UniversalPolicyConfig): ScopeConfig {
   // 作用：把「默认范围挡位」编译成 ScopeConfig——fields 挡位使用显式配置的路径，
-  // 未配置时回落到保守兜底路径（缺失字段不参与哈希 → 复用键更窄 → 最多多问一次，绝不放大授权）
+  // 未配置时回落到兜底路径。
+  // 【注意（2026-10-31 修正）】兜底路径不是"安全网"：`ScopeResolver.resolveFields` 遇到缺失字段会
+  // Fail Closed 抛错，Guard 因此不接管，结果是该工具**永远无法复用授权**（每次都要问）。
+  // 所以 fields 已从 DEFAULTABLE_SCOPE_MODES 移除，只能按工具在 rules 里显式配置。
   if (config.defaultScope === "fields") {
     const configured = config.defaultScopePaths;
     const paths = configured && configured.length > 0 ? [...configured] : ["path", "file_path"];

@@ -189,7 +189,7 @@ describe("SandboxGrantManager 结算（P0-2）", () => {
     const grants = new SandboxGrantManager(host, leases);
     const lease = await seedLease(leases, "s1");
     await grants.applyGrant({ leaseId: lease.id, sessionId: "s1", session: "s1", toolName: "pwsh", requestedMode: "workspace-write" });
-    await leases.revokeSession("s1", "user revoke");
+    await leases.revoke(lease.id, "user revoke");
     expect((await grants.settle()).map((r) => r.outcome)).toEqual(["RESTORED"]);
     expect(modeOf("s1")).toBe("read-only");
   });

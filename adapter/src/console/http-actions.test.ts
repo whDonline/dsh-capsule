@@ -135,7 +135,7 @@ describe("治理台快照查询参数", () => {
       const res = await fetch(`${handle.url}api/snapshot?session=sess-x`);
       expect(res.status).toBe(200);
       const body = (await res.json()) as { schemaVersion: number; focus: { sessionId?: string; source: string }; sessions: { sessionId: string }[] };
-      expect(body.schemaVersion).toBe(2);
+      expect(body.schemaVersion).toBe(3);
       expect(body.focus).toEqual({ sessionId: "sess-x", source: "explicit" });
       expect(body.sessions[0]?.sessionId).toBe("sess-x");
     });

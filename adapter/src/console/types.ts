@@ -1,42 +1,10 @@
 import type { AuditDecision, ToolAuditEvent } from "../audit/types.js";
 import type { SandboxMode } from "../capability/escalation.js";
-import type { CapabilityLease, LeaseKind, LeaseStatus, ScopeKind } from "../capability/types.js";
+import type { CapabilityLease, LeaseKind, ScopeKind } from "../capability/types.js";
 import type { SandboxModeOutcome, SessionGrantState } from "../capability/sandbox-grant.js";
-// 作用：治理台只读视图——授权、工具统计与审计；不暴露原始工具参数。
-export interface ConsolePluginView {
-  id: string;
-  kind: "guard";
-}
-export interface ConsoleToolStat {
-  toolName: string;
-  /** 去重调用数（按 callId：一条调用链 ASK→LEASE_ISSUED→TOOL_SUCCESS 产生多条事件只计 1 次） */
-  invocations: number;
-  ask: number;
-  leaseIssued: number;
-  leaseReused: number;
-  approvalRejected: number;
-  passthroughAllow: number;
-  passthroughDeny: number;
-  toolSuccess: number;
-  toolError: number;
-  lastActivityAt: number;
-}
-export interface ConsoleLeaseView {
-  id: string;
-  kind: LeaseKind;
-  sessionId: string;
-  toolName: string;
-  scopeKind: ScopeKind;
-  /** 脱敏后的 Scope 展示串（Lease 从不保存参数原文） */
-  scopeDisplay: string;
-  issuedAt: number;
-  expiresAt: number;
-  status: LeaseStatus;
-  /** 视图层实时剩余毫秒 max(0, expiresAt - now)；安全校验仍以 LeaseManager.validate 为准 */
-  remainingMs: number;
-  revokedAt?: number;
-  revokeReason?: string;
-}
+// 作用：治理台只读视图——会话、授权与决策记录；不暴露原始工具参数。
+// 2026-10-31 清理：plugins / tools / leases / activity 四个快照字段没有任何界面或生产代码读取
+//（只有测试在读），已随「无调用方的冗余」一并移除；需要原始事件请用 /api/audit，需要授权明细请看 sessions。
 /** 授权（Lease）是否仍然有效——与沙箱档位是否已恢复是【两个独立状态】，不得合并成一个倒计时。 */
 export type ConsoleAuthState = "active" | "expiring" | "expired" | "revoked" | "none";
 /** 沙箱档位状态——回答「那一次放宽是否已经收回去了」。语义逐条对应 capability/sandbox-grant.ts：
@@ -181,16 +149,11 @@ export interface GovernanceSummary {
   auditedEvents: number;
 }
 export interface GovernanceSnapshot {
-  /** 快照契约版本：2 = 增加会话视图与两状态（旧字段保持兼容，便于渐进升级） */
+  /** 快照契约版本：3 = 移除无调用方的 plugins/tools/activity/leases（原始事件请用 /api/audit） */
   schemaVersion: number;
   generatedAt: number;
   guardName: string;
   summary: GovernanceSummary;
-  plugins: ConsolePluginView[];
-  tools: ConsoleToolStat[];
-  /** 最近活动（最新在前，条数受 activityLimit 约束） */
-  activity: ToolAuditEvent[];
-  leases: ConsoleLeaseView[];
   /** 当前聚焦的会话（默认展示它；未传 session 查询参数时按最近活动推断） */
   focus: ConsoleFocus;
   /** 会话视图（focus 的会话在最前） */
@@ -217,8 +180,6 @@ export interface GovernanceConsoleDeps {
   audit: ConsoleAuditSource;
   leases: ConsoleLeaseSource;
   guardName?: string;
-  /** 快照 Activity 区块保留的最近事件条数（默认 50，必须为正整数） */
-  activityLimit?: number;
   /** 可注入时钟（默认 Date.now），供测试模拟时间推进 */
   now?: () => number;
   /** 沙箱授权状态源（可选：未注入时所有会话的沙箱状态为 not-involved） */

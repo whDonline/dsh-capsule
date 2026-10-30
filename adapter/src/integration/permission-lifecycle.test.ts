@@ -138,12 +138,12 @@ describe("通用场景权限生命周期（真 cordis 端到端）", () => {
     expect(await host.leases.list()).toHaveLength(0);
     expect(host.audit.list().some((event) => event.decision === "PASSTHROUGH_DENY")).toBe(true);
   });
-  it("revokeSession 撤销后立即重新询问；其他会话不受影响", async () => {
+  it("逐条撤销后立即重新询问；其他会话不受影响", async () => {
     const host = makeHost(ALWAYS_ASK, () => Promise.resolve("allowed-once"));
     await runTool(host, plainExec("c1"), { pre: askDownstream });
     await askApproval(host, "c1");
     expect((await runTool(host, plainExec("c2"), { pre: askDownstream })).pre.kind).toBe("allow");
-    expect(await host.leases.revokeSession(SESSION.id, "用户主动收回")).toBe(1);
+    for (const lease of await host.leases.list()) await host.leases.revoke(lease.id, "用户主动收回");
     expect((await runTool(host, plainExec("c3"), { pre: askDownstream })).pre.kind).toBe("ask");
     expect((await host.leases.list())[0].status).toBe("REVOKED");
   });
@@ -260,14 +260,15 @@ describe("治理接口在真实生命周期状态上的投影", () => {
     const govConsole = new GovernanceConsole({ audit: host.audit, leases: host.leases, guardName: "dsh-capability-guard", now: clock });
     const handle = await startConsoleServer({ console: govConsole, policy: host.policy, port: 0 });
     try {
-      const snapshot = (await (await fetch(`${handle.url}api/snapshot`)).json()) as { summary: { leasesActive: number }; leases: { remainingMs: number; status: string; toolName: string }[] };
+      const snapshot = (await (await fetch(`${handle.url}api/snapshot`)).json()) as { summary: { leasesActive: number }; sessions: { auth: { remainingMs?: number; state: string; grants: { toolName: string }[] } }[] };
       expect(snapshot.summary.leasesActive).toBe(1);
-      expect(snapshot.leases[0]).toMatchObject({ status: "ACTIVE", toolName: "pwsh" });
-      expect(snapshot.leases[0].remainingMs).toBe(60_000);
+      expect(snapshot.sessions[0]?.auth.state).toBe("active");
+      expect(snapshot.sessions[0]?.auth.grants[0]).toMatchObject({ toolName: "pwsh" });
+      expect(snapshot.sessions[0]?.auth.remainingMs).toBe(60_000);
       // 剩余时间随时钟推进实时缩短（页面倒计时的数据来源）
       now += 20_000;
-      const later = (await (await fetch(`${handle.url}api/snapshot`)).json()) as { leases: { remainingMs: number }[] };
-      expect(later.leases[0].remainingMs).toBe(40_000);
+      const later = (await (await fetch(`${handle.url}api/snapshot`)).json()) as { sessions: { auth: { remainingMs?: number } }[] };
+      expect(later.sessions[0]?.auth.remainingMs).toBe(40_000);
       // 挡位写接口 → 后续新授权使用新挡位
       const patched = await fetch(`${handle.url}api/config`, { method: "PATCH", headers: { "content-type": "application/json", "x-dsh-guard": "1" }, body: JSON.stringify({ defaultScope: "sandbox-escalation" }) });
       expect(patched.status).toBe(200);

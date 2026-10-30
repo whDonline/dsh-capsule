@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_UNIVERSAL_POLICY, PolicyResolver } from "./policy.js";
+import { DEFAULTABLE_SCOPE_MODES } from "./scope-modes.js";
+describe("默认挡位白名单（DEFAULTABLE_SCOPE_MODES）", () => {
+  it("fields 不能作为默认挡位：兜底路径对多数工具缺失，只会让它永远无法复用", () => {
+    expect([...DEFAULTABLE_SCOPE_MODES].sort()).toEqual(["exact-arguments", "sandbox-escalation"]);
+    expect(DEFAULTABLE_SCOPE_MODES).not.toContain("fields");
+    expect(DEFAULTABLE_SCOPE_MODES).not.toContain("tool");
+  });
+});
 describe("PolicyResolver", () => {
   it("默认策略：enabled、TTL 60s、exact-arguments（规格 7.1）", () => {
     expect(new PolicyResolver(DEFAULT_UNIVERSAL_POLICY).resolve("any_tool")).toEqual({

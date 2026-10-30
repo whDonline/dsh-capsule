@@ -46,13 +46,14 @@ describe("LeaseManager + MemoryLeaseStore", () => {
     expect(await manager.findMatching("s1", "t", "k1")).toBeUndefined();
     expect(await manager.revoke(lease.id)).toBe(false);
   });
-  it("revokeSession 撤销该 Session 全部 Lease 并返回数量", async () => {
+  it("逐条 revoke 可以撤销该 Session 全部 Lease（控制台收回走的就是这条路径）", async () => {
     const clock = () => 1000;
     const manager = new LeaseManager(new MemoryLeaseStore(clock), clock);
     await manager.issue({ sessionId: "s1", toolName: "t1", scope: scopeOf("a"), ttlSeconds: 60 });
     await manager.issue({ sessionId: "s1", toolName: "t2", scope: scopeOf("b"), ttlSeconds: 60 });
     await manager.issue({ sessionId: "s2", toolName: "t1", scope: scopeOf("a"), ttlSeconds: 60 });
-    expect(await manager.revokeSession("s1", "session disposed")).toBe(2);
+    const forS1 = (await manager.list()).filter((lease) => lease.sessionId === "s1");
+    for (const lease of forS1) expect(await manager.revoke(lease.id, "session disposed")).toBe(true);
     const remaining = await manager.list();
     expect(remaining).toHaveLength(3);
     const revoked = remaining.filter((lease) => lease.sessionId === "s1");
@@ -83,7 +84,7 @@ describe("LeaseManager + MemoryLeaseStore", () => {
     const manager = new LeaseManager(store, clock);
     await manager.issue({ sessionId: "s1", toolName: "t", scope: scopeOf(), ttlSeconds: 60 });
     now += 60_000 + 3_600_001;
-    expect(store.gc(now)).toBe(1);
-    expect(await manager.list()).toHaveLength(0);
+    // 过期由 findMatching/validate 实时判定（无后台 GC）；这里只验证"过期即不可复用"
+    expect(await manager.findMatching("s1", "t", "k1")).toBeUndefined();
   });
 });

@@ -1,6 +1,7 @@
-# 鎶€鏈鏍硷紙鏈湴淇濈暀锛屼笉绾冲叆鐗堟湰鎺у埗锛?/docs/
+# 本地私人笔记（面试口径类，禁止入库；规格与集成基线仍然入库）
+/docs/面试*
 
-# Python
+# Python 历史遗留（代码已移除，保留规则防止误提交）
 __pycache__/
 *.py[cod]
 .venv/
@@ -9,23 +10,26 @@ venv/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# 构建产物
 dist/
 build/
 
 # Node / TypeScript
 node_modules/
-dist/
 *.tsbuildinfo
 pnpm-debug.log*
-# 鏈湴 pnpm 鍐呭瀵诲潃瀛樺偍锛堟湰浠撳簱閰嶇疆涓哄伐浣滃尯鍐?.pnpm-store锛岀姝㈠叆搴擄級
+# 本地 pnpm 内容寻址存储（本仓库配置为工作区内 .pnpm-store，禁止入库）
 .pnpm-store/
 
-# 鐜鍙橀噺涓庡瘑閽ワ紙绂佹鍏ュ簱锛?.env
+# 环境变量与密钥（禁止入库）
+.env
 .env.local
 .env.*.local
 *.pem
 
-# 鏁版嵁搴擄紙Lease SQLite 瀛樹簬鐢ㄦ埛鐩綍锛屼笉鍏ュ簱锛?*.db
+# 数据库与数据文件（Lease 仅内存实现，不入库）
+*.db
 *.db-shm
 *.db-wal
 *.sqlite3
@@ -43,10 +47,10 @@ Thumbs.db
 # Docker
 docker-compose.override.yml
 
-# 鏃ュ織
+# 日志
 *.log
 logs/
 
-# 涓存椂鎻愪氦淇℃伅鏂囦欢锛堢姝㈠叆搴擄級
+# 临时提交信息文件（禁止入库）
 .git-commit-msg.txt
 .commitmsg
