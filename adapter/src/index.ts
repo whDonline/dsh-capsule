@@ -136,7 +136,31 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
     sessions: createHostSessionDirectory(ctx),
   });
   // 收缩型治理动作：撤销授权 / 回滚档位。二者都只会让权限变小（见 console/actions.ts 注释）
-  const actions = new GuardActions({ leases, sandbox: sandboxGrants, audit });
+  const actions = new GuardActions({
+    leases,
+    sandbox: sandboxGrants,
+    audit,
+    // 免打扰窗口要真正生效必须提升会话档位：这里按 cordis 的方式解析 Session（缺失时动作层拒绝开窗，Fail Closed）
+    resolveSession: (sessionId: string) => {
+      const sessions = getService(ctx, "sessions") as { get?: (id: string) => unknown } | undefined;
+      if (!sessions || typeof sessions.get !== "function") return undefined;
+      try {
+        return sessions.get(sessionId);
+      } catch {
+        return undefined;
+      }
+    },
+    maxTtlSeconds: () => governance.config.maxTtlSeconds,
+    // 只允许给「配置里真的走沙箱升级链路」的工具开窗（防止把窗口变成任意工具的放宽通道）
+    allowTool: (toolName: string) => {
+      try {
+        const resolved = new PolicyResolver(policyConfig).resolve(toolName);
+        return resolved.enabled && resolved.scope.mode === "sandbox-escalation";
+      } catch {
+        return false;
+      }
+    },
+  });
   if (typeof (ctx as { on?: unknown }).on !== "function") {
     throw new Error("GUARD_INSTALL_FAILED: ctx.on unavailable");
   }

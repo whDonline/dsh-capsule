@@ -61,7 +61,14 @@ const govConsole = new GovernanceConsole({
   sandbox: { states: () => grants.grantStates(), lastOutcomeOf: (sessionId) => grants.lastOutcomeOf(sessionId) },
   sessions: { describe: (sessionId) => ({ label: labels[sessionId] ?? `会话 ${sessionId.slice(0, 8)}`, source: labels[sessionId] ? "title" : "id", cwd: "D:\\gitpro\\demo" }) },
 });
-const actions = new GuardActions({ leases, sandbox: grants, audit });
+const actions = new GuardActions({
+  leases,
+  sandbox: grants,
+  audit,
+  // 冒烟环境用 sessionId 字符串充当会话对象（与 sandboxHost 的键一致），这样「免打扰窗口」也能点得动
+  resolveSession: (sessionId) => (labels[sessionId] ? sessionId : undefined),
+  maxTtlSeconds: () => policy.snapshot().maxTtlSeconds,
+});
 const handle = await startConsoleServer({ console: govConsole, policy, actions, sweepIntervalMs: 30000, host: "127.0.0.1", port: 8799 });
 process.stdout.write(`smoke console: ${handle.url}\n`);
 process.stdout.write(`提示：等第一会话的 300s 授权过期后刷新页面，可看到「已到期 · 待回滚」与「立即回滚档位」。\n`);

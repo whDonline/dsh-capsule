@@ -16,7 +16,9 @@ export type AuditDecision =
   /** P0-2：模式已被用户手动改动，Guard 主动跳过回滚以免覆盖用户选择 */
   | "SANDBOX_MODE_SKIPPED_USER_OVERRIDE"
   /** 治理台：用户从页面提前收回了一条授权（收缩型动作，只会让权限变小） */
-  | "LEASE_REVOKED";
+  | "LEASE_REVOKED"
+  /** 治理台：用户主动开启了一个有界「免打扰窗口」（唯一由页面发起的放宽，受 TTL 上限与配置规则约束） */
+  | "WINDOW_OPENED";
 export interface ToolAuditEvent {
   id: string;
   timestamp: number;

@@ -10,10 +10,11 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AuditDecision } from "../audit/types.js";
 import { SCOPE_MODES, DEFAULTABLE_SCOPE_MODES, isScopeMode, type ScopeMode } from "../capability/scope-modes.js";
+import { isSandboxMode } from "../capability/escalation.js";
 import { CONSOLE_HTML, CONSOLE_CLIENT_JS } from "./console-ui.js";
 import { GovernancePolicy, type ConsolePolicySnapshot } from "./policy.js";
-import type { GovernanceConsole } from "./console-service.js";
-import type { ConsoleActions, ConsoleAuditQuery } from "./types.js";
+import type { DecisionQuery, GovernanceConsole } from "./console-service.js";
+import type { ConsoleActions, ConsoleAuditQuery, ConsoleWindowRequest } from "./types.js";
 export interface ConsoleHttpOptions {
   console: GovernanceConsole;
   /** 运行期治理策略（挡位 / TTL）；未注入时写接口一律拒绝（Fail Closed） */
@@ -38,7 +39,7 @@ export const GUARD_WRITE_HEADER = "x-dsh-guard";
 /** Guard 治理接口挂到 DSH Web 服务器上的同源前缀（面板优先走这条路径，避免跨源与额外端口）。 */
 export const GUARD_WEB_PREFIX = "/guard";
 /** 同源路径与路径映射表——同一份路由同时服务独立端口与 DSH 同源前缀，避免两套实现漂移。 */
-const ROUTES: readonly string[] = ["/", "/index.html", "/console.js", "/api/snapshot", "/api/audit", "/api/config", "/api/revoke"];
+const ROUTES: readonly string[] = ["/", "/index.html", "/console.js", "/api/snapshot", "/api/audit", "/api/decisions", "/api/config", "/api/revoke", "/api/window"];
 const AUDIT_DECISIONS: readonly string[] = ["PASSTHROUGH_ALLOW", "PASSTHROUGH_DENY", "ASK", "LEASE_REUSED", "LEASE_ISSUED", "LEASE_REVOKED", "APPROVAL_REJECTED", "TOOL_SUCCESS", "TOOL_ERROR", "SANDBOX_MODE_RAISED", "SANDBOX_MODE_RESTORED", "SANDBOX_MODE_SKIPPED_USER_OVERRIDE"];
 const LOOPBACK_HOSTNAMES: readonly string[] = ["127.0.0.1", "localhost", "[::1]", "::1"];
 /** 允许被跨源读取的来源——只放行本机页面（http://127.0.0.1:任意端口 / http://localhost:任意端口）。
@@ -120,8 +121,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, govConso
       res.end();
       return;
     }
-    // /api/revoke 只接受 POST：其他方法一律 405（不要让 GET 落到「未知路径」的 404 上，误导排障）
-    if (pathname === "/api/revoke" && req.method !== "POST") {
+    // 写接口只接受 POST：其他方法一律 405（不要让 GET 落到「未知路径」的 404 上，误导排障）
+    if ((pathname === "/api/revoke" || pathname === "/api/window") && req.method !== "POST") {
       sendJson(res, 405, { error: "METHOD_NOT_ALLOWED" });
       return;
     }
@@ -152,6 +153,15 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, govConso
         sendJson(res, 200, govConsole.queryAudit(query));
         return;
       }
+      if (pathname === "/api/decisions") {
+        const decisionQuery = parseDecisionQuery(url.searchParams);
+        if (decisionQuery === undefined) {
+          sendJson(res, 400, { error: "INVALID_QUERY" });
+          return;
+        }
+        sendJson(res, 200, await govConsole.decisions(decisionQuery));
+        return;
+      }
       if (pathname === "/api/config") {
         sendJson(res, 200, policyDocument(policy, routeOptions));
         return;
@@ -165,6 +175,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, govConso
     }
     if (req.method === "POST" && pathname === "/api/revoke") {
       await handleRevoke(req, res, routeOptions.actions);
+      return;
+    }
+    if (req.method === "POST" && pathname === "/api/window") {
+      await handleWindow(req, res, routeOptions.actions);
       return;
     }
     sendJson(res, 405, { error: "METHOD_NOT_ALLOWED" });
@@ -555,6 +569,83 @@ async function handleRevoke(req: IncomingMessage, res: ServerResponse, actions: 
     process.stderr.write(`[dsh-guard] console action failed: ${String(err)}\n`);
     sendJson(res, 500, { error: "ACTION_FAILED" });
   }
+}
+export function parseWindowBody(raw: unknown): ConsoleWindowRequest | undefined {
+  // 作用：解析「免打扰窗口」请求体——四个字段必须齐全且类型正确，多一个字段都拒绝（Fail Closed）；
+  // 档位必须是沙箱闭集，TTL 必须是正整数（上限由动作层按运行期 maxTtlSeconds 再校验）
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const record = raw as Record<string, unknown>;
+  const allowed = new Set(["sessionId", "toolName", "mode", "ttlSeconds"]);
+  for (const key of Object.keys(record)) {
+    if (!allowed.has(key)) return undefined;
+  }
+  const sessionId = record.sessionId;
+  const toolName = record.toolName;
+  const mode = record.mode;
+  const ttlSeconds = record.ttlSeconds;
+  if (typeof sessionId !== "string" || sessionId.length === 0 || sessionId.length > 200) return undefined;
+  if (typeof toolName !== "string" || toolName.length === 0 || toolName.length > 200) return undefined;
+  if (!isSandboxMode(mode)) return undefined;
+  if (typeof ttlSeconds !== "number" || !Number.isInteger(ttlSeconds) || ttlSeconds <= 0) return undefined;
+  return { sessionId, toolName, mode, ttlSeconds };
+}
+async function handleWindow(req: IncomingMessage, res: ServerResponse, actions: ConsoleActions | undefined): Promise<void> {
+  // 作用：POST /api/window —— 用户显式开启有界「免打扰窗口」。与 revoke 共用三道闸门
+  //（自定义头 + JSON content-type + loopback 来源），并把动作层的 Fail Closed 校验错误映射成 400。
+  if (!actions) {
+    sendJson(res, 503, { error: "ACTIONS_UNAVAILABLE" });
+    return;
+  }
+  if (req.headers[GUARD_WRITE_HEADER] === undefined) {
+    sendJson(res, 403, { error: "WRITE_HEADER_REQUIRED" });
+    return;
+  }
+  const contentType = String(req.headers["content-type"] ?? "");
+  if (!contentType.toLowerCase().startsWith("application/json")) {
+    sendJson(res, 415, { error: "JSON_CONTENT_TYPE_REQUIRED" });
+    return;
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse((await readBody(req)).toString("utf8"));
+  } catch {
+    sendJson(res, 400, { error: "INVALID_JSON" });
+    return;
+  }
+  const body = parseWindowBody(raw);
+  if (!body) {
+    sendJson(res, 400, { error: "INVALID_BODY" });
+    return;
+  }
+  try {
+    const result = await actions.openWindow(body);
+    sendJson(res, 200, { ok: true, ...result });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.startsWith("GUARD_CONSOLE_INVALID")) {
+      // 参数/环境不满足开窗条件：明确拒绝，不静默降级
+      sendJson(res, 400, { error: "WINDOW_REJECTED", message });
+      return;
+    }
+    process.stderr.write(`[dsh-guard] console window failed: ${String(err)}\n`);
+    sendJson(res, 500, { error: "ACTION_FAILED" });
+  }
+}
+function parseDecisionQuery(params: URLSearchParams): DecisionQuery | undefined {
+  // 作用：解析决策日志查询参数——sessionId/toolName 精确匹配、limit 正整数；
+  // 任何非法值返回 undefined（上层回 400），不做静默修正
+  const query: DecisionQuery = {};
+  const sessionId = params.get("sessionId");
+  const toolName = params.get("toolName");
+  const limit = params.get("limit");
+  if (sessionId) query.sessionId = sessionId;
+  if (toolName) query.toolName = toolName;
+  if (limit) {
+    const parsed = Number.parseInt(limit, 10);
+    if (!Number.isInteger(parsed) || parsed <= 0) return undefined;
+    query.limit = parsed;
+  }
+  return query;
 }
 function parseAuditQuery(params: URLSearchParams): ConsoleAuditQuery | undefined {
   // 作用：解析审计查询参数——sessionId/toolName/decision 精确匹配、limit 正整数；

@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 作用：README 用的结构示意图（不是截图）。刻意只画"用户看到的三件事"：
+     审批一次 → 会话内提示条（还剩多久）→ 到期自动收回；并在下方标出可点开的能力授权 tab。
+     颜色用中性灰阶，不依赖 GitHub 主题。 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="330" viewBox="0 0 900 330" role="img" aria-label="Capability Guard 工作方式示意">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8a94a6"/>
+    </marker>
+    <style>
+      .t { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+      .h { font-size: 14px; font-weight: 600; fill: #1f2328; }
+      .b { font-size: 12.5px; fill: #1f2328; }
+      .m { font-size: 11.5px; fill: #59636e; }
+      .card { fill: #ffffff; stroke: #d8dee4; stroke-width: 1; }
+      .dock { fill: #ffffff; stroke: #d8dee4; stroke-width: 1; }
+      .chip { fill: #f6f7f9; stroke: #d8dee4; stroke-width: 1; }
+    </style>
+  </defs>
+
+  <text class="t h" x="24" y="30">一次批准，换一段有期限的免打扰</text>
+  <text class="t m" x="24" y="50">示意（非截图）：装完即用，不需要先写任何配置。</text>
+
+  <!-- 步骤 1 -->
+  <rect class="t card" x="24" y="70" width="250" height="150" rx="10"/>
+  <text class="t m" x="40" y="94">① 审批弹窗</text>
+  <text class="t b" x="40" y="120">pwsh 请求提升到</text>
+  <text class="t b" x="40" y="140">「完全访问」</text>
+  <rect class="t chip" x="40" y="156" width="90" height="26" rx="6"/>
+  <text class="t m" x="52" y="173">允许一次</text>
+  <rect class="t chip" x="140" y="156" width="90" height="26" rx="6" stroke="#1a7f37"/>
+  <text class="t m" x="150" y="173" fill="#1a7f37">允许（你的选择）</text>
+  <text class="t m" x="40" y="204">你只点这一次。</text>
+
+  <!-- 步骤 2 -->
+  <rect class="t card" x="318" y="70" width="270" height="150" rx="10"/>
+  <text class="t m" x="334" y="94">② 会话内提示条（不用点开）</text>
+  <rect class="t dock" x="334" y="106" width="238" height="72" rx="10"/>
+  <text class="t b" x="346" y="128" fill="#1a7f37">● 已放开：pwsh 可免审批升到「完全访问」</text>
+  <text class="t m" x="346" y="148">还剩 4 分 12 秒 · 到期自动收回</text>
+  <text class="t m" x="346" y="166">已少点 7 次批准</text>
+  <text class="t m" x="334" y="204">期间同类操作不再问你。</text>
+
+  <!-- 步骤 3 -->
+  <rect class="t card" x="632" y="70" width="244" height="150" rx="10"/>
+  <text class="t m" x="648" y="94">③ 到期 / 提前收回</text>
+  <rect class="t dock" x="648" y="106" width="212" height="72" rx="10" stroke-dasharray="4 3"/>
+  <text class="t b" x="660" y="128" fill="#59636e">✓ 已收回：权限回到「工作区可写」</text>
+  <text class="t m" x="660" y="148">同类操作会重新征求你的同意</text>
+  <text class="t m" x="660" y="166">决策记录里可查</text>
+  <text class="t m" x="648" y="204">也可以随时点「提前收回」。</text>
+
+  <!-- 箭头 -->
+  <line x1="278" y1="145" x2="312" y2="145" stroke="#8a94a6" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <line x1="592" y1="145" x2="626" y2="145" stroke="#8a94a6" stroke-width="1.4" marker-end="url(#arrow)"/>
+
+  <!-- 底部：详情层 -->
+  <rect class="t card" x="24" y="240" width="852" height="66" rx="10"/>
+  <text class="t m" x="40" y="262">点开会话里的「能力授权」标签页，是同一件事的详情：每条授权批准了多久、</text>
+  <text class="t m" x="40" y="282">被复用几次、权限级别有没有收回、本会话最近发生了什么（可导出 JSON / Markdown）。</text>
+  <text class="t m" x="40" y="300" fill="#8a94a6">范围挡位与有效期在「设置 → 能力授权」；部署配置（开关 / 规则）只读展示，需改 profile。</text>
+</svg>

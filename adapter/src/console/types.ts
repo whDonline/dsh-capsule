@@ -96,12 +96,29 @@ export interface ConsoleSessionView {
   cwd?: string;
   auth: ConsoleSessionAuth;
   sandbox: ConsoleSandboxView;
+  /** 价值指标（少点了几次批准 / 最长放开多久 / 有没有待收回的权限级别） */
+  stats: ConsoleSessionStats;
   actions: {
     /** 有仍有效的授权可撤销 */
     canRevoke: boolean;
     /** 存在「授权已失效但档位未回滚」的情形，可手动立即回滚（纯收缩动作） */
     canRestoreSandbox: boolean;
   };
+}
+/** 作用：会话级价值指标——回答「这个插件到底帮我省了什么」，同时暴露需要人处理的风险。 */
+export interface ConsoleSessionStats {
+  /** 授权总条数（含已结束的） */
+  total: number;
+  /** 仍可复用的授权 */
+  active: number;
+  /** 因为复用而少点的批准次数 */
+  savedApprovals: number;
+  /** 最长一次放开的时长（毫秒） */
+  longestWindowMs: number;
+  /** 提升过权限级别的授权数 */
+  raised: number;
+  /** 已结束但仍未收回权限级别的授权数（需要处理） */
+  pendingRestore: number;
 }
 export interface ConsoleFocus {
   sessionId?: string;
@@ -132,9 +149,29 @@ export interface ConsoleRestoreResult {
   sessionId: string;
   results: readonly { outcome: string; mode: SandboxMode }[];
 }
+/** 免打扰窗口请求——用户显式点击后由页面发起，等价于一次 allowed-once，但有界（TTL）且可随时收回。 */
+export interface ConsoleWindowRequest {
+  sessionId: string;
+  /** 对哪个工具免打扰（与配置里的 escalation 规则一致，例如 pwsh） */
+  toolName: string;
+  /** 提升到哪一档（只允许沙箱档位闭集） */
+  mode: SandboxMode;
+  /** 窗口时长（秒），不得超过运行期 maxTtlSeconds */
+  ttlSeconds: number;
+}
+export interface ConsoleWindowResult {
+  sessionId: string;
+  leaseId: string;
+  /** 实际生效的档位（可能是"本来就够宽"的原档位） */
+  mode: SandboxMode;
+  outcome: string;
+  expiresAt: number;
+}
 export interface ConsoleActions {
   revokeSession(sessionId: string): Promise<ConsoleRevokeResult>;
   restoreSandbox(sessionId: string): Promise<ConsoleRestoreResult>;
+  /** 有界放宽：开启免打扰窗口（唯一由页面发起的放宽动作，受 TTL 上限与沙箱档位闭集约束） */
+  openWindow(request: ConsoleWindowRequest): Promise<ConsoleWindowResult>;
 }
 export interface GovernanceSummary {
   leasesTotal: number;

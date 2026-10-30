@@ -2,13 +2,15 @@ import type { ToolAuditEvent } from "../audit/types.js";
 import { SANDBOX_MODES, type SandboxMode } from "../capability/escalation.js";
 import type { CapabilityLease } from "../capability/types.js";
 import type { SessionGrantState } from "../capability/sandbox-grant.js";
+import { buildDecisions, describeCapability, modeText, summarizeDecisions, type DecisionRecord, type DecisionSummary } from "./decisions.js";
 import type { ConsoleAuditQuery, ConsoleAuditSource, ConsoleAuthState, ConsoleFocus, ConsoleGrantView, ConsoleLeaseSource, ConsoleLeaseView, ConsolePluginView, ConsoleSandboxState, ConsoleSandboxView, ConsoleSessionAuth, ConsoleSessionView, ConsoleToolStat, GovernanceConsoleDeps, GovernanceSnapshot, GovernanceSummary, SnapshotOptions } from "./types.js";
 /** 剩余时间进入「即将到期」的阈值（毫秒）——只影响展示文案，不影响任何授权判定。 */
 const EXPIRING_THRESHOLD_MS = 30_000;
-/** 档位的中文说法——界面（对话内提示条与治理台）里绝不出现 read-only / danger-full-access 这类内部标识。 */
-const MODE_TEXT: Record<SandboxMode, string> = { "read-only": "只读", "workspace-write": "工作区可写", "danger-full-access": "完全访问" };
-function modeText(mode: SandboxMode | undefined): string {
-  return mode ? (MODE_TEXT[mode] ?? mode) : "未知";
+/** 决策日志查询参数（与治理接口的 ?sessionId= / ?toolName= / ?limit= 一一对应）。 */
+export interface DecisionQuery {
+  sessionId?: string;
+  toolName?: string;
+  limit?: number;
 }
 // 作用：聚合授权、工具调用与审计的只读治理视图，并把「授权是否有效」与「沙箱档位是否已恢复」
 // 投影成两个互不覆盖的状态（规格 Phase 4 可用性改造）。
@@ -71,6 +73,25 @@ export class GovernanceConsole {
     );
     return query?.limit === undefined ? filtered : filtered.slice(0, query.limit);
   }
+  async decisions(query?: DecisionQuery): Promise<{ summary: DecisionSummary; records: DecisionRecord[] }> {
+    // 作用：授权决策日志查询——一条授权 = 一条记录（批准 → 复用次数 → 权限级别效果 → 结束方式）。
+    // 与 queryAudit 的区别：audit 是原始事件流（含大量遥测），decisions 是给人看/给机器集成的结论。
+    // 非法 limit 按 Fail Closed 拒绝；排序固定为「最新批准在前」。
+    if (query?.limit !== undefined && (!Number.isInteger(query.limit) || query.limit <= 0)) {
+      throw new Error("GUARD_CONSOLE_INVALID: limit must be a positive integer");
+    }
+    const leases = await this.deps.leases.list();
+    const records = buildDecisions({
+      leases,
+      events: this.deps.audit.list(),
+      grantStates: this.deps.sandbox?.states() ?? [],
+      now: this.now(),
+      sessionId: query?.sessionId,
+      toolName: query?.toolName,
+      limit: query?.limit,
+    });
+    return { summary: summarizeDecisions(records), records };
+  }
   private buildPlugins(): ConsolePluginView[] {
     // 作用：仅展示当前 Guard 插件，不枚举宿主的其他插件。
     return [{ id: this.guardName, kind: "guard" }];
@@ -115,6 +136,13 @@ export class GovernanceConsole {
       lastAuditAt.set(event.sessionId, Math.max(lastAuditAt.get(event.sessionId) ?? 0, event.timestamp));
     }
     const views: { view: ConsoleSessionView; activityAt: number }[] = [];
+    // 作用：先算一次全量决策日志，再按会话分组取统计——避免每个会话各算一遍（O(n²) 但 n 很小）。
+    const decisionsBySession = new Map<string, DecisionRecord[]>();
+    for (const record of buildDecisions({ leases, events, grantStates: [...sandboxStates.values()], now })) {
+      const bucket = decisionsBySession.get(record.sessionId);
+      if (bucket) bucket.push(record);
+      else decisionsBySession.set(record.sessionId, [record]);
+    }
     for (const [sessionId, sessionLeases] of bySession) {
       const state = sandboxStates.get(sessionId);
       const auth = this.projectAuth(sessionLeases, state, now);
@@ -130,6 +158,7 @@ export class GovernanceConsole {
           cwd: descriptor.cwd,
           auth,
           sandbox,
+          stats: summarizeDecisions(decisionsBySession.get(sessionId) ?? []),
           actions: {
             canRevoke: auth.activeCount > 0,
             // 只允许对「授权已失效但档位没回来」的会话手动回滚；用户自己改过的档位不得被覆盖（红线 2）
@@ -185,7 +214,7 @@ export class GovernanceConsole {
       id: lease.id,
       toolName: lease.toolName,
       kind: lease.kind,
-      capabilityText: this.capabilityText(lease, targetMode),
+      capabilityText: describeCapability(lease, targetMode),
       reasonText: `你于 ${formatClock(lease.issuedAt)} 批准了这次${lease.kind === "sandbox-mode" ? "沙箱升级" : "工具调用"}`,
       scopeKind: lease.scope.kind,
       scopeDisplay: lease.scope.display,
@@ -195,16 +224,6 @@ export class GovernanceConsole {
       remainingMs: Math.max(0, lease.expiresAt - now),
       targetMode,
     };
-  }
-  private capabilityText(lease: CapabilityLease, targetMode: SandboxMode | undefined): string {
-    // 作用：把 Scope 翻译成一句人话——用户不需要知道 exact-arguments / SHA-256 是什么。
-    if (lease.kind === "sandbox-mode") {
-      return targetMode ? `${lease.toolName} 可以免审批升到「${modeText(targetMode)}」` : `${lease.toolName} 的沙箱升级已获批准`;
-    }
-    if (lease.scope.kind === "exact-arguments") return `${lease.toolName} 可以用与上次完全相同的参数重试，不再询问`;
-    if (lease.scope.kind === "fields") return `${lease.toolName} 在相同字段范围内重试，不再询问`;
-    if (lease.scope.kind === "tool") return `${lease.toolName} 的任何调用都不再询问（范围最宽）`;
-    return `${lease.toolName} 的同类调用不再询问`;
   }
   private projectSandbox(sessionId: string, state: SessionGrantState | undefined, leases: readonly CapabilityLease[], auth: ConsoleSessionAuth, now: number): ConsoleSandboxView {
     // 作用：沙箱状态投影——回答「那次放宽收回来了没有」。判定顺序固定，任何情况下都不允许

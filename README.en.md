@@ -6,6 +6,11 @@
   <a href="README.md">简体中文</a> · <a href="README.en.md"><b>English</b></a>
 </p>
 
+> [!NOTE]
+> **This English README is out of date.** The UI was rebuilt in 2026-10 (session-scoped dock + "Capability" tab +
+> settings page; decision log; bounded "quiet window"). The Chinese [README.md](README.md) is the source of truth
+> until this file is fully re-translated.
+
 <p align="center">
   <img src="https://img.shields.io/badge/DeepSeek_Harness-Plugin-4F46E5?style=flat-square" alt="DeepSeek Harness Plugin" />
   <img src="https://img.shields.io/badge/status-Developer_Preview-F59E0B?style=flat-square" alt="Developer Preview" />

@@ -127,6 +127,21 @@ describe("治理台会话视图：聚焦、命名与降级", () => {
     // 首屏文案里不出现 Scope 哈希原文（哈希只进技术详情的 scopeKeyShort）
     expect(texts.join("|")).not.toContain(sandboxScope.key);
   });
+  it("会话统计：复用事件折算成「少点的批准次数」，并随快照返回", async () => {
+    const { gov, leases, audit } = makeConsole();
+    const lease = await leases.issue({ sessionId: "s1", toolName: "pwsh", scope: argsScope, ttlSeconds: 300 });
+    for (const callId of ["c1", "c2", "c3"]) {
+      audit.record({ sessionId: "s1", callId, rootCallId: callId, toolName: "pwsh", leaseId: lease.id, decision: "LEASE_REUSED" });
+    }
+    const view = (await gov.snapshot()).sessions[0];
+    expect(view?.stats.savedApprovals).toBe(3);
+    expect(view?.stats.total).toBe(1);
+    expect(view?.stats.active).toBe(1);
+    // decisions() 与快照口径一致：机器可读的决策日志
+    const decisions = await gov.decisions({ sessionId: "s1" });
+    expect(decisions.summary.savedApprovals).toBe(3);
+    expect(decisions.records[0]).toMatchObject({ leaseId: lease.id, uses: 3, outcome: "active" });
+  });
   it("授权剩余时间进入最后 30 秒时状态为 expiring", async () => {
     const { gov, leases } = makeConsole();
     await leases.issue({ sessionId: "s1", toolName: "t", scope: argsScope, ttlSeconds: 60 });

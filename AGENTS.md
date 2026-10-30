@@ -124,13 +124,18 @@ scripts/smoke-console.mjs    # 本地手工冒烟（示例数据 + 独立治理�
 4. **策略写接口只能改 `defaultScope` / `defaultTtlSeconds` / `maxTtlSeconds`**：
    `enabled` 与 `rules` 是部署配置，接口层返回 400；`tool` 挡位禁止作为默认值（规格第 7 条）。
    运行期改动**不落盘**（Guard 不写 profile 的 `cordis.patch.yml`）。
-4.1. **收缩型动作接口（2026-10-31 项目所有者批准新增）**：`POST /api/revoke` 只有两个方向，
-   且都只能让权限变小，不得扩展为任何「授予 / 放宽」入口：
-   - `action=revoke`（默认）＝ 撤销该会话全部有效授权 + `releaseSession` 回滚档位；
+4.1. **治理台动作接口（2026-10-31 项目所有者批准）**：`POST /api/revoke` 与 `POST /api/window`。
+   - `action=revoke`（默认）＝ 撤销该会话全部有效授权 + `releaseSession` 回滚档位（只收紧）；
    - `action=restore-sandbox` ＝ 只结算该会话中**已失效**的授权（`SandboxGrantManager.restoreSession`），
-     仍有效的授权与用户手动设定的档位一律不动（红线 2）。
-   它与 PATCH /api/config 共用同一套闸门（`x-dsh-guard` 头 + `application/json` + loopback 来源），
-   非 POST 一律 405；动作都写审计（`LEASE_REVOKED` / `SANDBOX_MODE_RESTORED`）。
+     仍有效的授权与用户手动设定的档位一律不动（红线 2）；
+   - **`/api/window` 是唯一由页面发起的放宽**：用户点击「免打扰窗口」＝一次显式 allowed-once，
+     为 (toolName, mode) 签发有界 `sandbox-mode` 授权并立即提升会话档位。约束：TTL 必须为正整数且
+     ≤ 运行期 `maxTtlSeconds`（不静默裁剪）；必须能解析到真实 Session（否则拒绝，避免"授权了却不生效"）；
+     工具必须被配置为 `sandbox-escalation`（`allowTool` 注入后才校验）；失败时回滚已签发授权。
+   三者共用同一套闸门（`x-dsh-guard` 头 + `application/json` + loopback 来源），非 POST 一律 405；
+   都写审计（`LEASE_REVOKED` / `WINDOW_OPENED` / `SANDBOX_MODE_RESTORED`）。
+   **安全提示（必须写进 README）**：治理接口是本机 loopback 上的无鉴权面，"能开窗"就等于"能放宽权限"；
+   不信任本机进程时请把 `console.enabled` 设为 `false`。
 5. **客户端半边的槽位（2026-10-31 更新）**：`conversation.input.dock`（一眼层）与
    `conversation.view`（详情层）都是 session 作用域，组件直接拿到 `sessionId`；
    **不再注册 `main` 面板与 `sidebar.panellist` 图标**（项目所有者要求"先不做全局中台"）。
@@ -162,6 +167,11 @@ scripts/smoke-console.mjs    # 本地手工冒烟（示例数据 + 独立治理�
     页面只写 `defaultScope` / `defaultTtlSeconds` / `maxTtlSeconds` 三项（与 `PATCH /api/config` 完全一致），
     `enabled` / `rules` / `defaultScopePaths` / `sweepIntervalMs` 只读展示并注明"去 profile 改"。
     **范围挡位与 TTL 绝不能放进会话 tab**：它们是全局策略，放进某个会话会误导成"只对这个会话生效"。
+12. **授权决策记录才是面向人的审计面（2026-10-31）**：`console/decisions.ts` 是**纯函数**，把 Lease + 审计事件
+    折叠成「一条授权一份记录」（批准了什么 → 复用几次 → 权限级别效果 → 怎么结束），由 `GET /api/decisions`
+    与会话内 tab 共用；`PASSTHROUGH_*` / `TOOL_*` 属遥测，默认折叠在「原始事件（排障用）」里，
+    不得再当作"审计"摆给用户看。会话统计中的 `savedApprovals` = 该会话 `LEASE_REUSED` 次数，
+    它是**价值指标**（用户少点了几次批准），不是安全指标，不得用于任何权限判定。
 
 ## 7.2 当前验收基线
 

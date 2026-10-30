@@ -109,6 +109,7 @@ window.__ModuleLoader__.load({
       LEASE_ISSUED: '已签发临时授权',
       LEASE_REUSED: '复用临时授权',
       LEASE_REVOKED: '已提前收回',
+      WINDOW_OPENED: '开启免打扰窗口',
       APPROVAL_REJECTED: '你拒绝了',
       PASSTHROUGH_ALLOW: '原生放行',
       PASSTHROUGH_DENY: '原生拒绝',
@@ -180,11 +181,12 @@ window.__ModuleLoader__.load({
               ? '到期后不会改动你自己设置的权限。'
               : '到期后同类操作会再问你一次。';
         const expired = remaining <= 0;
+        const saved = view.stats && view.stats.savedApprovals ? view.stats.savedApprovals : 0;
         return {
           tone: expired ? 'warn' : 'active',
           dot: expired ? '⏳' : '●',
           title: title,
-          sub: expired ? '正在核对是否已经收回…' : '还剩 ' + fmtCn(remaining) + ' · ' + after,
+          sub: expired ? '正在核对是否已经收回…' : '还剩 ' + fmtCn(remaining) + ' · ' + after + (saved > 0 ? ' · 已少点 ' + saved + ' 次批准' : ''),
           extra: grants.slice(1).map(function (grant) {
             return grant.capabilityText;
           }),
@@ -384,6 +386,7 @@ window.__ModuleLoader__.load({
       fact: { display: 'grid', gridTemplateColumns: '80px 1fr', gap: '10px', padding: '4px 0' },
       btn: { font: 'inherit', fontSize: '12.5px', padding: '5px 12px', borderRadius: '6px', border: '1px solid ' + COLORS.line2, background: 'transparent', color: COLORS.fg, cursor: 'pointer' },
       input: { font: 'inherit', fontSize: '12.5px', padding: '5px 8px', borderRadius: '6px', border: '1px solid ' + COLORS.line2, background: 'transparent', color: COLORS.fg, width: '96px' },
+      select: { font: 'inherit', fontSize: '12.5px', padding: '5px 8px', borderRadius: '6px', border: '1px solid ' + COLORS.line2, background: 'transparent', color: COLORS.fg, width: 'auto' },
       btnStop: { font: 'inherit', fontSize: '12.5px', padding: '5px 12px', borderRadius: '6px', border: '1px solid ' + COLORS.bad, background: 'transparent', color: COLORS.bad, cursor: 'pointer' },
       note: { color: COLORS.fg2, fontSize: '12px' },
       grant: { borderTop: '1px solid ' + COLORS.line, paddingTop: '10px', marginTop: '10px' },
@@ -433,7 +436,8 @@ window.__ModuleLoader__.load({
     }
 
     /** 作用：会话内的「能力授权」详情页（conversation.view，排在 对话 / 轨迹 之后）。
-     * 数据来自 GET /api/snapshot?session=<id> 与 /api/audit?sessionId=<id>，都只读。 */
+     * 数据来自 GET /api/snapshot?session=<id>（实时状态）与 GET /api/decisions?sessionId=<id>
+     * （授权决策日志：一条授权一份记录）；原始事件只在展开「排障」时按需拉取。都只读。 */
     function GuardSessionView(props) {
       const sessionId = props && props.sessionId
         ? String(props.sessionId)
@@ -441,11 +445,20 @@ window.__ModuleLoader__.load({
           ? String(props.session.id)
           : '';
       const [snapshot, setSnapshot] = React.useState(null);
+      const [decisions, setDecisions] = React.useState(null);
+      const [config, setConfig] = React.useState(null);
       const [audit, setAudit] = React.useState([]);
       const [host, setHost] = React.useState(null);
       const [busy, setBusy] = React.useState('');
       const [message, setMessage] = React.useState('');
       const [detailsOpen, setDetailsOpen] = React.useState(false);
+      const [rawOpen, setRawOpen] = React.useState(false);
+      const [copied, setCopied] = React.useState('');
+      const [winTool, setWinTool] = React.useState('');
+      const [winMode, setWinMode] = React.useState('danger-full-access');
+      const [winMinutes, setWinMinutes] = React.useState('30');
+      const [winBusy, setWinBusy] = React.useState(false);
+      const [winMsg, setWinMsg] = React.useState('');
       const [nowTick, setNowTick] = React.useState(0);
 
       React.useEffect(
@@ -456,14 +469,16 @@ window.__ModuleLoader__.load({
             try {
               const base = await probeConsoleHost();
               if (!alive || !base) return;
-              const [snap, events] = await Promise.all([
+              const [snap, decisionBody, cfg] = await Promise.all([
                 fetchJson(base, '/api/snapshot?session=' + encodeURIComponent(sessionId)),
-                fetchJson(base, '/api/audit?sessionId=' + encodeURIComponent(sessionId) + '&limit=' + AUDIT_LIMIT),
+                fetchJson(base, '/api/decisions?sessionId=' + encodeURIComponent(sessionId) + '&limit=' + AUDIT_LIMIT),
+                fetchJson(base, '/api/config'),
               ]);
               if (!alive) return;
               setHost(base);
               setSnapshot(snap);
-              setAudit(Array.isArray(events) ? events : []);
+              setDecisions(decisionBody);
+              setConfig(cfg);
             } catch (err) {
               if (alive) setMessage('治理接口暂时不可达，稍后自动重试');
             }
@@ -490,6 +505,25 @@ window.__ModuleLoader__.load({
         };
       }, []);
 
+      // 原始事件按需加载：只在用户展开「排障」时才拉，平时不产生额外请求
+      React.useEffect(
+        function () {
+          if (!rawOpen || !host) return undefined;
+          let alive = true;
+          fetchJson(host, '/api/audit?sessionId=' + encodeURIComponent(sessionId) + '&limit=' + AUDIT_LIMIT)
+            .then(function (events) {
+              if (alive) setAudit(Array.isArray(events) ? events : []);
+            })
+            .catch(function () {
+              // 排障视图拉取失败不影响主视图
+            });
+          return function () {
+            alive = false;
+          };
+        },
+        [rawOpen, host, sessionId],
+      );
+
       const view = viewOf(snapshot, sessionId);
       const run = async function (mode, confirmText) {
         if (busy || !host) return;
@@ -504,8 +538,8 @@ window.__ModuleLoader__.load({
           });
           const snap = await fetchJson(host, '/api/snapshot?session=' + encodeURIComponent(sessionId));
           setSnapshot(snap);
-          const events = await fetchJson(host, '/api/audit?sessionId=' + encodeURIComponent(sessionId) + '&limit=' + AUDIT_LIMIT);
-          setAudit(Array.isArray(events) ? events : []);
+          const decisionBody = await fetchJson(host, '/api/decisions?sessionId=' + encodeURIComponent(sessionId) + '&limit=' + AUDIT_LIMIT);
+          setDecisions(decisionBody);
           setMessage(mode === 'restore-sandbox' ? '权限已回滚' : '已收回本会话的临时授权');
         } catch (err) {
           setMessage('操作失败，请稍后再试');
@@ -542,6 +576,16 @@ window.__ModuleLoader__.load({
           h('div', { style: S.main }, sandbox.baselineMode ? '你的默认是「' + modeText(sandbox.baselineMode) + '」' : ''),
           h('div', { style: S.side }, sandbox.checkedAt ? '核对时间 ' + fmtTime(sandbox.checkedAt) : ''),
         ),
+        // 价值指标：让「这个插件到底帮我省了什么」一眼可见（少点的批准次数是最硬的那个数）
+        view.stats && (view.stats.savedApprovals > 0 || view.stats.longestWindowMs > 0 || view.stats.pendingRestore > 0)
+          ? h(
+              'div',
+              { style: Object.assign({}, S.note, { marginTop: '12px', paddingTop: '10px', borderTop: '1px solid ' + COLORS.line }) },
+              '本次会话：少点了 ' + view.stats.savedApprovals + ' 次批准' +
+                (view.stats.longestWindowMs > 0 ? ' · 最长一次放开了 ' + fmtCn(view.stats.longestWindowMs) : '') +
+                (view.stats.pendingRestore > 0 ? ' · 待收回 ' + view.stats.pendingRestore + ' 项' : ''),
+            )
+          : null,
       );
 
       const granted = h(
@@ -609,24 +653,194 @@ window.__ModuleLoader__.load({
           : null,
       );
 
-      const auditCard = h(
+      // ---- 免打扰窗口（唯一由页面发起的放宽：点击即同意，但有界、可收回、写审计）----
+      const policy = config && config.policy ? config.policy : null;
+      const escalationTools = (policy && Array.isArray(policy.rules) ? policy.rules : [])
+        .filter(function (rule) {
+          return rule.enabled !== false && rule.scopeMode === 'sandbox-escalation';
+        })
+        .map(function (rule) {
+          return rule.match;
+        });
+      const maxTtl = policy && Number.isInteger(policy.maxTtlSeconds) ? policy.maxTtlSeconds : 1800;
+      const durationOptions = [15, 30, 60].filter(function (m) {
+        return m * 60 <= maxTtl;
+      });
+      const toolValue = winTool || escalationTools[0] || '';
+      const minutesValue = durationOptions.indexOf(Number(winMinutes)) >= 0 ? Number(winMinutes) : durationOptions[0] || 15;
+      const openWindowNow = async function () {
+        if (winBusy || !host || !toolValue) return;
+        const text =
+          '接下来 ' + minutesValue + ' 分钟，本会话的 ' + toolValue + ' 可以升到「' + modeText(winMode) + '」，期间不再询问你。到期会自动收回，也可以随时提前收回。确定开启？';
+        if (typeof window !== 'undefined' && typeof window.confirm === 'function' && !window.confirm(text)) return;
+        setWinBusy(true);
+        setWinMsg('');
+        try {
+          await fetchJson(host, '/api/window', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'x-dsh-guard': '1' },
+            body: JSON.stringify({ sessionId: sessionId, toolName: toolValue, mode: winMode, ttlSeconds: minutesValue * 60 }),
+          });
+          setWinMsg('已开启：' + minutesValue + ' 分钟内 ' + toolValue + ' 不再询问你');
+          const snap = await fetchJson(host, '/api/snapshot?session=' + encodeURIComponent(sessionId));
+          setSnapshot(snap);
+          const decisionBody = await fetchJson(host, '/api/decisions?sessionId=' + encodeURIComponent(sessionId) + '&limit=' + AUDIT_LIMIT);
+          setDecisions(decisionBody);
+        } catch (err) {
+          setWinMsg('未能开启：' + (err && err.message ? err.message : String(err)));
+        } finally {
+          setWinBusy(false);
+        }
+      };
+      const windowCard = h(
         'div',
         { style: S.card },
-        h('div', { style: S.title }, '本会话的最近记录'),
-        audit.length === 0
-          ? h('div', { style: S.empty }, '还没有记录。')
-          : audit.map(function (event) {
+        h('div', { style: S.title }, '免打扰窗口'),
+        h('div', { style: S.note }, '让这个会话在一段时间内不必为同一件事反复问你。它只是把「允许一次」提前批量给你自己：有明确时长、到期自动收回、随时可以提前收回。'),
+        escalationTools.length === 0
+          ? h('div', { style: S.empty }, '当前配置里没有可升级的工具（需要在 profile 的 cordis.patch.yml 里给某个工具配置 sandbox-escalation 规则）。')
+          : h(
+              'div',
+              { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap', marginTop: '10px' } },
+              h(
+                'select',
+                { value: toolValue, onChange: function (e) { setWinTool(e.target.value); }, style: S.select },
+                escalationTools.map(function (tool) {
+                  return h('option', { key: tool, value: tool }, tool);
+                }),
+              ),
+              h(
+                'select',
+                { value: winMode, onChange: function (e) { setWinMode(e.target.value); }, style: S.select },
+                h('option', { value: 'danger-full-access' }, '升到「完全访问」'),
+                h('option', { value: 'workspace-write' }, '升到「工作区可写」'),
+              ),
+              h(
+                'select',
+                { value: String(minutesValue), onChange: function (e) { setWinMinutes(e.target.value); }, style: S.select },
+                durationOptions.map(function (m) {
+                  return h('option', { key: m, value: String(m) }, m + ' 分钟');
+                }),
+              ),
+              h('button', { type: 'button', style: S.btn, disabled: winBusy, onClick: function () { void openWindowNow(); } }, winBusy ? '开启中…' : '开启窗口'),
+            ),
+        winMsg ? h('div', { style: S.note }, winMsg) : null,
+      );
+
+      // ---- 授权决策日志（一条授权一份记录）----
+      const records = decisions && Array.isArray(decisions.records) ? decisions.records : [];
+      const summary = decisions && decisions.summary ? decisions.summary : null;
+      const copyText = function (text, label) {
+        try {
+          if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+            navigator.clipboard.writeText(text).then(
+              function () {
+                setCopied('已复制' + label);
+              },
+              function () {
+                setCopied('复制被拒绝，请手动选择文本');
+              },
+            );
+            return;
+          }
+        } catch (err) {
+          // 落到下面的提示
+        }
+        setCopied('当前环境不支持复制');
+      };
+      const exportMarkdown = function () {
+        const lines = ['# 授权决策记录', ''];
+        for (const record of records) {
+          const state = record.outcome === 'active' ? '生效中' : record.outcome === 'revoked' ? '已收回' : '已到期';
+          lines.push('- ' + fmtTime(record.grantedAt) + ' ' + record.capability + '（' + record.ttlSeconds + ' 秒，' + state + '）');
+          if (record.uses > 0) lines.push('  - 被复用 ' + record.uses + ' 次，最后一次 ' + (record.lastUsedAt ? fmtTime(record.lastUsedAt) : '-'));
+          if (record.sandbox && record.sandbox.raisedTo) lines.push('  - 权限级别：' + modeText(record.sandbox.raisedTo) + (record.sandbox.restoredAt ? ' → ' + fmtTime(record.sandbox.restoredAt) + ' 已恢复' : record.sandbox.skipped ? ' → 你手动改过，未回滚' : ''));
+        }
+        copyText(lines.join('\n'), ' Markdown');
+      };
+      const recordCard = h(
+        'div',
+        { style: S.card },
+        h(
+          'div',
+          { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '8px', flexWrap: 'wrap' } },
+          h('div', { style: S.title }, '授权决策记录'),
+          h(
+            'div',
+            { style: { display: 'flex', gap: '6px' } },
+            records.length > 0
+              ? h('button', { type: 'button', style: Object.assign({}, S.btn, { padding: '2px 8px', fontSize: '12px' }), onClick: function () { copyText(JSON.stringify(records, null, 2), ' JSON'); } }, '复制 JSON')
+              : null,
+            records.length > 0 ? h('button', { type: 'button', style: Object.assign({}, S.btn, { padding: '2px 8px', fontSize: '12px' }), onClick: exportMarkdown }, '复制 Markdown') : null,
+            copied ? h('span', { style: S.note }, copied) : null,
+          ),
+        ),
+        records.length === 0
+          ? h('div', { style: S.empty }, '还没有授权记录。你在审批弹窗里点「允许一次」之后，这里会出现一条：批准了什么、被复用了几次、最后怎么结束的。')
+          : records.map(function (record) {
+              const stateText = record.outcome === 'active' ? '生效中' : record.outcome === 'revoked' ? '已收回' : '已到期';
+              const endText =
+                record.outcome === 'active'
+                  ? '进行中（还剩 ' + fmtCn(record.expiresAt - Date.now()) + '）'
+                  : fmtTime(record.endedAt) + (record.outcome === 'revoked' ? '（' + (record.revokedReason || '提前收回') + '）' : '（到期）');
+              const sandboxLine =
+                record.sandbox && record.sandbox.raisedTo
+                  ? '权限级别：提升到「' + modeText(record.sandbox.raisedTo) + '」' +
+                    (record.sandbox.restoredAt
+                      ? ' · ' + fmtTime(record.sandbox.restoredAt) + ' 已恢复到「' + modeText(record.sandbox.restoredTo) + '」'
+                      : record.sandbox.skipped
+                        ? ' · 你手动改过，Guard 未回滚'
+                        : record.outcome === 'active'
+                          ? ''
+                          : ' · 尚未收回')
+                  : null;
               return h(
                 'div',
-                { key: event.id, style: S.auditRow },
-                h('span', null, fmtTime(event.timestamp)),
-                h('span', null, DECISION_LABELS[event.decision] || event.decision),
-                h('span', { style: S.code }, (event.toolName || '') + (event.leaseId ? ' · ' + String(event.leaseId).slice(0, 8) : '')),
+                { key: record.leaseId, style: S.grant },
+                h(
+                  'div',
+                  { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '8px' } },
+                  h('div', { style: S.grantTitle }, fmtTime(record.grantedAt) + ' · ' + record.capability),
+                  pill(stateText, record.outcome === 'active' ? 'ok' : 'idle'),
+                ),
+                h('div', { style: S.note }, '批准 ' + record.ttlSeconds + ' 秒' + (record.uses > 0 ? ' · 被复用 ' + record.uses + ' 次（最后一次 ' + fmtTime(record.lastUsedAt) + '）' : ' · 还没有被复用')),
+                sandboxLine ? h('div', { style: S.note }, sandboxLine) : null,
+                h('div', { style: S.note }, '结束：' + endText),
               );
             }),
       );
 
-      return h('div', { style: S.page }, h('div', { style: S.wrap }, header, granted, h('div', null, actions), details, auditCard));
+      // ---- 原始事件（排障用，默认折叠）----
+      const rawCard = h(
+        'div',
+        { style: S.card },
+        h(
+          'button',
+          {
+            type: 'button',
+            style: Object.assign({}, S.btn, { border: 'none', padding: 0, color: COLORS.brand }),
+            onClick: function () {
+              setRawOpen(!rawOpen);
+            },
+          },
+          rawOpen ? '收起原始事件 ▴' : '原始事件（排障用）▾',
+        ),
+        rawOpen
+          ? audit.length === 0
+            ? h('div', { style: S.empty }, '加载中…')
+            : audit.map(function (event) {
+                return h(
+                  'div',
+                  { key: event.id, style: S.auditRow },
+                  h('span', null, fmtTime(event.timestamp)),
+                  h('span', null, DECISION_LABELS[event.decision] || event.decision),
+                  h('span', { style: S.code }, (event.toolName || '') + (event.leaseId ? ' · ' + String(event.leaseId).slice(0, 8) : '')),
+                );
+              })
+          : null,
+      );
+
+      return h('div', { style: S.page }, h('div', { style: S.wrap }, header, granted, h('div', null, actions), windowCard, recordCard, details, rawCard));
     }
 
     // ---------------- 设置页：范围挡位与 TTL（全局策略） ----------------

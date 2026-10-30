@@ -16,13 +16,20 @@
 </p>
 
 <p align="center">
-  <b>让 Agent 的临时授权有期限、可收回、可审计。</b>
+  <b>批准一次，换一段有期限的免打扰——到期自动收回，随时能提前收回，全程有记录。</b>
 </p>
 
 <p align="center">
   DSH Capsule 是面向 <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a> 的 <b>Capability Guard</b>：<br/>
-  为已有审批增加短期 Lease，并管理沙箱模式提升、到期回滚与审计。
+  把 DSH 的「每次都要问」变成「有界、可复用、可撤销、可审计」的短期授权。
 </p>
+
+<p align="center">
+  <img src="assets/guard-flow-cn.svg" alt="一次批准 → 会话内提示条 → 到期自动收回" width="100%" />
+</p>
+
+**30 秒看懂**：装完即用、不用先写配置。Agent 反复要求同一类提权时，你批准一次，接下来一段时间它不再问你；
+提示条一直告诉你「放开了什么、还剩多久、到期会怎样」，时间一到自动收回；想提前收回点一下就行。
 
 > [!IMPORTANT]
 > **项目定位已经变化。** 当前仓库是纯 TypeScript 的 Capability Guard，不再包含旧版 Python / Docker / Unix Domain Socket 隔离 Runtime。本文只描述当前代码真实存在的能力。2026-10-30 按项目决策移除凭证代理、命令凭证绑定及 Managed SDK/示例，当前聚焦通用短期授权。
@@ -45,14 +52,26 @@ DSH 原生的权限体系有两层，中间是空的：
 
 缺的那一层是：**「这个 Session 内、这个工具、这类操作，在一段时间内已经批过了」**——既有界、又能复用、还能撤销与审计。
 
-DSH Capsule 补的就是这一层：
+它能帮到的具体场景（也是它唯一值得装的理由）：
+
+- 让 Agent 连续跑十几分钟的重构 / 测试循环，而你不想每 30 秒点一次「允许一次」；
+- 需要临时写工作区外的东西（跑脚本、生成产物），但又不想把整个会话永久放开；
+- 事后要回答「刚才那半小时，究竟是谁把权限放宽到哪一档、什么时候收回的」。
+
+它能帮不到的（请务必看清）：
+
+- **不是安全沙箱**：它不放宽、也不收紧 DSH 本身的进程隔离能力；需要强隔离请用 DSH 原生 Sandbox；
+- **不能阻止其他插件**：`approval/request` 是开放瀑布，任何插件都能抢先认领或直接改会话权限；
+- **不做凭证代理**（2026-10-30 已按项目决策移除），凭证交给 DSH 原生。
+
+DSH Capsule 补的就是中间那一层：
 
 | 问题 | DSH Capsule 的处理方式 |
 |---|---|
 | 同一个安全操作反复弹审批 | `allowed-once` 后签发短期 Lease，在相同 Scope + Session 内复用 |
 | 授权范围太宽 | Lease 绑定 `Session × Tool × Scope × TTL` |
 | 授权无法自动收回 | TTL 到期回收；沙箱模式提升还会**回滚到批准前的档位** |
-| 发生了什么难以追踪 | Secret-safe Audit + 只读 Governance Console（放宽/回滚都会留痕） |
+| 发生了什么难以追踪 | 授权决策记录（谁批的 / 复用几次 / 怎么结束）+ 只读治理台 |
 | 安全失败被静默放行 | 关键路径统一 **Fail Closed** |
 
 一句话理解：
@@ -184,11 +203,9 @@ SHA-256(toolName + 目标沙箱模式)
 
 授权真正生效依赖宿主服务（`ctx.sessionProjections` + `session.append("sandbox/mode", …)`）；服务缺失时该链路自动降级为"不提升"，即回到 DSH 原生逐次审批，**不会越权**。
 
-## Governance Console
+## 界面：一眼、详情、配置
 
-<p align="center">
-  <img src="assets/governance-console-cn.svg" alt="Governance Console Preview" width="100%" />
-</p>
+> 顶部那张图是**结构示意**，不是截图；下面描述的是真实槽位与真实行为。
 
 治理界面按「先会话、后全局」组织；前两个入口都挂在**会话作用域**上，组件直接拿到宿主传入的 `sessionId`，
 因此显示的一定是当前会话：
@@ -248,6 +265,38 @@ SHA-256(toolName + 目标沙箱模式)
 
 原始 `Lease ID`、`sessionId`、Scope 哈希与完整 Scope 串只出现在「技术详情」展开区；会话名来自 DSH 的会话标题（`ctx.sessionTitle`），读不到时降级为工作目录名或短 ID。
 
+### 授权决策记录（而不是"事件流"）
+
+会话内 tab 展示的是**一条授权一份记录**：批准了什么 → 被复用了多少次 → 权限级别抬高/收回没有 → 最后怎么结束的。
+`PASSTHROUGH_ALLOW` / `TOOL_SUCCESS` 这类属于遥测，默认折叠在「原始事件（排障用）」里——把几百条遥测摆在用户面前，
+等于没有审计。
+
+每条记录可以「复制 JSON / 复制 Markdown」，机器可读版本由 `GET /api/decisions` 提供（同一份数据）。
+
+会话顶部还有一行**价值指标**：
+
+```
+本次会话：少点了 12 次批准 · 最长一次放开了 4 分 51 秒 · 待收回 1 项
+```
+
+`少点了 N 次批准` = 该会话里授权被复用的次数（每一次复用，都是你不用再点一次「允许一次」）。
+
+### 免打扰窗口（唯一由页面发起的放宽）
+
+在会话 tab 里选「工具 + 目标档位 + 时长」，点一下就把「允许一次」提前批量给自己：
+
+```text
+[ pwsh ▾ ]  [ 升到「完全访问」▾ ]  [ 30 分钟 ▾ ]   [ 开启窗口 ]
+```
+
+- 点击即同意（等价一次 `allowed-once`），但**有界**：TTL 必须是正整数且不得超过 `maxTtlSeconds`，不静默裁剪；
+- 只对配置为 `sandbox-escalation` 的工具生效（`allowTool` 校验），不能拿它当任意工具的放宽通道；
+- 开窗失败（拿不到会话对象 / 提升失败）会撤销刚签发的授权，不留"授权了却没生效"的半成品；
+- 到期自动收回，随时可「提前收回」；审计记 `WINDOW_OPENED`，决策记录里能看到是谁在什么时候开的多长窗口。
+
+> **安全提示**：治理接口是本机 loopback 上的**无鉴权面**——"能开窗"就等于"本机进程也能放宽权限"
+> （上限受 `maxTtlSeconds` 约束）。不信任本机进程时，请把 `console.enabled` 设为 `false`。
+
 档位自动回滚（`sweepIntervalMs`，默认 **30000**，`0` 表示关闭）：
 
 ```ts
@@ -277,10 +326,12 @@ SHA-256(toolName + 目标沙箱模式)
 GET   /                 前端页面（独立入口；支持 ?session=<id> 聚焦会话）
 GET   /console.js       共享前端脚本（面板与独立页面复用）
 GET   /api/snapshot     治理快照（会话视图 + 每条授权的剩余毫秒；可带 ?session=<id>）
-GET   /api/audit        审计过滤查询
+GET   /api/audit        审计过滤查询（原始事件流，含遥测）
+GET   /api/decisions    授权决策记录（一条授权一份：批准/复用/权限级别/结束方式；可带 sessionId/toolName/limit）
 GET   /api/config       运行期策略 + 挡位目录 + 收缩动作可用性 + 自动回滚节拍
 PATCH /api/config       写接口：defaultScope / defaultTtlSeconds / maxTtlSeconds
 POST  /api/revoke       收缩型动作：action=revoke（撤销本会话全部授权）| restore-sandbox（只回滚档位）
+POST  /api/window       免打扰窗口：{sessionId, toolName, mode, ttlSeconds}（唯一由页面发起的放宽，有界且可收回）
 ```
 
 此外，插件会尝试把同一组接口挂到 DSH Web 服务器上的**同源**前缀 `/guard/…`（`registerGuardWebRoutes`）。
@@ -309,8 +360,11 @@ POST  /api/revoke       收缩型动作：action=revoke（撤销本会话全部�
 - **收缩型动作**（`POST /api/revoke`）只有两个方向，且都只能让权限变小：
   - `action=revoke`：撤销该会话仍有效的全部授权，并回滚会话沙箱档位；
   - `action=restore-sandbox`：只结算该会话中**已经失效**的授权并回写档位，仍有效的授权原样不动。
-  - 两者都写审计（`LEASE_REVOKED` / `SANDBOX_MODE_RESTORED`），都遵守「用户手动改过档位则跳过回滚」的红线；
-  - 页面仍然**不做任何审批与签发**动作（那些必须走 DSH 原生审批与 API）。
+  - 两者都写审计（`LEASE_REVOKED` / `SANDBOX_MODE_RESTORED`），都遵守「用户手动改过档位则跳过回滚」的红线。
+- **唯一由页面发起的放宽**（`POST /api/window`，即「免打扰窗口」）：用户显式点击＝一次 `allowed-once`，
+  签发有界 `sandbox-mode` 授权并立即提升会话档位。约束：TTL ≤ `maxTtlSeconds`（不静默裁剪）、
+  工具必须已配置为 `sandbox-escalation`、必须能解析到真实 Session（否则拒绝）、失败会撤销刚签发的授权。
+- 页面**不做审批**：审批永远走 DSH 原生流程；开窗只是把"你已经同意的这件事"提前落地成有界授权。
 
 安全属性：
 
@@ -331,7 +385,9 @@ POST  /api/revoke       收缩型动作：action=revoke（撤销本会话全部�
 - Windows / macOS / Linux 均可运行核心 TypeScript 代码；CI 已配置三平台矩阵
 
 > [!NOTE]
-> `@dsh-capsule/adapter` 现已声明 `dsh.bundle.patch`（见 `adapter/cordis.patch.yml`），因此可以作为一个 profile bundle 层被 DSH 装载；但**尚未在真实 profile 中做过端到端实跑**，也没有发布到 registry。下面的"源码开发方式"与"接入 DSH profile"两段都请按 Developer Preview 对待。
+> `@dsh-capsule/adapter` 已声明 `dsh.bundle.patch`（见 `adapter/cordis.patch.yml`），可作为一个 profile bundle 层被 DSH 装载；
+> 本机 desktop profile 已安装并实跑（hook 挂载、会话内提示条 / 能力授权 tab / 设置页均可用）。尚未发布到 npm registry，
+> 也**没有**做过多平台真机验证——CI 只跑三平台构建与测试。
 
 ```bash
 git clone <your-repository-url>
@@ -525,7 +581,7 @@ adapter/
     ├── capability/           # 四个 hook、Scope、Lease、沙箱提升与回滚、回滚审计
     ├── integration/          # 真 cordis 接线与权限生命周期测试
     ├── audit/                # 脱敏审计
-    └── console/              # 会话视图 / 共享前端 / HTTP 接口 / 收缩型动作 / 会话名解析
+    └── console/              # 会话视图 / 决策记录 / HTTP 接口 / 动作（收缩 + 有界放宽）/ 会话名解析
 scripts/smoke-console.mjs     # 治理台冒烟脚本（示例数据 + 真实收缩动作）
 .github/workflows/ci.yml      # Windows / macOS / Linux 构建与测试
 ```
