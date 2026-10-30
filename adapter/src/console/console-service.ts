@@ -1,8 +1,19 @@
 import type { ToolAuditEvent } from "../audit/types.js";
+import { SANDBOX_MODES, type SandboxMode } from "../capability/escalation.js";
 import type { CapabilityLease } from "../capability/types.js";
-import type { ConsoleAuditQuery, ConsoleAuditSource, ConsoleLeaseSource, ConsoleLeaseView, ConsolePluginView, ConsoleToolStat, GovernanceConsoleDeps, GovernanceSnapshot, GovernanceSummary } from "./types.js";
-// 作用：聚合授权、工具调用与审计的只读治理视图。
-// 授权安全校验仍由 LeaseManager 执行，查询不修改运行状态。
+import type { SessionGrantState } from "../capability/sandbox-grant.js";
+import type { ConsoleAuditQuery, ConsoleAuditSource, ConsoleAuthState, ConsoleFocus, ConsoleGrantView, ConsoleLeaseSource, ConsoleLeaseView, ConsolePluginView, ConsoleSandboxState, ConsoleSandboxView, ConsoleSessionAuth, ConsoleSessionView, ConsoleToolStat, GovernanceConsoleDeps, GovernanceSnapshot, GovernanceSummary, SnapshotOptions } from "./types.js";
+/** 剩余时间进入「即将到期」的阈值（毫秒）——只影响展示文案，不影响任何授权判定。 */
+const EXPIRING_THRESHOLD_MS = 30_000;
+/** 档位的中文说法——界面（对话内提示条与治理台）里绝不出现 read-only / danger-full-access 这类内部标识。 */
+const MODE_TEXT: Record<SandboxMode, string> = { "read-only": "只读", "workspace-write": "工作区可写", "danger-full-access": "完全访问" };
+function modeText(mode: SandboxMode | undefined): string {
+  return mode ? (MODE_TEXT[mode] ?? mode) : "未知";
+}
+// 作用：聚合授权、工具调用与审计的只读治理视图，并把「授权是否有效」与「沙箱档位是否已恢复」
+// 投影成两个互不覆盖的状态（规格 Phase 4 可用性改造）。
+// 授权安全校验仍由 LeaseManager 执行，查询不修改运行状态；沙箱档位必须来自宿主实时读取，
+// 读不到就是 unknown，禁止用「倒计时归零」推断出「已恢复」。
 export class GovernanceConsole {
   private readonly now: () => number;
   private readonly guardName: string;
@@ -16,8 +27,9 @@ export class GovernanceConsole {
       throw new Error("GUARD_CONSOLE_INVALID: activityLimit must be a positive integer");
     }
   }
-  async snapshot(): Promise<GovernanceSnapshot> {
-    // 作用：生成授权白名单投影、按 callId 去重的工具统计与最近审计活动。
+  async snapshot(options?: SnapshotOptions): Promise<GovernanceSnapshot> {
+    // 作用：生成授权白名单投影、按 callId 去重的工具统计、最近审计活动，以及【会话视图】。
+    // 会话视图是治理台首屏的唯一数据来源：它把「还剩多久」与「档位收回了没有」分成两行状态。
     const now = this.now();
     const events = this.deps.audit.list();
     const leases = await this.deps.leases.list();
@@ -29,7 +41,10 @@ export class GovernanceConsole {
       leasesExpired: leaseViews.filter((lease) => lease.status === "EXPIRED").length,
       auditedEvents: events.length,
     };
+    const requested = typeof options?.sessionId === "string" && options.sessionId.length > 0 ? options.sessionId : undefined;
+    const sessions = this.buildSessions(leases, events, now, requested);
     return {
+      schemaVersion: 2,
       generatedAt: now,
       guardName: this.guardName,
       summary,
@@ -37,6 +52,8 @@ export class GovernanceConsole {
       tools: this.toolStats(events),
       activity: [...events].reverse().slice(0, this.activityLimit),
       leases: leaseViews,
+      focus: this.resolveFocus(requested, sessions),
+      sessions,
     };
   }
   queryAudit(query: ConsoleAuditQuery): ToolAuditEvent[] {
@@ -76,6 +93,192 @@ export class GovernanceConsole {
       revokeReason: lease.revokeReason,
     };
   }
+  private buildSessions(leases: readonly CapabilityLease[], events: readonly ToolAuditEvent[], now: number, requested: string | undefined): ConsoleSessionView[] {
+    // 作用：按会话聚合授权与沙箱状态——会话来源只有两个（有授权的会话 / 有档位记录的会话），
+    // 行数因此天然有界；显式指定的会话即使完全没有数据也会生成一个空视图，这样页面才能如实回答
+    // 「本会话当前没有临时授权」，而不是把别人的授权显示成你的。
+    const sandboxStates = new Map<string, SessionGrantState>();
+    for (const state of this.deps.sandbox?.states() ?? []) sandboxStates.set(state.sessionId, state);
+    const bySession = new Map<string, CapabilityLease[]>();
+    for (const lease of leases) {
+      const bucket = bySession.get(lease.sessionId);
+      if (bucket) bucket.push(lease);
+      else bySession.set(lease.sessionId, [lease]);
+    }
+    for (const sessionId of sandboxStates.keys()) {
+      if (!bySession.has(sessionId)) bySession.set(sessionId, []);
+    }
+    if (requested !== undefined && !bySession.has(requested)) bySession.set(requested, []);
+    const lastAuditAt = new Map<string, number>();
+    for (const event of events) {
+      if (typeof event.sessionId !== "string" || event.sessionId.length === 0) continue;
+      lastAuditAt.set(event.sessionId, Math.max(lastAuditAt.get(event.sessionId) ?? 0, event.timestamp));
+    }
+    const views: { view: ConsoleSessionView; activityAt: number }[] = [];
+    for (const [sessionId, sessionLeases] of bySession) {
+      const state = sandboxStates.get(sessionId);
+      const auth = this.projectAuth(sessionLeases, state, now);
+      const sandbox = this.projectSandbox(sessionId, state, sessionLeases, auth, now);
+      const descriptor = this.describeSession(sessionId);
+      const activityAt = Math.max(lastAuditAt.get(sessionId) ?? 0, ...sessionLeases.map((lease) => lease.issuedAt), state?.lastOutcome?.at ?? 0);
+      views.push({
+        activityAt,
+        view: {
+          sessionId,
+          label: descriptor.label,
+          labelSource: descriptor.source,
+          cwd: descriptor.cwd,
+          auth,
+          sandbox,
+          actions: {
+            canRevoke: auth.activeCount > 0,
+            // 只允许对「授权已失效但档位没回来」的会话手动回滚；用户自己改过的档位不得被覆盖（红线 2）
+            canRestoreSandbox: sandbox.state === "pending-restore",
+          },
+        },
+      });
+    }
+    views.sort((a, b) => b.activityAt - a.activityAt);
+    if (requested !== undefined) {
+      const index = views.findIndex((item) => item.view.sessionId === requested);
+      if (index > 0) {
+        const [focused] = views.splice(index, 1);
+        if (focused) views.unshift(focused);
+      }
+    }
+    return views.map((item) => item.view);
+  }
+  private projectAuth(leases: readonly CapabilityLease[], state: SessionGrantState | undefined, now: number): ConsoleSessionAuth {
+    // 作用：授权状态投影——active/expiring/expired/revoked 四态只由 Lease 决定，与沙箱无关。
+    // 「已过期但未被惰性标记」在这里按过期处理（与 projectLease 同一规则，仅展示层修正）。
+    const expired = leases.filter((lease) => lease.status === "EXPIRED" || (lease.status === "ACTIVE" && now >= lease.expiresAt));
+    const isLive = (lease: CapabilityLease): boolean => lease.status === "ACTIVE" && now < lease.expiresAt;
+    const active = leases.filter(isLive);
+    const targetModeByLease = new Map<string, SandboxMode>();
+    for (const grant of state?.grants ?? []) targetModeByLease.set(grant.leaseId, grant.requestedMode);
+    const grants: ConsoleGrantView[] = leases
+      .map((lease) => this.projectGrant(lease, targetModeByLease.get(lease.id), now))
+      .sort((a, b) => b.expiresAt - a.expiresAt);
+    let authState: ConsoleAuthState = "none";
+    if (active.length > 0) {
+      const remaining = Math.max(0, Math.min(...active.map((lease) => lease.expiresAt)) - now);
+      authState = remaining <= EXPIRING_THRESHOLD_MS ? "expiring" : "active";
+    } else if (leases.length > 0) {
+      // 有历史授权但都已失效：优先说明「到期的」，其次才是「被撤销的」。
+      // 注意必须把已被 LeaseManager 惰性标记为 EXPIRED 的记录也算进来（读沙箱状态会顺带触发该标记），
+      // 否则到期授权会被误报成「已撤销」。
+      authState = expired.length > 0 ? "expired" : "revoked";
+    }
+    const earliest = active.length > 0 ? Math.min(...active.map((lease) => lease.expiresAt)) : undefined;
+    return {
+      state: authState,
+      activeCount: active.length,
+      nextExpiresAt: earliest,
+      remainingMs: earliest === undefined ? undefined : Math.max(0, earliest - now),
+      grants,
+    };
+  }
+  private projectGrant(lease: CapabilityLease, targetMode: SandboxMode | undefined, now: number): ConsoleGrantView {
+    // 作用：单条授权的人话投影——capabilityText 回答「放开了什么」，reasonText 回答「为什么会有它」。
+    // 原始 ID / Scope 哈希只进技术详情（scopeDisplay / scopeKeyShort），不参与首屏文案。
+    return {
+      id: lease.id,
+      toolName: lease.toolName,
+      kind: lease.kind,
+      capabilityText: this.capabilityText(lease, targetMode),
+      reasonText: `你于 ${formatClock(lease.issuedAt)} 批准了这次${lease.kind === "sandbox-mode" ? "沙箱升级" : "工具调用"}`,
+      scopeKind: lease.scope.kind,
+      scopeDisplay: lease.scope.display,
+      scopeKeyShort: lease.scope.key.slice(0, 8),
+      issuedAt: lease.issuedAt,
+      expiresAt: lease.expiresAt,
+      remainingMs: Math.max(0, lease.expiresAt - now),
+      targetMode,
+    };
+  }
+  private capabilityText(lease: CapabilityLease, targetMode: SandboxMode | undefined): string {
+    // 作用：把 Scope 翻译成一句人话——用户不需要知道 exact-arguments / SHA-256 是什么。
+    if (lease.kind === "sandbox-mode") {
+      return targetMode ? `${lease.toolName} 可以免审批升到「${modeText(targetMode)}」` : `${lease.toolName} 的沙箱升级已获批准`;
+    }
+    if (lease.scope.kind === "exact-arguments") return `${lease.toolName} 可以用与上次完全相同的参数重试，不再询问`;
+    if (lease.scope.kind === "fields") return `${lease.toolName} 在相同字段范围内重试，不再询问`;
+    if (lease.scope.kind === "tool") return `${lease.toolName} 的任何调用都不再询问（范围最宽）`;
+    return `${lease.toolName} 的同类调用不再询问`;
+  }
+  private projectSandbox(sessionId: string, state: SessionGrantState | undefined, leases: readonly CapabilityLease[], auth: ConsoleSessionAuth, now: number): ConsoleSandboxView {
+    // 作用：沙箱状态投影——回答「那次放宽收回来了没有」。判定顺序固定，任何情况下都不允许
+    // 用授权倒计时推断档位状态；读不到宿主档位就是 unknown（页面据此显示「无法确认」）。
+    const hasSandboxLease = leases.some((lease) => lease.kind === "sandbox-mode");
+    const targetMode = state ? widestMode(state.grants.map((grant) => grant.requestedMode)) : undefined;
+    if (!state) {
+      const last = this.deps.sandbox?.lastOutcomeOf(sessionId);
+      if (!last) {
+        return hasSandboxLease
+          ? { state: "unknown", targetMode, checkedAt: now, note: "本会话有沙箱授权，但没有档位变更记录（可能未实际提升）" }
+          : { state: "not-involved", checkedAt: now };
+      }
+      return {
+        state: last.outcome === "RESTORED" ? "restored" : "user-override",
+        // 会话状态已被 releaseSession 清理：此刻没有 session 对象可实时读取，
+        // 用终态记录里的模式（那就是 Guard 最后写入的值）作为展示，且文案里带上时间，不假装是实时读数。
+        currentMode: last.mode,
+        targetMode,
+        checkedAt: now,
+        lastOutcomeAt: last.at,
+        note: last.outcome === "RESTORED" ? `Guard 已在 ${formatClock(last.at)} 把权限恢复到「${modeText(last.mode)}」` : `权限由你自己设定为「${modeText(last.mode)}」，Guard 未改动`,
+      };
+    }
+    const current = state.currentMode;
+    if (current === undefined) {
+      return { state: "unknown", targetMode, baselineMode: state.baseline, checkedAt: now, note: "无法读取当前沙箱档位（宿主能力缺失），因此不显示是否已恢复" };
+    }
+    if (state.liveCount > 0) {
+      if (state.status === "skipped" || (state.lastWritten !== undefined && current !== state.lastWritten)) {
+        return { state: "user-override", currentMode: current, baselineMode: state.baseline, targetMode, checkedAt: now, note: `权限现在是「${modeText(current)}」（由你设定），Guard 不会覆盖你的选择` };
+      }
+      if (state.lastWritten === undefined) {
+        return { state: "unchanged", currentMode: current, baselineMode: state.baseline, targetMode, checkedAt: now, note: "档位本来就足够宽，Guard 没有修改" };
+      }
+      return { state: "raised", currentMode: current, baselineMode: state.baseline, targetMode, checkedAt: now };
+    }
+    if (state.lastWritten === undefined) {
+      // Guard 从未改过档位，也没有有效授权：与沙箱无关
+      return { state: "not-involved", currentMode: current, checkedAt: now };
+    }
+    if (state.status === "restored") {
+      return { state: "restored", currentMode: current, baselineMode: state.baseline, targetMode, checkedAt: now, lastOutcomeAt: state.lastOutcome?.at };
+    }
+    if (state.status === "skipped") {
+      return { state: "user-override", currentMode: current, baselineMode: state.baseline, targetMode, checkedAt: now, note: `权限是「${modeText(current)}」（由你设定），Guard 不会覆盖你的选择` };
+    }
+    return {
+      state: "pending-restore",
+      currentMode: current,
+      baselineMode: state.baseline,
+      targetMode,
+      checkedAt: now,
+      note: auth.state === "revoked" ? "授权已撤销，但权限还没收回去" : "授权已到期，但权限还没收回去",
+    };
+  }
+  private describeSession(sessionId: string): { label: string; source: "title" | "cwd" | "id"; cwd?: string } {
+    // 作用：会话名称解析（可选宿主能力）——任何异常都降级为短 ID，绝不影响治理视图生成
+    try {
+      const described = this.deps.sessions?.describe(sessionId);
+      if (described && typeof described.label === "string" && described.label.length > 0) return described;
+    } catch {
+      // 忽略：降级为短 ID
+    }
+    return { label: `会话 ${sessionId.slice(0, 8)}`, source: "id" };
+  }
+  private resolveFocus(requested: string | undefined, sessions: readonly ConsoleSessionView[]): ConsoleFocus {
+    // 作用：聚焦会话选择——显式指定优先（即使该会话没有任何授权）；否则取最近有活动的会话，
+    // 并在快照里如实标注来源，页面据此决定写「当前会话」还是「最近授权的会话」。
+    if (requested !== undefined) return { sessionId: requested, source: "explicit" };
+    const first = sessions[0];
+    if (!first) return { source: "none" };
+    return { sessionId: first.sessionId, source: "recent-activity" };
+  }
   private toolStats(events: ToolAuditEvent[]): ConsoleToolStat[] {
     // 作用：Tools 维度统计——按 toolName 聚合各决策计数；invocations 按 callId 去重（一次调用链
     // ASK→LEASE_ISSUED→TOOL_SUCCESS 产生多条事件但只算一次调用）；lastActivityAt 取最新时间戳
@@ -100,4 +303,20 @@ export class GovernanceConsole {
     }
     return [...stats.values()].map(({ callIds, ...stat }) => stat);
   }
+}
+/** 取最宽的档位——同一会话可能有多条不同目标的授权，展示时取最宽的那个（顺序以 SANDBOX_MODES 为准）。 */
+function widestMode(modes: readonly SandboxMode[]): SandboxMode | undefined {
+  if (modes.length === 0) return undefined;
+  let widest = modes[0] as SandboxMode;
+  for (const mode of modes) {
+    if (SANDBOX_MODES.indexOf(mode) > SANDBOX_MODES.indexOf(widest)) widest = mode;
+  }
+  return widest;
+}
+/** 把时间戳格式化为本机时间的「时:分」，用于人话文案（不参与任何判定）。 */
+function formatClock(ts: number): string {
+  const date = new Date(ts);
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  return `${hours}:${minutes}`;
 }

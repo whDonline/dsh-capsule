@@ -177,7 +177,9 @@ describe("HTTP 只读查看器（规格 Phase 4）", () => {
     try {
       const post = await fetch(`${handle.url}api/snapshot`, { method: "POST" });
       expect(post.status).toBe(405);
-      const unknown = await fetch(`${handle.url}api/revoke`);
+      // /api/revoke 是真实存在的收缩型动作路由（只接受 POST），GET 应 405 而不是 404
+      expect((await fetch(`${handle.url}api/revoke`)).status).toBe(405);
+      const unknown = await fetch(`${handle.url}api/nope`);
       expect(unknown.status).toBe(404);
     } finally {
       await handle.close();
@@ -191,7 +193,9 @@ describe("HTTP 只读查看器（规格 Phase 4）", () => {
       expect(res.headers.get("content-type")).toContain("text/html");
       expect(res.headers.get("content-security-policy")).toContain("connect-src 'self'");
       const html = await res.text();
-      expect(html).toContain("DSH Capability Guard Console");
+      // 标题改为面向使用者的「临时授权」，但页面仍由同一份共享脚本提供（此处只校验外壳契约）
+      expect(html).toContain("临时授权");
+      expect(html).toContain("DshGuardConsole.mount");
     } finally {
       await handle.close();
     }

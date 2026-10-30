@@ -34,7 +34,7 @@ describe("SandboxGrantManager 提升（P0-2）", () => {
     const grants = new SandboxGrantManager(host, leases);
     const lease = await seedLease(leases, "s1");
     const result = await grants.applyGrant({ leaseId: lease.id, sessionId: "s1", session: "s1", toolName: "pwsh", requestedMode: "danger-full-access" });
-    expect(result).toEqual({ outcome: "RAISED", mode: "danger-full-access", baselineMode: "workspace-write" });
+    expect(result).toEqual({ outcome: "RAISED", mode: "danger-full-access", sessionId: "s1", leaseId: lease.id, baselineMode: "workspace-write" });
     expect(writes).toEqual([{ sessionId: "s1", mode: "danger-full-access" }]);
     expect(modeOf("s1")).toBe("danger-full-access");
   });
@@ -87,7 +87,7 @@ describe("SandboxGrantManager 回滚（P0-2）", () => {
     await grants.applyGrant({ leaseId: lease.id, sessionId: "s1", session: "s1", toolName: "pwsh", requestedMode: "danger-full-access" });
     await leases.revoke(lease.id, "test");
     const result = await grants.releaseGrant(lease.id);
-    expect(result).toEqual({ outcome: "RESTORED", mode: "workspace-write" });
+    expect(result).toEqual({ outcome: "RESTORED", mode: "workspace-write", sessionId: "s1", leaseId: lease.id });
     expect(modeOf("s1")).toBe("workspace-write");
     expect(writes.map((w) => w.mode)).toEqual(["danger-full-access", "workspace-write"]);
   });
@@ -111,7 +111,7 @@ describe("SandboxGrantManager 回滚（P0-2）", () => {
     modes.set("s1", "read-only");
     const writesBefore = writes.length;
     const result = await grants.releaseGrant(lease.id);
-    expect(result).toEqual({ outcome: "SKIPPED_USER_OVERRIDE", mode: "read-only" });
+    expect(result).toEqual({ outcome: "SKIPPED_USER_OVERRIDE", mode: "read-only", sessionId: "s1", leaseId: lease.id });
     expect(modeOf("s1")).toBe("read-only");
     expect(writes).toHaveLength(writesBefore);
   });
@@ -123,7 +123,7 @@ describe("SandboxGrantManager 回滚（P0-2）", () => {
     await grants.applyGrant({ leaseId: lease.id, sessionId: "s1", session: "s1", toolName: "pwsh", requestedMode: "danger-full-access" });
     modes.set("s1", "workspace-write");
     const result = await grants.releaseGrant(lease.id);
-    expect(result).toEqual({ outcome: "SKIPPED_USER_OVERRIDE", mode: "workspace-write" });
+    expect(result).toEqual({ outcome: "SKIPPED_USER_OVERRIDE", mode: "workspace-write", sessionId: "s1", leaseId: lease.id });
   });
   it("部分回滚 + 冲突检测基准：窄授权（未真正提升）释放时不得把 Guard 自己的写入误判为用户改动", async () => {
     const leases = new LeaseManager(new MemoryLeaseStore(clock), clock);
@@ -138,7 +138,7 @@ describe("SandboxGrantManager 回滚（P0-2）", () => {
     expect(narrowResult?.outcome).toBe("UNCHANGED");
     expect(modeOf("s1")).toBe("danger-full-access");
     const wideResult = await grants.releaseGrant(wide.id);
-    expect(wideResult).toEqual({ outcome: "RESTORED", mode: "read-only" });
+    expect(wideResult).toEqual({ outcome: "RESTORED", mode: "read-only", sessionId: "s1", leaseId: wide.id });
     expect(modeOf("s1")).toBe("read-only");
   });
   it("已有授权期间用户抢改模式 → 后续提升请求被跳过（不覆盖用户选择）", async () => {
@@ -150,7 +150,7 @@ describe("SandboxGrantManager 回滚（P0-2）", () => {
     modes.set("s1", "read-only");
     const second = await seedLease(leases, "s1");
     const result = await grants.applyGrant({ leaseId: second.id, sessionId: "s1", session: "s1", toolName: "pwsh", requestedMode: "danger-full-access" });
-    expect(result).toEqual({ outcome: "SKIPPED_USER_OVERRIDE", mode: "read-only" });
+    expect(result).toEqual({ outcome: "SKIPPED_USER_OVERRIDE", mode: "read-only", sessionId: "s1", leaseId: second.id });
     expect(modeOf("s1")).toBe("read-only");
   });
   it("从未真正提升过的 Lease 释放时无事发生（不写 session log）", async () => {
@@ -179,7 +179,7 @@ describe("SandboxGrantManager 结算（P0-2）", () => {
     await grants.applyGrant({ leaseId: lease.id, sessionId: "s1", session: "s1", toolName: "pwsh", requestedMode: "danger-full-access" });
     now += 61_000;
     const results = await grants.settle();
-    expect(results).toEqual([{ outcome: "RESTORED", mode: "workspace-write" }]);
+    expect(results).toEqual([{ outcome: "RESTORED", mode: "workspace-write", sessionId: "s1", leaseId: lease.id }]);
     expect(modeOf("s1")).toBe("workspace-write");
     expect(grants.activeGrants()).toHaveLength(0);
   });

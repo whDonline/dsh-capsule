@@ -110,6 +110,21 @@ function texts(node: FakeNode): string[] {
   walk(node);
   return out;
 }
+function textsExcept(node: FakeNode, skipClass: string): string[] {
+  // 作用：与 texts 类似，但跳过指定 class 的子树——用来断言「原始 ID 只出现在技术详情里」
+  const out: string[] = [];
+  const walk = (current: FakeNode): void => {
+    if (current.className && current.className.split(/\s+/).includes(skipClass)) return;
+    if (current.textContent) out.push(current.textContent);
+    for (const child of current.children) walk(child);
+  };
+  walk(node);
+  return out;
+}
+function findPanel(container: FakeNode, tab: string): FakeNode {
+  // 作用：按 data-tab 找到某个面板（替身 DOM 没有 querySelector，只能遍历 children）
+  return container.children.find((child) => child.dataset.tab === tab) as FakeNode;
+}
 function makeConsole(leases: LeaseManager, audit: AuditService): GovernanceConsole {
   return new GovernanceConsole({ audit, leases, guardName: "dsh-capability-guard" });
 }
@@ -145,6 +160,49 @@ describe("治理台共享 UI（真实治理接口 + 最小 DOM）", () => {
       expect(rendered.join("|")).toContain("defaultScope");
       ui.dispose();
       expect(container.children).toHaveLength(0);
+    } finally {
+      await handle.close();
+    }
+  });
+  it("首屏：当前会话 + 两条独立状态，原始授权 ID 只出现在技术详情里", async () => {
+    // 场景：授权已到期，但沙箱档位还没回滚——这正是「倒计时归零 ≠ 恢复完成」要显示出来的状态
+    let now = 1_000_000;
+    const leases = new LeaseManager(new MemoryLeaseStore(() => now), () => now);
+    const audit = new AuditService();
+    const lease = await leases.issue({ sessionId: "session-pending", toolName: "pwsh", scope: { kind: "sandbox-escalation", key: "abcdef123456", display: "tool=pwsh 沙箱升级至 danger-full-access" }, ttlSeconds: 300, kind: "sandbox-mode" });
+    now += 301_000;
+    const sandbox = {
+      states: () => [{ sessionId: "session-pending", baseline: "workspace-write" as const, lastWritten: "danger-full-access" as const, currentMode: "danger-full-access" as const, status: "raised" as const, liveCount: 0, staleCount: 1, grants: [{ leaseId: lease.id, toolName: "pwsh", requestedMode: "danger-full-access" as const, writtenMode: "danger-full-access" as const, raised: true, live: false }] }],
+      lastOutcomeOf: () => undefined,
+    };
+    const gov = new GovernanceConsole({ audit, leases, now: () => now, sandbox, sessions: { describe: () => ({ label: "修复登录超时", source: "title" as const, cwd: "D:\\gitpro\\demo" }) } });
+    const actions = { revokeSession: async (sessionId: string) => ({ sessionId, revoked: 0, results: [] }), restoreSandbox: async (sessionId: string) => ({ sessionId, results: [] }) };
+    const handle: ConsoleHttpHandle = await startConsoleServer({ console: gov, actions, sweepIntervalMs: 30_000, port: 0 });
+    try {
+      const document_ = makeDocument();
+      const container = document_.createElement("div");
+      const sandboxGlobal = { document: document_, fetch: (...args: Parameters<typeof fetch>) => fetch(...args), setInterval: () => 0, clearInterval: () => undefined, URL, Date, Math, JSON, Number, String, Object, Array, Error, isNaN, console };
+      runInNewContext(CONSOLE_CLIENT_JS, sandboxGlobal);
+      const factory = sandboxGlobal.DshGuardConsole as { mount(options: Record<string, unknown>): UiHandle };
+      const ui = factory.mount({ host: handle.url.replace(/\/$/, ""), container, document: document_, pollMs: 1e9, sessionId: "session-pending" });
+      await ui.refresh();
+      await ui.loadAudit();
+      const sessionPanel = findPanel(container, "session");
+      const firstScreen = texts(sessionPanel).join("|");
+      const withoutDetails = textsExcept(sessionPanel, "dgc-details-body").join("|");
+      // 会话名 + 两条独立状态 + 人话说明
+      expect(firstScreen).toContain("修复登录超时");
+      expect(firstScreen).toContain("已到期");
+      expect(firstScreen).toContain("待回滚");
+      expect(firstScreen).toContain("完全访问");
+      expect(firstScreen).toContain("立即回滚档位");
+      expect(firstScreen).toContain("档位还停在");
+      // 原始 ID / Scope 只进技术详情，首屏不出现
+      expect(firstScreen).toContain(lease.id);
+      expect(withoutDetails).not.toContain(lease.id);
+      expect(withoutDetails).not.toContain("session-pending");
+      expect(withoutDetails).not.toContain("abcdef123456");
+      ui.dispose();
     } finally {
       await handle.close();
     }
@@ -209,26 +267,64 @@ describe("DSH 客户端半边（adapter/client.js）", () => {
     plugin.apply(ctx);
     return { registrations };
   }
-  it("注册主面板与侧栏入口，两者的 key/id 一致（否则侧栏按钮点不到面板）", () => {
+  it("注册对话内提示条与会话内「能力授权」tab（都直接拿到当前会话 id）", () => {
     const { registrations } = registerPlugin();
-    expect(registrations.map((item) => item.slot).sort()).toEqual(["main", "sidebar.panellist"]);
-    const main = registrations.find((item) => item.slot === "main");
-    const sidebar = registrations.find((item) => item.slot === "sidebar.panellist");
-    expect(main?.options.key).toBe("guard");
-    expect(sidebar?.options.id).toBe("guard");
-    expect(sidebar?.options.label).toBe("能力授权");
+    expect(registrations.map((item) => item.slot).sort()).toEqual(["conversation.input.dock", "conversation.view"]);
+    const dock = registrations.find((item) => item.slot === "conversation.input.dock");
+    const view = registrations.find((item) => item.slot === "conversation.view");
+    // 提示条：list 槽的 id 形态 + 排序位，紧跟在待办之后
+    expect(dock?.options.id).toBe("guard");
+    expect(dock?.options.order).toBe(5);
+    expect(typeof dock?.component).toBe("function");
+    // 会话视图：第三个 tab（对话 0 / 轨迹 10 / 能力授权 20），label 就是 tab 上的文字
+    expect(view?.options.id).toBe("guard");
+    expect(view?.options.order).toBe(20);
+    expect(view?.options.label).toBe("能力授权");
+    expect(typeof view?.component).toBe("function");
+    // 组件在「还没拿到快照」时渲染为空（不占位、不报错）——数据到达后才决定显示什么
+    const rendered = (dock?.component as (props: Record<string, unknown>) => FakeElement | null)({ sessionId: "session-x" });
+    expect(rendered).toBeNull();
   });
-  it("侧栏图标是可渲染的 SVG（接收宿主传入的 size/active）", () => {
+  it("对话内提示条：四种状态的文案（没有授权时也必须显示一行，否则用户以为功能不存在）", () => {
     const { registrations } = registerPlugin();
-    const Icon = registrations.find((item) => item.slot === "sidebar.panellist")?.component as (props: { size: number; active: boolean }) => FakeElement;
-    const icon = Icon({ size: 16, active: true });
-    expect(icon.type).toBe("svg");
-    expect(icon.props.width).toBe(16);
-    expect(icon.props.height).toBe(16);
-    expect(icon.props["aria-hidden"]).toBe("true");
-    // 图标内容是两个 path（盾牌轮廓 + 时钟指针），说明不是空 SVG
-    expect(Array.isArray(icon.props.children)).toBe(true);
-    expect((icon.props.children as unknown[]).length).toBe(2);
+    const dock = registrations.find((item) => item.slot === "conversation.input.dock")?.component as unknown as {
+      describe(view: unknown, now: number): { tone: string; title: string; sub?: string; action?: { mode: string } } | null;
+    };
+    const describe = dock.describe;
+    expect(typeof describe).toBe("function");
+    // ① 没有任何授权：一行静默提示（实测反馈：不显示等于功能不存在）
+    const idle = describe({ sessionId: "s", auth: { state: "none", activeCount: 0, grants: [] }, sandbox: { state: "not-involved" } }, 1_000);
+    expect(idle?.tone).toBe("idle");
+    expect(idle?.title).toContain("没有临时放开");
+    // ② 生效中：说清「放开了什么 + 还剩多久 + 到期会怎样」
+    const active = describe(
+      { sessionId: "s", auth: { state: "active", activeCount: 1, nextExpiresAt: 61_000, grants: [{ capabilityText: "pwsh 可以免审批升到「完全访问」" }] }, sandbox: { state: "raised", currentMode: "danger-full-access" } },
+      1_000,
+    );
+    expect(active?.tone).toBe("active");
+    expect(active?.title).toContain("pwsh 可以免审批升到「完全访问」");
+    expect(active?.sub).toContain("还剩 1 分 00 秒");
+    expect(active?.action?.mode).toBe("revoke");
+    // ③ 授权已到期但权限没收回：必须是醒目告警 + 独立按钮
+    const pending = describe({ sessionId: "s", auth: { state: "expired", activeCount: 0, grants: [] }, sandbox: { state: "pending-restore", currentMode: "danger-full-access" } }, 1_000);
+    expect(pending?.tone).toBe("warn");
+    expect(pending?.title).toContain("没有收回");
+    expect(pending?.title).toContain("完全访问");
+    expect(pending?.action?.mode).toBe("restore-sandbox");
+    // ④ 已收回：给一句确认，之后由调用方按时间自然隐藏
+    const restored = describe({ sessionId: "s", auth: { state: "expired", activeCount: 0, grants: [] }, sandbox: { state: "restored", currentMode: "workspace-write", lastOutcomeAt: 99_500 } }, 100_000);
+    expect(restored?.tone).toBe("done");
+    expect(restored?.title).toContain("已收回");
+    // ⑤ 连会话数据都没有（接口不可达）：不占位
+    expect(describe(null, 1_000)).toBeNull();
+  });
+  it("会话视图组件在「没有快照」时渲染占位（不抛错、不留白屏）", () => {
+    const { registrations } = registerPlugin();
+    const View = registrations.find((item) => item.slot === "conversation.view")?.component as (props: Record<string, unknown>) => FakeElement;
+    const rendered = View({ sessionId: "session-x" });
+    expect(rendered.type).toBe("div");
+    // 还没拿到数据时只渲染一行提示文字，不渲染空白容器
+    expect(JSON.stringify(rendered.props)).toContain("正在读取本会话的授权状态");
   });
   it("插件可重复装载（fiber 卸载后重新注册不会抛错）", () => {
     const first = registerPlugin();

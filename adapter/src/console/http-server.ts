@@ -13,11 +13,15 @@ import { SCOPE_MODES, DEFAULTABLE_SCOPE_MODES, isScopeMode, type ScopeMode } fro
 import { CONSOLE_HTML, CONSOLE_CLIENT_JS } from "./console-ui.js";
 import { GovernancePolicy, type ConsolePolicySnapshot } from "./policy.js";
 import type { GovernanceConsole } from "./console-service.js";
-import type { ConsoleAuditQuery } from "./types.js";
+import type { ConsoleActions, ConsoleAuditQuery } from "./types.js";
 export interface ConsoleHttpOptions {
   console: GovernanceConsole;
   /** 运行期治理策略（挡位 / TTL）；未注入时写接口一律拒绝（Fail Closed） */
   policy?: GovernancePolicy;
+  /** 收缩型治理动作（撤销 / 回滚档位）；未注入时相关接口返回 503 */
+  actions?: ConsoleActions;
+  /** 档位自动回滚节拍（毫秒，0 = 关闭）——只用于在页面上如实说明「多久内会自动回滚」 */
+  sweepIntervalMs?: number;
   host?: string;
   port?: number;
   /** 端口被占用时是否回退到系统分配的随机端口（默认 true；false 时启动失败直接抛错） */
@@ -34,8 +38,8 @@ export const GUARD_WRITE_HEADER = "x-dsh-guard";
 /** Guard 治理接口挂到 DSH Web 服务器上的同源前缀（面板优先走这条路径，避免跨源与额外端口）。 */
 export const GUARD_WEB_PREFIX = "/guard";
 /** 同源路径与路径映射表——同一份路由同时服务独立端口与 DSH 同源前缀，避免两套实现漂移。 */
-const ROUTES: readonly string[] = ["/", "/index.html", "/console.js", "/api/snapshot", "/api/audit", "/api/config"];
-const AUDIT_DECISIONS: readonly string[] = ["PASSTHROUGH_ALLOW", "PASSTHROUGH_DENY", "ASK", "LEASE_REUSED", "LEASE_ISSUED", "APPROVAL_REJECTED", "TOOL_SUCCESS", "TOOL_ERROR", "SANDBOX_MODE_RAISED", "SANDBOX_MODE_RESTORED", "SANDBOX_MODE_SKIPPED_USER_OVERRIDE"];
+const ROUTES: readonly string[] = ["/", "/index.html", "/console.js", "/api/snapshot", "/api/audit", "/api/config", "/api/revoke"];
+const AUDIT_DECISIONS: readonly string[] = ["PASSTHROUGH_ALLOW", "PASSTHROUGH_DENY", "ASK", "LEASE_REUSED", "LEASE_ISSUED", "LEASE_REVOKED", "APPROVAL_REJECTED", "TOOL_SUCCESS", "TOOL_ERROR", "SANDBOX_MODE_RAISED", "SANDBOX_MODE_RESTORED", "SANDBOX_MODE_SKIPPED_USER_OVERRIDE"];
 const LOOPBACK_HOSTNAMES: readonly string[] = ["127.0.0.1", "localhost", "[::1]", "::1"];
 /** 允许被跨源读取的来源——只放行本机页面（http://127.0.0.1:任意端口 / http://localhost:任意端口）。
  * 为什么需要：DSH Web GUI 运行在 http://127.0.0.1:<DSH 端口>，与独立 Console 端口不同源；
@@ -69,7 +73,7 @@ export async function startConsoleServer(options: ConsoleHttpOptions): Promise<C
 function listen(govConsole: GovernanceConsole, options: ConsoleHttpOptions, host: string, port: number, allowedHosts: ReadonlySet<string>): Promise<ConsoleHttpHandle> {
   // 作用：真正监听端口——把请求交给 handleRequest，并在 listen 成功后把实际端口与访问地址一并返回
   const server: Server = createServer((req, res) => {
-    void handleRequest(req, res, govConsole, options.policy, allowedHosts);
+    void handleRequest(req, res, govConsole, options.policy, allowedHosts, "", { actions: options.actions, sweepIntervalMs: options.sweepIntervalMs });
   });
   return new Promise<ConsoleHttpHandle>((resolve, reject) => {
     server.once("error", reject);
@@ -89,9 +93,10 @@ function listen(govConsole: GovernanceConsole, options: ConsoleHttpOptions, host
     });
   });
 }
-async function handleRequest(req: IncomingMessage, res: ServerResponse, govConsole: GovernanceConsole, policy: GovernancePolicy | undefined, allowedHosts: ReadonlySet<string>, prefix = ""): Promise<void> {
-  // 作用：请求路由——GET：/（页面）、/console.js（前端脚本）、/api/snapshot、/api/audit、/api/config；
-  // PATCH：/api/config（运行期策略）；其余方法 405、未知路径 404、异常 500（不向客户端泄漏内部细节）。
+async function handleRequest(req: IncomingMessage, res: ServerResponse, govConsole: GovernanceConsole, policy: GovernancePolicy | undefined, allowedHosts: ReadonlySet<string>, prefix = "", routeOptions: ConsoleRouteOptions = {}): Promise<void> {
+  // 作用：请求路由——GET：/（页面）、/console.js（前端脚本）、/api/snapshot（可带 ?session=）、/api/audit、/api/config；
+  // PATCH：/api/config（运行期策略）；POST：/api/revoke（收缩型治理动作）；其余方法 405、未知路径 404、异常 500
+  //（不向客户端泄漏内部细节）。
   // prefix 非空表示本次请求来自 DSH Web 服务器的同源路由（/guard/…），此时 Host 检查交由 DSH 自己负责。
   try {
     // CORS 只对 loopback 来源放行（同源 /guard 路由不可用时面板需要跨源访问治理接口）；非 loopback 直接 403
@@ -115,6 +120,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, govConso
       res.end();
       return;
     }
+    // /api/revoke 只接受 POST：其他方法一律 405（不要让 GET 落到「未知路径」的 404 上，误导排障）
+    if (pathname === "/api/revoke" && req.method !== "POST") {
+      sendJson(res, 405, { error: "METHOD_NOT_ALLOWED" });
+      return;
+    }
     if (req.method === "GET") {
       if (pathname === "/" || pathname === "/index.html") {
         sendHtml(res);
@@ -125,7 +135,12 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, govConso
         return;
       }
       if (pathname === "/api/snapshot") {
-        sendJson(res, 200, await govConsole.snapshot());
+        const focus = parseSnapshotQuery(url.searchParams);
+        if (focus === undefined) {
+          sendJson(res, 400, { error: "INVALID_QUERY" });
+          return;
+        }
+        sendJson(res, 200, await govConsole.snapshot(focus));
         return;
       }
       if (pathname === "/api/audit") {
@@ -138,7 +153,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, govConso
         return;
       }
       if (pathname === "/api/config") {
-        sendJson(res, 200, policyDocument(policy));
+        sendJson(res, 200, policyDocument(policy, routeOptions));
         return;
       }
       sendJson(res, 404, { error: "NOT_FOUND" });
@@ -146,6 +161,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, govConso
     }
     if (req.method === "PATCH" && pathname === "/api/config") {
       await handleConfigPatch(req, res, policy);
+      return;
+    }
+    if (req.method === "POST" && pathname === "/api/revoke") {
+      await handleRevoke(req, res, routeOptions.actions);
       return;
     }
     sendJson(res, 405, { error: "METHOD_NOT_ALLOWED" });
@@ -216,7 +235,7 @@ function recordRouteError(err: unknown): void {
  *   ② 同时用 ctx.inject(['webServer'], cb) 登记一次 —— 服务在 apply() 之后才 active 时补上。
  * 两条路都通过 guardRouteStatus / /api/config 自证，因此失败不再静默。
  */
-export function registerGuardWebRoutes(hostCtx: CapsuleHostContextLike, govConsole: GovernanceConsole, policy?: GovernancePolicy): (() => void) | undefined {
+export function registerGuardWebRoutes(hostCtx: CapsuleHostContextLike, govConsole: GovernanceConsole, policy?: GovernancePolicy, routeOptions: ConsoleRouteOptions = {}): (() => void) | undefined {
   guardRouteStatus.attempted = true;
   const inject = (hostCtx as { inject?: unknown })?.inject;
   const get = (hostCtx as { get?: unknown })?.get;
@@ -226,7 +245,7 @@ export function registerGuardWebRoutes(hostCtx: CapsuleHostContextLike, govConso
   const disposers: (() => void)[] = [];
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
   // ① 立即注册（多数情况下 webServer 已经就绪；也对没有 inject 的宿主生效）
-  const immediate = registerGuardWebRoutesNow(hostCtx, govConsole, policy);
+  const immediate = registerGuardWebRoutesNow(hostCtx, govConsole, policy, routeOptions);
   if (immediate) disposers.push(immediate);
   // ② 延迟重试（最多 ROUTE_RETRY_DELAYS_MS 次）：apply() 早于 Web 服务器就绪时的兜底
   const scheduleRetry = (index: number): void => {
@@ -235,7 +254,7 @@ export function registerGuardWebRoutes(hostCtx: CapsuleHostContextLike, govConso
       retryTimer = undefined;
       if (guardRouteStatus.registered) return;
       guardRouteStatus.retries += 1;
-      const dispose = registerGuardWebRoutesNow(hostCtx, govConsole, policy);
+      const dispose = registerGuardWebRoutesNow(hostCtx, govConsole, policy, routeOptions);
       if (dispose) disposers.push(dispose);
       scheduleRetry(index + 1);
     }, ROUTE_RETRY_DELAYS_MS[index]);
@@ -266,7 +285,7 @@ export function registerGuardWebRoutes(hostCtx: CapsuleHostContextLike, govConso
       if (cancelled) return;
       if (guardRouteStatus.registered) return;
       guardRouteStatus.serviceSeen = typeof (serviceCtx as { get?: unknown })?.get === "function";
-      const dispose = registerGuardWebRoutesNow(serviceCtx, govConsole, policy);
+      const dispose = registerGuardWebRoutesNow(serviceCtx, govConsole, policy, routeOptions);
       if (dispose) disposers.push(dispose);
     });
     guardRouteStatus.injectRegistered = true;
@@ -289,7 +308,7 @@ export function registerGuardWebRoutes(hostCtx: CapsuleHostContextLike, govConso
     if (typeof injectEffect === "function") (injectEffect as () => void)();
   };
 }
-function registerGuardWebRoutesNow(hostCtx: CapsuleHostContextLike, govConsole: GovernanceConsole, policy?: GovernancePolicy): (() => void) | undefined {
+function registerGuardWebRoutesNow(hostCtx: CapsuleHostContextLike, govConsole: GovernanceConsole, policy?: GovernancePolicy, routeOptions: ConsoleRouteOptions = {}): (() => void) | undefined {
   // 作用：真正调用 webServer.register 注册同源前缀路由；失败时记录原因并回滚。
   //
   // 【必须方法调用而非函数引用（2026-10-15 实测缺陷）】dsh-host-webserver 的 register 是**实例方法**，
@@ -314,7 +333,7 @@ function registerGuardWebRoutesNow(hostCtx: CapsuleHostContextLike, govConsole: 
     const dispose = server.register({
       kind: "prefix",
       path: GUARD_WEB_PREFIX,
-      handler: (req: IncomingMessage, res: ServerResponse) => handleRequest(req, res, govConsole, policy, allowedHosts, GUARD_WEB_PREFIX),
+      handler: (req: IncomingMessage, res: ServerResponse) => handleRequest(req, res, govConsole, policy, allowedHosts, GUARD_WEB_PREFIX, routeOptions),
     });
     guardRouteStatus.registered = true;
     delete guardRouteStatus.error;
@@ -331,6 +350,11 @@ export interface CapsuleHostContextLike {
   get?(name: string): unknown;
   /** cordis 的依赖注册入口：服务可用（或重新可用）时回调，返回的 effect 随宿主卸载撤销 */
   inject?(names: string[], callback: (serviceCtx: CapsuleHostContextLike) => void): unknown;
+}
+/** 同源路由的可选能力（未注入时对应接口按「不可用」处理，前端据此隐藏按钮） */
+export interface ConsoleRouteOptions {
+  actions?: ConsoleActions;
+  sweepIntervalMs?: number;
 }
 function getHostService(hostCtx: CapsuleHostContextLike, name: string): unknown {
   // 作用：按 cordis 方式解析宿主服务（只走 ctx.get，缺失返回 undefined，绝不抛错）
@@ -404,14 +428,18 @@ async function handleConfigPatch(req: IncomingMessage, res: ServerResponse, poli
     sendJson(res, 409, { error: "POLICY_REJECTED", message: err instanceof Error ? err.message : String(err) });
   }
 }
-function policyDocument(policy: GovernancePolicy | undefined): unknown {
+function policyDocument(policy: GovernancePolicy | undefined, routeOptions: ConsoleRouteOptions = {}): unknown {
   // 作用：GET /api/config 的响应——运行期策略（可写）+ 挡位目录（前后端同一事实来源）+
-  // 说明「哪些项属于部署配置、只能改 profile patch」+ 同源路由注册状态（链路自证）
+  // 说明「哪些项属于部署配置、只能改 profile patch」+ 同源路由注册状态（链路自证）+
+  // 收缩型动作是否可用（前端据此决定是否渲染「立即收回 / 回滚档位」按钮）+
+  // 档位自动回滚节拍（前端据此在「到期后」一句里写清多久内会回滚）。
   const routes = { ...guardRouteStatus };
+  const actions = { revoke: routeOptions.actions !== undefined, restoreSandbox: routeOptions.actions !== undefined };
+  const sweep = { intervalMs: routeOptions.sweepIntervalMs ?? 0 };
   if (!policy) {
-    return { policy: undefined, modes: modeCatalog(), writable: [], immutable: ["enabled", "rules"], routes };
+    return { policy: undefined, modes: modeCatalog(), writable: [], immutable: ["enabled", "rules"], routes, actions, sweep };
   }
-  return { policy: policy.snapshot(), modes: modeCatalog(), writable: ["defaultScope", "defaultTtlSeconds", "maxTtlSeconds"], immutable: ["enabled", "rules"], routes };
+  return { policy: policy.snapshot(), modes: modeCatalog(), writable: ["defaultScope", "defaultTtlSeconds", "maxTtlSeconds"], immutable: ["enabled", "rules"], routes, actions, sweep };
 }
 function modeCatalog(): unknown {
   // 作用：挡位目录投影——供前端渲染下拉框；defaultable 标记哪些挡位允许作为默认值（tool 不允许）
@@ -456,6 +484,77 @@ function readBody(req: IncomingMessage, limitBytes = 8192): Promise<Buffer> {
     req.on("end", () => resolve(Buffer.concat(chunks)));
     req.on("error", reject);
   });
+}
+function parseSnapshotQuery(params: URLSearchParams): { sessionId?: string } | undefined {
+  // 作用：解析快照查询参数——只接受可选的 session（聚焦会话）；空串视为未指定；
+  // 超长值直接拒绝（避免把任意大字符串带进视图层）
+  const sessionId = params.get("session");
+  if (sessionId === null || sessionId.length === 0) return {};
+  if (sessionId.length > 200) return undefined;
+  return { sessionId };
+}
+export interface RevokeRequestBody {
+  sessionId: string;
+  /** revoke = 撤销该会话全部授权并回滚档位（默认）；restore-sandbox = 只回收已失效授权的档位 */
+  action?: "revoke" | "restore-sandbox";
+}
+export function parseRevokeBody(raw: unknown): RevokeRequestBody | undefined {
+  // 作用：解析并校验治理动作请求体——只认识 sessionId 与 action 两个字段，
+  // 其余字段一律拒绝（Fail Closed：不猜测调用方意图，也不做任何隐式扩权）
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const record = raw as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (key !== "sessionId" && key !== "action") return undefined;
+  }
+  const sessionId = record.sessionId;
+  if (typeof sessionId !== "string" || sessionId.length === 0 || sessionId.length > 200) return undefined;
+  const action = record.action;
+  if (action === undefined) return { sessionId };
+  if (action !== "revoke" && action !== "restore-sandbox") return undefined;
+  return { sessionId, action };
+}
+async function handleRevoke(req: IncomingMessage, res: ServerResponse, actions: ConsoleActions | undefined): Promise<void> {
+  // 作用：收缩型治理动作入口（POST /api/revoke）——与 PATCH /api/config 同一套三道闸门：
+  // ① 自定义头（强制跨源预检，CSRF 防护）；② content-type 必须是 application/json；③ 动作源必须注入。
+  // 动作本身只会让权限变小，没有任何签发 / 放宽路径。
+  if (!actions) {
+    sendJson(res, 503, { error: "ACTIONS_UNAVAILABLE" });
+    return;
+  }
+  if (req.headers[GUARD_WRITE_HEADER] === undefined) {
+    sendJson(res, 403, { error: "WRITE_HEADER_REQUIRED" });
+    return;
+  }
+  const contentType = String(req.headers["content-type"] ?? "");
+  if (!contentType.toLowerCase().startsWith("application/json")) {
+    sendJson(res, 415, { error: "JSON_CONTENT_TYPE_REQUIRED" });
+    return;
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse((await readBody(req)).toString("utf8"));
+  } catch {
+    sendJson(res, 400, { error: "INVALID_JSON" });
+    return;
+  }
+  const body = parseRevokeBody(raw);
+  if (!body) {
+    sendJson(res, 400, { error: "INVALID_BODY" });
+    return;
+  }
+  try {
+    if (body.action === "restore-sandbox") {
+      const result = await actions.restoreSandbox(body.sessionId);
+      sendJson(res, 200, { ok: true, action: "restore-sandbox", ...result });
+      return;
+    }
+    const result = await actions.revokeSession(body.sessionId);
+    sendJson(res, 200, { ok: true, action: "revoke", ...result });
+  } catch (err) {
+    // 动作失败：Fail Closed（不重试、不部分应用），错误细节只写 stderr
+    process.stderr.write(`[dsh-guard] console action failed: ${String(err)}\n`);
+    sendJson(res, 500, { error: "ACTION_FAILED" });
+  }
 }
 function parseAuditQuery(params: URLSearchParams): ConsoleAuditQuery | undefined {
   // 作用：解析审计查询参数——sessionId/toolName/decision 精确匹配、limit 正整数；

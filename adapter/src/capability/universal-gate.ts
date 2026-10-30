@@ -1,7 +1,8 @@
 import type { AuditService } from "../audit/audit-service.js";
 import type { AuditDecision } from "../audit/types.js";
 import { parseEscalation, type SandboxMode } from "./escalation.js";
-import type { SandboxGrantManager } from "./sandbox-grant.js";
+import type { SandboxGrantManager, SandboxModeResult } from "./sandbox-grant.js";
+import { recordSandboxOutcome } from "./sandbox-audit.js";
 import type { ResolvedToolPolicy, PolicyResolver } from "./policy.js";
 import type { LeaseManager } from "./lease-manager.js";
 import type { PendingRegistry } from "./pending.js";
@@ -286,7 +287,7 @@ export class UniversalGate {
       this.escalations.clear();
     };
   }
-  private async settleAll(): Promise<void> {
+  private async settleAll(): Promise<readonly SandboxModeResult[]> {
     // 作用：低频回收（P0-2）——pending GC、过期沙箱升级上下文清理、失效沙箱授权结算。
     // 与 pre-execute 用同一时机，不引入任何定时器；结算属「收缩权限」方向，晚执行不会造成越权。
     const now = this.now();
@@ -296,14 +297,18 @@ export class UniversalGate {
       const settledLongAgo = escalation.settledAt !== undefined && now >= escalation.settledAt + ESCALATION_CONTEXT_GRACE_MS;
       if (expired || settledLongAgo) this.escalations.delete(callId);
     }
-    if (!this.deps.sandboxGrants) return;
-    for (const result of await this.deps.sandboxGrants.settle()) {
-      if (result.outcome === "RESTORED") {
-        this.deps.audit.record({ callId: "", rootCallId: "", toolName: "", scopeDisplay: `沙箱模式回滚至 ${result.mode}`, decision: "SANDBOX_MODE_RESTORED" });
-      } else if (result.outcome === "SKIPPED_USER_OVERRIDE") {
-        this.deps.audit.record({ callId: "", rootCallId: "", toolName: "", scopeDisplay: `会话沙箱模式为 ${result.mode}（用户已改动），跳过回滚`, decision: "SANDBOX_MODE_SKIPPED_USER_OVERRIDE" });
-      }
+    if (!this.deps.sandboxGrants) return [];
+    const settled = await this.deps.sandboxGrants.settle();
+    for (const result of settled) {
+      recordSandboxOutcome(this.deps.audit, result);
     }
+    return settled;
+  }
+  async settleNow(): Promise<readonly SandboxModeResult[]> {
+    // 作用：供 30 秒低频 sweeper 与治理台「立即回滚档位」调用的公开入口——只做「收缩」方向的
+    // 结算（把已失效授权的会话宽模式收回），不签发、不提升、不改任何授权状态。
+    // 安全正确性不依赖它：即使一次都不调用，失效 Lease 也不会再授权任何调用（见 settle 注释）。
+    return await this.settleAll();
   }
   private async applySandboxGrant(callId: string, grant: EscalationGrant, leaseId: string, session: unknown): Promise<void> {
     // 作用：沙箱升级获批后提升会话模式（P0-2）——同一 Lease 重复获批是幂等的（SandboxGrantManager

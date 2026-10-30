@@ -26,6 +26,10 @@ interface Host {
   leases: LeaseManager;
   audit: AuditService;
   policy: GovernancePolicy;
+  /** 低频 sweeper 用的公开结算入口（与 index.ts 的 30s 定时器同一方法） */
+  gate: UniversalGate;
+  /** 沙箱授权状态源——治理台的「档位是否已恢复」唯一数据来源 */
+  grants: SandboxGrantManager;
   writes: SandboxMode[];
   modeOf(session: unknown): SandboxMode | undefined;
   /** 模拟用户在 GUI 里手动切换沙箱档位（Guard 之外的写入） */
@@ -49,19 +53,20 @@ function makeHost(config: UniversalPolicyConfig, answerer?: () => Promise<Approv
   };
   const audit = new AuditService();
   const policy = new GovernancePolicy({ initial: { defaultScope: config.defaultScope, defaultTtlSeconds: config.defaultTtlSeconds, maxTtlSeconds: config.maxTtlSeconds }, deployment: { enabled: config.enabled, rules: config.rules } });
+  const grants = new SandboxGrantManager(sandboxHost, leases);
   const gate = new UniversalGate({
     policy: new PolicyResolver(() => policy.config),
     scopes: new ScopeResolver(),
     leases,
     pending: new PendingRegistry(),
     audit,
-    sandboxGrants: new SandboxGrantManager(sandboxHost, leases),
+    sandboxGrants: grants,
     now: clock,
   });
   gate.install(root as never);
   // 模拟 DSH 注册的单调守卫（位于 Guard 之后，只透传）
   root.on("tools/pre-execute", (_exec: unknown, next: () => Promise<PreToolDecision>) => next());
-  return { root, leases, audit, policy, writes, modeOf: (session) => modes.get(session), setMode: (session, mode) => { modes.set(session, mode); writes.push(mode); } };
+  return { root, leases, audit, policy, gate, grants, writes, modeOf: (session) => modes.get(session), setMode: (session, mode) => { modes.set(session, mode); writes.push(mode); } };
 }
 interface ExecLike {
   callId: string;
@@ -217,6 +222,34 @@ describe("沙箱升级授权生命周期（真 cordis 端到端）", () => {
     expect(await askApproval(host, "c1", "pwsh")).toBe("allowed-once");
     expect(await host.leases.list()).toHaveLength(0);
     expect(host.writes).toHaveLength(0);
+  });
+  it("【低频 sweeper】没有新的工具调用也能把到期档位收回，且审计与治理视图都能归属会话", async () => {
+    // 场景：用户批准后停手不再调用任何工具。若只靠 tools/execute 的惰性结算，档位会一直宽着；
+    // 30s sweeper 调用的就是这个 settleNow()，而治理台必须能同时看到「授权已失效」与「档位已恢复」。
+    const host = makeHost(ESCALATION, () => Promise.resolve("allowed-once"));
+    await runTool(host, escalateExec("c1"));
+    await askApproval(host, "c1", "pwsh");
+    expect(host.modeOf(SESSION)).toBe("danger-full-access");
+    const govConsole = new GovernanceConsole({
+      audit: host.audit,
+      leases: host.leases,
+      now: clock,
+      sandbox: { states: () => host.grants.grantStates(), lastOutcomeOf: (sessionId: string) => host.grants.lastOutcomeOf(sessionId) },
+    });
+    now += 301_000;
+    const pending = await govConsole.snapshot();
+    expect(pending.sessions[0]?.auth.state).toBe("expired");
+    expect(pending.sessions[0]?.sandbox.state).toBe("pending-restore");
+    expect(pending.sessions[0]?.actions.canRestoreSandbox).toBe(true);
+    // 关键：此处不运行任何工具，只调用 sweeper 的结算入口
+    const settled = await host.gate.settleNow();
+    expect(settled.map((result) => result.outcome)).toEqual(["RESTORED"]);
+    expect(host.modeOf(SESSION)).toBe("workspace-write");
+    const restoredEvent = host.audit.list().find((event) => event.decision === "SANDBOX_MODE_RESTORED");
+    expect(restoredEvent?.sessionId).toBe(SESSION.id);
+    const after = await govConsole.snapshot();
+    expect(after.sessions[0]?.sandbox.state).toBe("restored");
+    expect(after.sessions[0]?.actions.canRestoreSandbox).toBe(false);
   });
 });
 describe("治理接口在真实生命周期状态上的投影", () => {

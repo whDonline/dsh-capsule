@@ -1,29 +1,37 @@
 /**
  * DSH Capability Guard — DSH Web 客户端半边（浏览器侧）。
  *
- * 作用：在 DSH Web GUI 里提供 Guard 治理面板（授权与剩余时间 / 审计 / 范围挡位与 TTL）。
- * 数据来自宿主半边启动的 loopback 治理接口（默认 http://127.0.0.1:8787/api/*），因此：
- *   - 面板本身不持有任何授权状态，只是治理接口的视图（Guard 的 LeaseManager 始终是唯一判据）；
- *   - 端口可能在配置中被改动，或因为被占用而回退，因此这里按候选端口逐个探测，
- *     并且只把探测结果缓存在内存里（下一次挂载会重新探测）。
+ * 作用：把「这个会话现在被临时放开了什么、还剩多久、到期会怎样、怎么提前收回」放进对话界面本身，
+ * 用户不需要去找任何"全局中台"。两层：
  *
- * 约束（本次实现刻意遵守，避免把面板做成新的权限入口）：
- *   - 唯一写操作是 PATCH /api/config（默认范围挡位与 TTL），且必须由用户点击按钮触发；
- *   - 不在面板里做任何 approval / revoke / 授权签发动作（那些必须走 DSH 原生审批与 API）；
+ *   ① 【一眼】对话内常驻提示条（`conversation.input.dock`，输入框上方）：不点击就能看到四个问题的答案，
+ *      并直接「提前收回」。该槽位是 list + `replaceRisk: none`，只追加，不覆盖 DSH 自带的 todo/goal/queue。
+ *   ② 【详情】会话内的「能力授权」tab（`conversation.view`，排在 对话 / 轨迹 之后）：
+ *      整页展示本会话的每条授权、权限级别状态、到期后果、本会话审计与提前收回/回滚按钮。
+ *
+ * 两个入口都拿到宿主直接传入的 `sessionId`，因此**显示的一定是当前会话**，不存在串会话或"最近活动"推断。
+ *
+ * 约束（刻意遵守，避免把界面做成新的权限入口）：
+ *   - 唯一的写操作是「提前收回 / 立即回滚档位」（纯收缩动作，POST /api/revoke），必须由用户点击触发；
+ *   - 不做任何审批 / 签发 / 放宽动作（那些只走 DSH 原生流程）；
  *   - 不引入任何 DSH Client 包（primitives 等），只使用 React 与主题令牌；
- *   - 所有动态内容经 textContent 写入，不写 DOM 到面板容器之外，也不触碰 document.body。
+ *   - 所有动态内容走 React 文本子节点（等价于 textContent），不触碰 document.body；
+ *   - 治理接口不可达时保持安静（不弹错误、不干扰对话）。
  */
 window.__ModuleLoader__.load({
   id: '@dsh-capsule/adapter',
   factory(require) {
     const React = require('react');
     const h = React.createElement;
-    const PANEL_ID = 'guard';
-    const PANEL_LABEL = '能力授权';
+    const GUARD_ID = 'guard';
     const SAME_ORIGIN_BASE = '/guard';
     const DEFAULT_CONSOLE_PORT = 8787;
     const PORT_PROBE_RANGE = 4;
-    const MONITOR_INTERVAL_MS = 5000;
+    const DOCK_POLL_MS = 2000;
+    const DOCK_ORDER = 5;
+    const VIEW_ORDER = 20;
+    const DONE_VISIBLE_MS = 15000;
+    const AUDIT_LIMIT = 20;
     const probeCache = { host: null };
 
     /** 作用：探测治理接口——优先同源 /guard（由插件挂到 DSH Web 服务器上），
@@ -42,180 +50,593 @@ window.__ModuleLoader__.load({
             return host;
           }
         } catch (err) {
-          // 该入口不可用：继续探测下一个候选（全部失败时返回 null，面板显示连接提示）
+          // 该入口不可用：继续探测下一个候选
         }
       }
       return null;
     }
 
-    /** 作用：把一个"零尺寸/未渲染"的容器兜底成可见内容。
-     * 为什么需要它：面板由宿主 slot 渲染，宿主容器的尺寸/裁剪策略不受本插件控制；一旦
-     * height:100% 解析不出高度、或注入式渲染出了任何意外，用户看到的就是**一片空白**
-     * （实测发生过）。这里做了两层保护：显式最小高度 + 渲染后自检，自检不通过就走 iframe 兜底，
-     * 保证"点开面板一定能看到治理台"。 */
-    const PANEL_MIN_HEIGHT = 420;
-
-    /** 作用：iframe 兜底——直接内嵌治理台独立页面（同源/跨源都可以）。
-     * 代价：iframe 文档拿不到宿主主题令牌与主题切换（宿主文档里也建议避免 iframe），
-     * 因此它只在注入式渲染失败时使用；治理台自身的样式都带兜底色，脱离主题也能读。 */
-    function ConsoleFrame(props) {
-      return h('iframe', {
-        title: 'Capability Guard 治理台',
-        src: props.src,
-        style: {
-          width: '100%',
-          height: '100%',
-          minHeight: PANEL_MIN_HEIGHT + 'px',
-          border: '0',
-          display: 'block',
-          background: 'var(--dsw-alias-bg-base, #f6f7f9)',
-        },
+    function fetchJson(host, path, init) {
+      const options = init || {};
+      options.headers = options.headers || {};
+      options.headers.accept = 'application/json';
+      return fetch(host + path, options).then(function (res) {
+        return res.text().then(function (text) {
+          let body = null;
+          try {
+            body = text ? JSON.parse(text) : null;
+          } catch (err) {
+            body = null;
+          }
+          if (!res.ok) {
+            const error = new Error((body && (body.message || body.error)) || 'HTTP ' + res.status);
+            error.status = res.status;
+            throw error;
+          }
+          return body;
+        });
       });
     }
 
-    /** 作用：挂载治理面板——优先把共享的 Console UI 注入到本组件自己的 DOM 节点；
-     * 注入式渲染失败（或渲染后容器仍是空的）时退回 iframe，绝不给用户一片空白。 */
-    function GuardPanel() {
-      const containerRef = React.useRef(null);
-      const [status, setStatus] = React.useState({ state: 'connecting', detail: '', fallbackUrl: '' });
-      const [attempt, setAttempt] = React.useState(0);
-      React.useEffect(() => {
-        // 低频重探：宿主半边可能晚于面板就绪（或临时不可用），每隔一段时间清掉探测缓存后重试一次
-        const timer = setInterval(() => {
-          probeCache.host = null;
-          setAttempt((value) => value + 1);
-        }, MONITOR_INTERVAL_MS * 6);
-        return () => clearInterval(timer);
-      }, []);
-      React.useEffect(() => {
-        let disposed = false;
-        let handle = null;
-        let contentTimer = null;
-        const container = containerRef.current;
-        if (!container) return undefined;
-        const useFrame = (host, why) => {
-          if (disposed) return;
-          setStatus({ state: 'fallback', detail: why, fallbackUrl: host + '/' });
+    /** 档位的中文说法——界面里绝不出现 read-only / danger-full-access 这类内部标识。 */
+    const MODE_TEXT = { 'read-only': '只读', 'workspace-write': '工作区可写', 'danger-full-access': '完全访问' };
+    function modeText(mode) {
+      return MODE_TEXT[mode] || '未知';
+    }
+    /** 作用：把剩余毫秒说成人话（4 分 12 秒 / 1 小时 5 分 / 8 秒）。 */
+    function fmtCn(ms) {
+      if (!(ms > 0)) return '0 秒';
+      const total = Math.floor(ms / 1000);
+      const hours = Math.floor(total / 3600);
+      const minutes = Math.floor((total % 3600) / 60);
+      const seconds = total % 60;
+      if (hours > 0) return hours + ' 小时 ' + minutes + ' 分';
+      if (minutes > 0) return minutes + ' 分 ' + (seconds < 10 ? '0' : '') + seconds + ' 秒';
+      return seconds + ' 秒';
+    }
+    function fmtTime(ts) {
+      if (!ts) return '-';
+      const date = new Date(ts);
+      const pad = function (n) {
+        return n < 10 ? '0' + n : String(n);
+      };
+      return pad(date.getHours()) + ':' + pad(date.getMinutes()) + ':' + pad(date.getSeconds());
+    }
+    /** 审计决策的中文标签（与治理台保持一致）。 */
+    const DECISION_LABELS = {
+      ASK: '已询问',
+      LEASE_ISSUED: '已签发临时授权',
+      LEASE_REUSED: '复用临时授权',
+      LEASE_REVOKED: '已提前收回',
+      APPROVAL_REJECTED: '你拒绝了',
+      PASSTHROUGH_ALLOW: '原生放行',
+      PASSTHROUGH_DENY: '原生拒绝',
+      TOOL_SUCCESS: '执行成功',
+      TOOL_ERROR: '执行失败',
+      SANDBOX_MODE_RAISED: '权限级别提升',
+      SANDBOX_MODE_RESTORED: '权限级别恢复',
+      SANDBOX_MODE_SKIPPED_USER_OVERRIDE: '跳过恢复（你手动改过）',
+    };
+
+    /** 作用：注入提示条样式（只注入一次；带令牌兜底，脱离主题也能读）。 */
+    function injectDockStyles(doc) {
+      if (!doc || !doc.head || doc.getElementById('dsh-guard-dock-style')) return;
+      const style = doc.createElement('style');
+      style.id = 'dsh-guard-dock-style';
+      style.textContent = [
+        '.dsh-guard-dock{display:flex;gap:10px;align-items:flex-start;box-sizing:border-box;margin:0 0 8px;padding:8px 12px;border:1px solid var(--dsw-alias-border-l1,#d8dee4);border-radius:10px;background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1f2328);font-size:12.5px;line-height:1.5}',
+        '.dsh-guard-dock[data-tone=warn]{border-color:var(--dsw-alias-state-warn-primary,#9a6700)}',
+        '.dsh-guard-dock[data-tone=done]{border-style:dashed}',
+        '.dsh-guard-dock[data-tone=idle]{border-style:dashed;background:transparent;opacity:.9}',
+        '.dsh-guard-dock[data-tone=idle] .dsh-guard-dock-title{font-weight:500;color:var(--dsw-alias-label-secondary,#59636e)}',
+        '.dsh-guard-dock .dsh-guard-dock-dot{flex:0 0 auto;font-size:12px;line-height:1.6}',
+        '.dsh-guard-dock .dsh-guard-dock-body{flex:1 1 auto;min-width:0}',
+        '.dsh-guard-dock .dsh-guard-dock-title{font-weight:600}',
+        '.dsh-guard-dock .dsh-guard-dock-sub{margin-top:2px;color:var(--dsw-alias-label-secondary,#59636e)}',
+        '.dsh-guard-dock .dsh-guard-dock-list{margin-top:4px;color:var(--dsw-alias-label-secondary,#59636e)}',
+        '.dsh-guard-dock button{flex:0 0 auto;font:inherit;font-size:12.5px;padding:3px 10px;border-radius:6px;border:1px solid var(--dsw-alias-border-l2,#c2ccd6);background:transparent;color:inherit;cursor:pointer}',
+        '.dsh-guard-dock button[data-kind=stop]{border-color:var(--dsw-alias-state-error-primary,#cf222e);color:var(--dsw-alias-state-error-primary,#cf222e)}',
+        '.dsh-guard-dock button[disabled]{opacity:.5;cursor:not-allowed}',
+        '.dsh-guard-dock .dsh-guard-dock-more{background:none;border:none;padding:0;color:var(--dsw-alias-brand-primary,#0969da);cursor:pointer;font:inherit;font-size:12px}',
+      ].join('');
+      doc.head.appendChild(style);
+    }
+
+    /** 作用：从快照里取出「本会话」的视图——永远只看自己的会话，绝不复用「最近活动」推断。 */
+    function viewOf(snapshot, sessionId) {
+      if (!snapshot || !Array.isArray(snapshot.sessions)) return null;
+      for (const view of snapshot.sessions) {
+        if (view && view.sessionId === sessionId) return view;
+      }
+      return null;
+    }
+
+    /** 作用：把会话视图翻译成提示条文案——返回 null 表示连一行都不占（连会话数据都没有）。 */
+    function describe(view, now) {
+      if (!view) return null;
+      const auth = view.auth || { state: 'none', activeCount: 0, grants: [] };
+      const sandbox = view.sandbox || { state: 'not-involved' };
+      const grants = Array.isArray(auth.grants) ? auth.grants : [];
+      const remaining = auth.activeCount > 0 && auth.nextExpiresAt ? auth.nextExpiresAt - now : 0;
+      const first = grants[0];
+      if (sandbox.state === 'pending-restore') {
+        return {
+          tone: 'warn',
+          dot: '⚠',
+          title: '临时授权已经到期，但权限还停在「' + modeText(sandbox.currentMode) + '」，没有收回。',
+          sub: '点「现在收回」可以立刻恢复；不点的话，下次执行命令时也会自动收回。',
+          action: { kind: 'stop', label: '现在收回', mode: 'restore-sandbox' },
         };
-        const boot = async () => {
-          let host = null;
-          // 首次挂载时宿主半边可能还没就绪（例如面板先于 Guard 行激活），因此做几次短重试；
-          // 全部失败后显示排障提示，并由上面的低频重探再次触发本效果。
-          for (let round = 0; round < 4; round += 1) {
-            host = await probeConsoleHost();
-            if (host || disposed) break;
-            await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
+      if (auth.activeCount > 0) {
+        const title = first
+          ? (grants.length > 1 ? '本会话临时放开了 ' + grants.length + ' 项：' : '本会话临时放开：') + first.capabilityText
+          : '本会话有 ' + auth.activeCount + ' 项临时授权';
+        const after =
+          sandbox.state === 'raised' || sandbox.state === 'unchanged'
+            ? '到期后会自动收回，之后同类操作会再问你一次。'
+            : sandbox.state === 'user-override'
+              ? '到期后不会改动你自己设置的权限。'
+              : '到期后同类操作会再问你一次。';
+        const expired = remaining <= 0;
+        return {
+          tone: expired ? 'warn' : 'active',
+          dot: expired ? '⏳' : '●',
+          title: title,
+          sub: expired ? '正在核对是否已经收回…' : '还剩 ' + fmtCn(remaining) + ' · ' + after,
+          extra: grants.slice(1).map(function (grant) {
+            return grant.capabilityText;
+          }),
+          action: { kind: 'stop', label: '提前收回', mode: 'revoke' },
+        };
+      }
+      if (sandbox.state === 'restored' && sandbox.lastOutcomeAt && now - sandbox.lastOutcomeAt < DONE_VISIBLE_MS) {
+        return {
+          tone: 'done',
+          dot: '✓',
+          title: '已收回：本会话的临时授权结束了，权限已回到「' + modeText(sandbox.currentMode) + '」。',
+          sub: '之后的同类操作会重新征求你的同意。',
+        };
+      }
+      if (sandbox.state === 'restored') return null;
+      if (sandbox.state === 'unknown') {
+        return { tone: 'done', dot: '?', title: '无法确认当前权限级别，请到 DSH 的设置里看一眼。', sub: '临时授权本身已经结束。' };
+      }
+      if (sandbox.state === 'user-override') {
+        return {
+          tone: 'done',
+          dot: '·',
+          title: '你手动把权限改成了「' + modeText(sandbox.currentMode) + '」，临时授权不会覆盖你的设置。',
+          sub: '之后的同类操作会重新征求你的同意。',
+        };
+      }
+      if (auth.state === 'expired' || auth.state === 'revoked') {
+        return { tone: 'idle', dot: '○', title: '本会话的临时授权已经结束。', sub: '之后的同类操作会重新征求你的同意。' };
+      }
+      // 没有任何临时授权时也显示一行——否则用户根本不知道这个功能存在（2026-10-31 实测反馈）。
+      return { tone: 'idle', dot: '○', title: '本会话没有临时放开的操作。', sub: '需要时会先征求你的同意。' };
+    }
+
+    /** 作用：对话内常驻提示条——挂在输入框上方（conversation.input.dock）。
+     * 该槽位是 session 作用域，props.sessionId 就是用户此刻打开的会话。 */
+    function GuardDock(props) {
+      const sessionId = props && props.sessionId
+        ? String(props.sessionId)
+        : props && props.session && props.session.id
+          ? String(props.session.id)
+          : '';
+      const [snapshot, setSnapshot] = React.useState(null);
+      const [host, setHost] = React.useState(null);
+      const [busy, setBusy] = React.useState(false);
+      const [expanded, setExpanded] = React.useState(false);
+      const [nowTick, setNowTick] = React.useState(0);
+      const [message, setMessage] = React.useState('');
+
+      React.useEffect(
+        function () {
+          if (!sessionId) return undefined;
+          let alive = true;
+          if (typeof console !== 'undefined' && typeof console.info === 'function') {
+            console.info('[dsh-guard] dock mounted for session', sessionId);
           }
-          if (disposed) return;
-          if (!host) {
-            setStatus({ state: 'unreachable', detail: '未发现治理接口（同源 ' + SAME_ORIGIN_BASE + '/ 与 127.0.0.1:' + DEFAULT_CONSOLE_PORT + ' 起均未响应）', fallbackUrl: '' });
-            return;
-          }
-          try {
-            await new Promise((resolve, reject) => {
-              if (window.DshGuardConsole && typeof window.DshGuardConsole.mount === 'function') {
-                resolve();
-                return;
-              }
-              const script = document.createElement('script');
-              script.src = host + '/console.js';
-              script.async = true;
-              script.onload = () => resolve();
-              script.onerror = () => reject(new Error('console.js 加载失败'));
-              document.head.appendChild(script);
-            });
-            if (disposed) return;
-            const mounted = window.DshGuardConsole.mount({ host: host, container: container, pollMs: 2000 });
-            if (!mounted || typeof mounted !== 'object') {
-              // 共享脚本存在但没返回句柄：视为注入式渲染不可用，直接走内嵌兜底
-              useFrame(host, '共享脚本未返回挂载句柄，已切换为内嵌页面');
-              return;
+          injectDockStyles(typeof document !== 'undefined' ? document : undefined);
+          const load = async function () {
+            try {
+              const base = await probeConsoleHost();
+              if (!alive || !base) return;
+              const body = await fetchJson(base, '/api/snapshot?session=' + encodeURIComponent(sessionId));
+              if (!alive) return;
+              setHost(base);
+              setSnapshot(body);
+            } catch (err) {
+              // 治理接口暂时不可达：静默（不打扰对话），下一轮再试
             }
-            handle = mounted;
-            // 渲染自检：注入式渲染若没有真的产出节点（宿主样式/时序/脚本异常都可能造成），
-            // 立刻换 iframe 兜底，而不是把空白界面留给用户。
-            contentTimer = setTimeout(() => {
-              if (disposed) return;
-              const rendered = container.childElementCount > 0;
-              if (!rendered) useFrame(host, '注入式渲染未产出内容，已切换为内嵌页面');
-              else setStatus({ state: 'ready', detail: host, fallbackUrl: '' });
-            }, 1200);
-          } catch (err) {
-            useFrame(host, '共享脚本挂载失败：' + String((err && err.message) || err));
-          }
-        };
-        void boot();
-        return () => {
-          disposed = true;
-          if (contentTimer) clearTimeout(contentTimer);
-          if (handle && typeof handle.dispose === 'function') handle.dispose();
-          handle = null;
-        };
-      }, [attempt]);
-      const showBanner = status.state === 'unreachable' || status.state === 'error';
-      return h(
-        'div',
-        {
-          style: {
-            height: '100%',
-            minHeight: PANEL_MIN_HEIGHT + 'px',
-            display: 'flex',
-            flexDirection: 'column',
-            background: 'var(--dsw-alias-bg-base, transparent)',
-          },
+          };
+          void load();
+          const timer = setInterval(function () {
+            void load();
+          }, DOCK_POLL_MS);
+          return function () {
+            alive = false;
+            clearInterval(timer);
+          };
         },
-        status.state === 'fallback'
-          ? h(ConsoleFrame, { src: status.fallbackUrl })
-          : h('div', { ref: containerRef, style: { flex: '1 1 auto', minHeight: 0, overflow: 'auto' } }),
-        showBanner
+        [sessionId],
+      );
+
+      // 每秒重算剩余时间：归零只把文案切成「正在核对」，绝不在这里断言「已收回」
+      React.useEffect(function () {
+        const timer = setInterval(function () {
+          setNowTick(function (value) {
+            return value + 1;
+          });
+        }, 1000);
+        return function () {
+          clearInterval(timer);
+        };
+      }, []);
+
+      const view = viewOf(snapshot, sessionId);
+      const info = describe(view, Date.now());
+      if (!view || !info) return null;
+
+      const onAction = async function () {
+        if (busy || !host) return;
+        const label =
+          info.action.mode === 'restore-sandbox'
+            ? '现在把权限收回去？（只影响权限级别，不动仍然有效的授权）'
+            : '现在收回本会话的全部临时授权，并恢复权限级别？';
+        if (typeof window !== 'undefined' && typeof window.confirm === 'function' && !window.confirm(label)) return;
+        setBusy(true);
+        setMessage('');
+        try {
+          await fetchJson(host, '/api/revoke', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'x-dsh-guard': '1' },
+            body: JSON.stringify({ sessionId: sessionId, action: info.action.mode }),
+          });
+          const body = await fetchJson(host, '/api/snapshot?session=' + encodeURIComponent(sessionId));
+          setSnapshot(body);
+          setMessage('已收回');
+        } catch (err) {
+          setMessage('收回失败，请稍后再试');
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      const children = [
+        h('span', { key: 'dot', className: 'dsh-guard-dock-dot' }, info.dot),
+        h(
+          'div',
+          { key: 'body', className: 'dsh-guard-dock-body' },
+          h('div', { className: 'dsh-guard-dock-title' }, info.title),
+          info.sub ? h('div', { className: 'dsh-guard-dock-sub' }, info.sub) : null,
+          message ? h('div', { className: 'dsh-guard-dock-sub' }, message) : null,
+          info.extra && info.extra.length > 0
+            ? h(
+                'div',
+                { className: 'dsh-guard-dock-list' },
+                expanded
+                  ? info.extra.map(function (text, index) {
+                      return h('div', { key: 'extra-' + index }, '· ' + text);
+                    })
+                  : h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'dsh-guard-dock-more',
+                        onClick: function () {
+                          setExpanded(true);
+                        },
+                      },
+                      '还有 ' + info.extra.length + ' 项，展开看',
+                    ),
+              )
+            : null,
+        ),
+      ];
+      if (info.action) {
+        children.push(
+          h(
+            'button',
+            {
+              key: 'action',
+              type: 'button',
+              'data-kind': info.action.kind,
+              disabled: busy,
+              onClick: function () {
+                void onAction();
+              },
+            },
+            busy ? '正在收回…' : info.action.label,
+          ),
+        );
+      }
+      return h('div', { className: 'dsh-guard-dock', 'data-tone': info.tone, 'data-tick': String(nowTick) }, children);
+    }
+    // 作用：把文案判定挂成静态方法，便于 Node 单测四种状态，不必伪造 React 渲染。运行时无影响。
+    GuardDock.describe = describe;
+
+    // ---------------- 会话内的「能力授权」详情页 ----------------
+    const COLORS = {
+      ok: 'var(--dsw-alias-state-success-primary,#1a7f37)',
+      warn: 'var(--dsw-alias-state-warn-primary,#9a6700)',
+      bad: 'var(--dsw-alias-state-error-primary,#cf222e)',
+      idle: 'var(--dsw-alias-label-secondary,#59636e)',
+      line: 'var(--dsw-alias-border-l1,#d8dee4)',
+      line2: 'var(--dsw-alias-border-l2,#c2ccd6)',
+      fg: 'var(--dsw-alias-label-primary,#1f2328)',
+      fg2: 'var(--dsw-alias-label-secondary,#59636e)',
+      surface: 'var(--dsw-alias-bg-layer-1,#fff)',
+      brand: 'var(--dsw-alias-brand-primary,#0969da)',
+    };
+    const S = {
+      page: { height: '100%', overflow: 'auto', boxSizing: 'border-box', padding: '20px 24px', color: COLORS.fg, fontSize: '13px', lineHeight: 1.6 },
+      wrap: { maxWidth: '780px', display: 'flex', flexDirection: 'column', gap: '12px' },
+      card: { border: '1px solid ' + COLORS.line, borderRadius: '10px', padding: '16px 18px', background: COLORS.surface },
+      title: { fontSize: '15px', fontWeight: 600, margin: '0 0 10px' },
+      row: { display: 'grid', gridTemplateColumns: '76px 104px 1fr auto', gap: '10px', alignItems: 'center', padding: '9px 0', borderBottom: '1px dashed ' + COLORS.line },
+      key: { color: COLORS.fg2, fontSize: '12px' },
+      main: { fontWeight: 600 },
+      side: { color: COLORS.fg2, textAlign: 'right', fontVariantNumeric: 'tabular-nums' },
+      fact: { display: 'grid', gridTemplateColumns: '80px 1fr', gap: '10px', padding: '4px 0' },
+      btn: { font: 'inherit', fontSize: '12.5px', padding: '5px 12px', borderRadius: '6px', border: '1px solid ' + COLORS.line2, background: 'transparent', color: COLORS.fg, cursor: 'pointer' },
+      btnStop: { font: 'inherit', fontSize: '12.5px', padding: '5px 12px', borderRadius: '6px', border: '1px solid ' + COLORS.bad, background: 'transparent', color: COLORS.bad, cursor: 'pointer' },
+      note: { color: COLORS.fg2, fontSize: '12px' },
+      grant: { borderTop: '1px solid ' + COLORS.line, paddingTop: '10px', marginTop: '10px' },
+      grantTitle: { fontWeight: 600 },
+      code: { fontFamily: 'ui-monospace,SFMono-Regular,Consolas,monospace', fontSize: '11.5px', wordBreak: 'break-all' },
+      auditRow: { display: 'grid', gridTemplateColumns: '78px 150px 1fr', gap: '8px', padding: '3px 0', fontSize: '12px', color: COLORS.fg2 },
+      empty: { border: '1px dashed ' + COLORS.line, borderRadius: '8px', padding: '14px', color: COLORS.fg2 },
+    };
+    function pill(text, tone) {
+      const color = tone === 'ok' ? COLORS.ok : tone === 'warn' ? COLORS.warn : tone === 'bad' ? COLORS.bad : COLORS.idle;
+      return h('span', { style: { border: '1px solid ' + color, color: color, borderRadius: '999px', padding: '1px 8px', fontSize: '12px', fontWeight: 600, whiteSpace: 'nowrap' } }, text);
+    }
+    function authPill(auth) {
+      if (!auth || auth.state === 'none') return pill('没有授权', 'idle');
+      if (auth.state === 'active') return pill('生效中', 'ok');
+      if (auth.state === 'expiring') return pill('即将到期', 'warn');
+      if (auth.state === 'expired') return pill('已到期', 'idle');
+      return pill('已撤销', 'idle');
+    }
+    function sandboxPill(sandbox) {
+      const state = sandbox ? sandbox.state : 'not-involved';
+      if (state === 'raised') return pill('已提升：' + modeText(sandbox.currentMode), 'ok');
+      if (state === 'unchanged') return pill('未改动（本来就够宽）', 'idle');
+      if (state === 'user-override') return pill('由你设定：' + modeText(sandbox.currentMode), 'idle');
+      if (state === 'pending-restore') return pill('待回滚：仍为 ' + modeText(sandbox.currentMode), 'warn');
+      if (state === 'restored') return pill('已恢复：' + modeText(sandbox.currentMode), 'idle');
+      if (state === 'unknown') return pill('无法确认', 'idle');
+      return pill('不涉及', 'idle');
+    }
+    function consequence(view) {
+      const sandbox = view.sandbox || { state: 'not-involved' };
+      const auth = view.auth || { state: 'none', activeCount: 0 };
+      if (sandbox.state === 'pending-restore') {
+        return '授权已经失效，但权限还停在「' + modeText(sandbox.currentMode) + '」。点「立即回滚档位」可以马上恢复；否则会在下次执行命令时自动收回。';
+      }
+      if (auth.activeCount > 0) {
+        if (sandbox.state === 'raised' || sandbox.state === 'unchanged') {
+          return '到期后会自动收回，权限回到「' + modeText(sandbox.baselineMode) + '」，之后的同类操作会重新征求你的同意。';
+        }
+        if (sandbox.state === 'user-override') return '到期后不会改动你自己设置的权限；之后的同类操作会重新征求你的同意。';
+        return '到期后同类操作会重新征求你的同意。';
+      }
+      if (sandbox.state === 'restored') return '授权已结束，权限已恢复到「' + modeText(sandbox.currentMode) + '」。';
+      if (sandbox.state === 'user-override') return '你自己设置的权限不会被改动。';
+      if (sandbox.state === 'unknown') return '当前无法读取权限级别；授权本身已经结束。';
+      return '本会话当前没有临时授权；工具调用会照常征求你的同意。';
+    }
+
+    /** 作用：会话内的「能力授权」详情页（conversation.view，排在 对话 / 轨迹 之后）。
+     * 数据来自 GET /api/snapshot?session=<id> 与 /api/audit?sessionId=<id>，都只读。 */
+    function GuardSessionView(props) {
+      const sessionId = props && props.sessionId
+        ? String(props.sessionId)
+        : props && props.session && props.session.id
+          ? String(props.session.id)
+          : '';
+      const [snapshot, setSnapshot] = React.useState(null);
+      const [audit, setAudit] = React.useState([]);
+      const [host, setHost] = React.useState(null);
+      const [busy, setBusy] = React.useState('');
+      const [message, setMessage] = React.useState('');
+      const [detailsOpen, setDetailsOpen] = React.useState(false);
+      const [nowTick, setNowTick] = React.useState(0);
+
+      React.useEffect(
+        function () {
+          if (!sessionId) return undefined;
+          let alive = true;
+          const load = async function () {
+            try {
+              const base = await probeConsoleHost();
+              if (!alive || !base) return;
+              const [snap, events] = await Promise.all([
+                fetchJson(base, '/api/snapshot?session=' + encodeURIComponent(sessionId)),
+                fetchJson(base, '/api/audit?sessionId=' + encodeURIComponent(sessionId) + '&limit=' + AUDIT_LIMIT),
+              ]);
+              if (!alive) return;
+              setHost(base);
+              setSnapshot(snap);
+              setAudit(Array.isArray(events) ? events : []);
+            } catch (err) {
+              if (alive) setMessage('治理接口暂时不可达，稍后自动重试');
+            }
+          };
+          void load();
+          const timer = setInterval(function () {
+            void load();
+          }, DOCK_POLL_MS);
+          return function () {
+            alive = false;
+            clearInterval(timer);
+          };
+        },
+        [sessionId],
+      );
+      React.useEffect(function () {
+        const timer = setInterval(function () {
+          setNowTick(function (value) {
+            return value + 1;
+          });
+        }, 1000);
+        return function () {
+          clearInterval(timer);
+        };
+      }, []);
+
+      const view = viewOf(snapshot, sessionId);
+      const run = async function (mode, confirmText) {
+        if (busy || !host) return;
+        if (typeof window !== 'undefined' && typeof window.confirm === 'function' && !window.confirm(confirmText)) return;
+        setBusy(mode);
+        setMessage('');
+        try {
+          await fetchJson(host, '/api/revoke', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'x-dsh-guard': '1' },
+            body: JSON.stringify({ sessionId: sessionId, action: mode }),
+          });
+          const snap = await fetchJson(host, '/api/snapshot?session=' + encodeURIComponent(sessionId));
+          setSnapshot(snap);
+          const events = await fetchJson(host, '/api/audit?sessionId=' + encodeURIComponent(sessionId) + '&limit=' + AUDIT_LIMIT);
+          setAudit(Array.isArray(events) ? events : []);
+          setMessage(mode === 'restore-sandbox' ? '权限已回滚' : '已收回本会话的临时授权');
+        } catch (err) {
+          setMessage('操作失败，请稍后再试');
+        } finally {
+          setBusy('');
+        }
+      };
+
+      if (!view) {
+        return h('div', { style: S.page }, h('div', { style: S.wrap }, h('div', { style: S.empty }, message || '正在读取本会话的授权状态…')));
+      }
+      const auth = view.auth || { state: 'none', activeCount: 0, grants: [] };
+      const sandbox = view.sandbox || { state: 'not-involved' };
+      const grants = Array.isArray(auth.grants) ? auth.grants : [];
+      const remaining = auth.activeCount > 0 && auth.nextExpiresAt ? Math.max(0, auth.nextExpiresAt - Date.now()) : 0;
+
+      const header = h(
+        'div',
+        { style: S.card },
+        h('div', { style: S.title }, '本会话的临时授权'),
+        h(
+          'div',
+          { style: S.row },
+          h('div', { style: S.key }, '授权状态'),
+          h('div', null, authPill(auth)),
+          h('div', { style: S.main }, auth.activeCount > 0 ? '本会话有 ' + auth.activeCount + ' 条可复用的临时授权' : ''),
+          h('div', { style: S.side }, auth.activeCount > 0 ? (remaining > 0 ? '还剩 ' + fmtCn(remaining) : '到期，正在核对…') : ''),
+        ),
+        h(
+          'div',
+          { style: Object.assign({}, S.row, { borderBottom: 'none' }) },
+          h('div', { style: S.key }, '权限级别'),
+          h('div', null, sandboxPill(sandbox)),
+          h('div', { style: S.main }, sandbox.baselineMode ? '你的默认是「' + modeText(sandbox.baselineMode) + '」' : ''),
+          h('div', { style: S.side }, sandbox.checkedAt ? '核对时间 ' + fmtTime(sandbox.checkedAt) : ''),
+        ),
+      );
+
+      const granted = h(
+        'div',
+        { style: S.card },
+        h('div', { style: S.title }, '放开了什么'),
+        grants.length === 0 ? h('div', { style: S.empty }, '还没有临时授权。你在审批弹窗里点「允许一次」之后，这里会出现对应的条目。') : null,
+        grants.map(function (grant) {
+          const left = grant.expiresAt - Date.now();
+          return h(
+            'div',
+            { key: grant.id, style: S.grant },
+            h('div', { style: S.grantTitle }, grant.capabilityText),
+            h('div', { style: S.note }, grant.reasonText + (grant.expiresAt > Date.now() ? ' · 还剩 ' + fmtCn(left) : ' · 已到期')),
+            h('div', { style: S.note }, '范围：' + grant.scopeKind + '；到期时间 ' + fmtTime(grant.expiresAt)),
+          );
+        }),
+        h('div', { style: Object.assign({}, S.fact, { marginTop: '12px' }) }, h('div', { style: S.key }, '到期会怎样'), h('div', null, consequence(view))),
+      );
+
+      const actions = h(
+        'div',
+        { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' } },
+        view.actions && view.actions.canRevoke
+          ? h(
+              'button',
+              { type: 'button', style: S.btnStop, disabled: busy !== '', onClick: function () { void run('revoke', '现在收回本会话的全部临时授权，并恢复权限级别？'); } },
+              busy === 'revoke' ? '正在收回…' : '提前收回',
+            )
+          : null,
+        view.actions && view.actions.canRestoreSandbox
+          ? h(
+              'button',
+              { type: 'button', style: S.btnStop, disabled: busy !== '', onClick: function () { void run('restore-sandbox', '现在把权限收回去？（只影响权限级别，不动仍然有效的授权）'); } },
+              busy === 'restore-sandbox' ? '正在回滚…' : '立即回滚档位',
+            )
+          : null,
+        message ? h('span', { style: S.note }, message) : null,
+      );
+
+      const detailRows = grants.map(function (grant) {
+        return h(
+          'div',
+          { key: 'd-' + grant.id, style: { padding: '6px 0', borderTop: '1px solid ' + COLORS.line } },
+          h('div', { style: S.code }, '授权 ID ' + grant.id),
+          h('div', { style: S.code }, '范围哈希 ' + grant.scopeKeyShort + '…（' + grant.scopeKind + '）'),
+          h('div', { style: S.code }, '签发 ' + fmtTime(grant.issuedAt) + ' → 到期 ' + fmtTime(grant.expiresAt)),
+        );
+      });
+      const details = h(
+        'div',
+        { style: S.card },
+        h(
+          'button',
+          { type: 'button', style: Object.assign({}, S.btn, { border: 'none', padding: 0, color: COLORS.brand }), onClick: function () { setDetailsOpen(!detailsOpen); } },
+          detailsOpen ? '收起技术详情 ▴' : '技术详情 ▾',
+        ),
+        detailsOpen
           ? h(
               'div',
-              {
-                style: {
-                  padding: '24px',
-                  color: 'var(--dsw-alias-label-secondary)',
-                  fontSize: '13px',
-                  lineHeight: 1.7,
-                },
-              },
-              h('div', { style: { fontWeight: 600, color: 'var(--dsw-alias-label-primary)', marginBottom: '6px' } }, '尚未连接到 Capability Guard 治理接口'),
-              h('div', null, status.detail),
-              h(
-                'div',
-                { style: { marginTop: '10px' } },
-                '排障：确认 @dsh-capsule/adapter 已启用，或直接在浏览器打开治理接口端口查看独立页面（默认 8787）。',
-              ),
+              { style: { marginTop: '10px' } },
+              h('div', { style: S.code }, '会话 ID ' + view.sessionId),
+              detailRows.length > 0 ? detailRows : h('div', { style: S.note }, '（没有授权）'),
             )
           : null,
       );
-    }
 
-    /** 作用：侧栏面板图标——用纯 SVG 画一个"盾牌 + 时钟"，不依赖任何图标包。 */
-    function GuardIcon(props) {
-      const size = (props && props.size) || 16;
-      return h(
-        'svg',
-        { width: size, height: size, viewBox: '0 0 16 16', 'aria-hidden': 'true', focusable: 'false' },
-        h('path', {
-          d: 'M8 1.2 13.4 3v4.3c0 3.4-2.2 6.4-5.4 7.5-3.2-1.1-5.4-4.1-5.4-7.5V3L8 1.2Z',
-          fill: 'none',
-          stroke: 'currentColor',
-          strokeWidth: '1.3',
-          strokeLinejoin: 'round',
-        }),
-        h('path', { d: 'M8 4.6v3.1l2.1 1.3', fill: 'none', stroke: 'currentColor', strokeWidth: '1.3', strokeLinecap: 'round' }),
+      const auditCard = h(
+        'div',
+        { style: S.card },
+        h('div', { style: S.title }, '本会话的最近记录'),
+        audit.length === 0
+          ? h('div', { style: S.empty }, '还没有记录。')
+          : audit.map(function (event) {
+              return h(
+                'div',
+                { key: event.id, style: S.auditRow },
+                h('span', null, fmtTime(event.timestamp)),
+                h('span', null, DECISION_LABELS[event.decision] || event.decision),
+                h('span', { style: S.code }, (event.toolName || '') + (event.leaseId ? ' · ' + String(event.leaseId).slice(0, 8) : '')),
+              );
+            }),
       );
+
+      return h('div', { style: S.page }, h('div', { style: S.wrap }, header, granted, h('div', null, actions), details, auditCard));
     }
 
     return {
       inject: ['slots'],
       apply(ctx) {
-        // 作用：注册治理面板（主面板 + 侧栏入口）。两处注册都挂在插件 fiber 上，
-        // 插件卸载（或 profile patch 关闭该行）时随之移除。
-        // 说明：治理接口的探测与低频重探由 GuardPanel 自己负责（它才知道何时需要重新挂载）。
-        ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PANEL_ID }, GuardPanel));
-        ctx.slots.inject('sidebar.panellist', () =>
-          ctx.slots.register({ name: 'sidebar.panellist', id: PANEL_ID, order: 20, label: PANEL_LABEL }, GuardIcon),
+        // ① 对话内提示条（一眼可见，不需要点开）
+        ctx.slots.inject('conversation.input.dock', () =>
+          ctx.slots.register({ name: 'conversation.input.dock', id: GUARD_ID, order: DOCK_ORDER, label: '能力授权' }, GuardDock),
+        );
+        // ② 会话内的「能力授权」tab（详情页，排在 对话 / 轨迹 之后）
+        ctx.slots.inject('conversation.view', () =>
+          ctx.slots.register({ name: 'conversation.view', id: GUARD_ID, order: VIEW_ORDER, label: '能力授权' }, GuardSessionView),
         );
       },
     };

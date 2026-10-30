@@ -9,8 +9,10 @@ import { SandboxGrantManager, type SandboxContext } from "./capability/sandbox-g
 import type { SandboxMode } from "./capability/escalation.js";
 import { DEFAULTABLE_SCOPE_MODES, SCOPE_MODES, isScopeMode, type ScopeMode } from "./capability/scope-modes.js";
 import { UniversalGate } from "./capability/universal-gate.js";
+import { GuardActions } from "./console/actions.js";
 import { GovernanceConsole } from "./console/console-service.js";
 import { GovernancePolicy } from "./console/policy.js";
+import { createHostSessionDirectory } from "./console/session-directory.js";
 import { registerGuardWebRoutes, startConsoleServer, DEFAULT_CONSOLE_HOST, DEFAULT_CONSOLE_PORT, GUARD_WEB_PREFIX, ROUTE_RETRY_DELAYS_MS, guardRouteStatus, type GuardRouteStatus, type ConsoleHttpHandle } from "./console/http-server.js";
 import type { ConsoleHttpConfig } from "./console/types.js";
 export type CapsuleHostContext = Record<string, unknown>;
@@ -56,12 +58,27 @@ function getService(ctx: CapsuleHostContext, name: string): unknown {
     return undefined;
   }
 }
-export { AuditService, GovernanceConsole, GovernancePolicy, LeaseManager, MemoryLeaseStore, PendingRegistry, PolicyResolver, SandboxGrantManager, ScopeResolver, UniversalGate, registerGuardWebRoutes, startConsoleServer, DEFAULT_UNIVERSAL_POLICY, DEFAULT_CONSOLE_HOST, DEFAULT_CONSOLE_PORT, DEFAULTABLE_SCOPE_MODES, GUARD_WEB_PREFIX, ROUTE_RETRY_DELAYS_MS, SCOPE_MODES, guardRouteStatus, isScopeMode, sha256Scope };
+export { AuditService, GovernanceConsole, GovernancePolicy, GuardActions, LeaseManager, MemoryLeaseStore, PendingRegistry, PolicyResolver, SandboxGrantManager, ScopeResolver, UniversalGate, createHostSessionDirectory, registerGuardWebRoutes, startConsoleServer, DEFAULT_UNIVERSAL_POLICY, DEFAULT_CONSOLE_HOST, DEFAULT_CONSOLE_PORT, DEFAULTABLE_SCOPE_MODES, GUARD_WEB_PREFIX, ROUTE_RETRY_DELAYS_MS, SCOPE_MODES, guardRouteStatus, isScopeMode, sha256Scope };
 export type { UniversalPolicyConfig, ConsoleHttpConfig, ScopeMode, ConsoleHttpHandle, GuardRouteStatus };
 // 作用：Guard 插件完整配置——策略项（Partial<UniversalPolicyConfig>）+ Phase 4 Governance Console
-// 查看器开关（默认开启；提供授权剩余时间、审计与范围挡位配置）。
+// 查看器开关（默认开启；提供授权剩余时间、审计与范围挡位配置）+ 沙箱档位低频回滚节拍。
 export interface GuardPluginConfig extends Partial<UniversalPolicyConfig> {
   console?: ConsoleHttpConfig;
+  /** 低频结算节拍（毫秒）：默认 30000；0 表示关闭（关闭后档位只在下次工具调用 / 用户点按钮时回收）。
+   * 【不是安全机制】授权是否有效始终在读写时实时判定，本定时器只负责让「到期后档位回收」更及时。 */
+  sweepIntervalMs?: number;
+}
+/** 默认低频结算节拍——多快把「已失效授权的会话宽档位」收回去（治理台会显示「待回滚」直到收回）。 */
+export const DEFAULT_SWEEP_INTERVAL_MS = 30_000;
+// 作用：解析并校验结算节拍——必须是非负整数（0 = 关闭）；非法值 Fail Closed 直接拒绝装配，
+// 避免出现「配了个 NaN 就静默不结算」的难以察觉的偏差。
+export function resolveSweepInterval(config: GuardPluginConfig | undefined): number {
+  const raw = config?.sweepIntervalMs;
+  if (raw === undefined) return DEFAULT_SWEEP_INTERVAL_MS;
+  if (!Number.isInteger(raw) || raw < 0) {
+    throw new Error("GUARD_INSTALL_FAILED: sweepIntervalMs must be a non-negative integer");
+  }
+  return raw;
 }
 // 作用：Governance Console 默认配置——**默认启动**并绑定 loopback。治理页面是本插件的主要可用性
 // 入口（查看哪些授权还剩多久、审计、切换范围挡位），因此默认开启；端口被占用时回退到随机端口
@@ -97,32 +114,59 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
   const policyConfig = (): UniversalPolicyConfig => ({ ...governance.config, defaultScopePaths: deployment.defaultScopePaths });
   const leases = new LeaseManager(new MemoryLeaseStore());
   const audit = new AuditService();
+  // P0-2：沙箱模式有界授权。宿主服务缺失时该链路自动失效（Fail Closed：不提升 = 不越权），
+  // 其余 Universal Mode 行为完全不受影响。实例在此保留引用：治理台要读它的档位状态，
+  // 收缩型动作要经它回滚档位（此前只注入 Gate，导致治理台完全看不到沙箱状态）。
+  const sandboxGrants = new SandboxGrantManager(buildSandboxContext(ctx), leases);
   const gate = new UniversalGate({
     policy: new PolicyResolver(policyConfig),
     scopes: new ScopeResolver(),
     leases,
     pending: new PendingRegistry(),
     audit,
-    // P0-2：沙箱模式有界授权。宿主服务缺失时该链路自动失效（Fail Closed：不提升 = 不越权），
-    // 其余 Universal Mode 行为完全不受影响
-    sandboxGrants: new SandboxGrantManager(buildSandboxContext(ctx), leases),
+    sandboxGrants,
   });
-  const govConsole = new GovernanceConsole({ audit, leases, guardName: name });
+  const govConsole = new GovernanceConsole({
+    audit,
+    leases,
+    guardName: name,
+    // 治理台的两个状态来源：授权来自 LeaseManager，档位来自 SandboxGrantManager 的实时投影
+    sandbox: { states: () => sandboxGrants.grantStates(), lastOutcomeOf: (sessionId: string) => sandboxGrants.lastOutcomeOf(sessionId) },
+    // 会话显示名（可选能力：读不到标题就降级为 cwd / 短 ID）
+    sessions: createHostSessionDirectory(ctx),
+  });
+  // 收缩型治理动作：撤销授权 / 回滚档位。二者都只会让权限变小（见 console/actions.ts 注释）
+  const actions = new GuardActions({ leases, sandbox: sandboxGrants, audit });
   if (typeof (ctx as { on?: unknown }).on !== "function") {
     throw new Error("GUARD_INSTALL_FAILED: ctx.on unavailable");
   }
   const dispose = gate.install(ctx as unknown as Parameters<UniversalGate["install"]>[0]);
+  // 低频结算：把「授权已失效但档位还没收回」的会话宽模式及时收回去。
+  // 正确性不依赖它（安全性由 LeaseManager 实时判定），关闭它只会让回滚推迟到下次工具调用。
+  const sweepIntervalMs = resolveSweepInterval(config);
+  let sweepTimer: ReturnType<typeof setInterval> | undefined;
+  if (sweepIntervalMs > 0) {
+    sweepTimer = setInterval(() => {
+      void gate.settleNow().catch((err: unknown) => {
+        process.stderr.write(`[dsh-guard] sandbox sweep failed: ${String(err)}\n`);
+      });
+    }, sweepIntervalMs);
+    // 定时器不应阻止进程退出
+    (sweepTimer as { unref?: () => void }).unref?.();
+  }
   // 同源治理路由（优先）：挂到 DSH Web 服务器的 /guard/…，Web GUI 面板因此与页面同源，
   // 不需要跨源请求、也不依赖额外端口。宿主没有 webServer（headless 等组合）时自动跳过。
   // 注册结果记录在 guardRouteStatus 里（GET /api/config 的 routes 字段），失败可自证原因。
-  const disposeRoutes = registerGuardWebRoutes(ctx as { get?(name: string): unknown }, govConsole, governance) ?? (() => undefined);
+  const disposeRoutes = registerGuardWebRoutes(ctx as { get?(name: string): unknown }, govConsole, governance, { actions, sweepIntervalMs }) ?? (() => undefined);
   let consoleHandle: ConsoleHttpHandle | undefined;
   const consoleConfig = resolveConsoleConfig(config);
   if (consoleConfig.enabled) {
-    consoleHandle = await startConsoleServer({ console: govConsole, policy: governance, host: consoleConfig.host, port: consoleConfig.port, fallbackPort: consoleConfig.fallbackPort });
-    process.stderr.write(`[dsh-guard] governance console: ${consoleHandle.url} (同源入口 ${GUARD_WEB_PREFIX}/, routes=${JSON.stringify(guardRouteStatus)})\n`);
+    consoleHandle = await startConsoleServer({ console: govConsole, policy: governance, actions, sweepIntervalMs, host: consoleConfig.host, port: consoleConfig.port, fallbackPort: consoleConfig.fallbackPort });
+    process.stderr.write(`[dsh-guard] governance console: ${consoleHandle.url} (同源入口 ${GUARD_WEB_PREFIX}/, sweep=${sweepIntervalMs}ms, routes=${JSON.stringify(guardRouteStatus)})\n`);
   }
   return async () => {
+    if (sweepTimer) clearInterval(sweepTimer);
+    sweepTimer = undefined;
     if (consoleHandle) {
       await consoleHandle.close();
     }

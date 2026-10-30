@@ -14,7 +14,9 @@ export type AuditDecision =
   /** P0-2：Lease 结束（撤销/到期）后会话沙箱模式已回滚 */
   | "SANDBOX_MODE_RESTORED"
   /** P0-2：模式已被用户手动改动，Guard 主动跳过回滚以免覆盖用户选择 */
-  | "SANDBOX_MODE_SKIPPED_USER_OVERRIDE";
+  | "SANDBOX_MODE_SKIPPED_USER_OVERRIDE"
+  /** 治理台：用户从页面提前收回了一条授权（收缩型动作，只会让权限变小） */
+  | "LEASE_REVOKED";
 export interface ToolAuditEvent {
   id: string;
   timestamp: number;

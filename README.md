@@ -190,18 +190,71 @@ SHA-256(toolName + 目标沙箱模式)
   <img src="assets/governance-console-cn.svg" alt="Governance Console Preview" width="100%" />
 </p>
 
-治理台有两个入口，共用**同一份**前端代码与同一套 HTTP API（`adapter/src/console/console-ui.ts`），因此不会出现两套视图漂移：
+治理界面按「先会话、后全局」组织；前两个入口都挂在**会话作用域**上，组件直接拿到宿主传入的 `sessionId`，
+因此显示的一定是当前会话：
 
-1. **DSH Web GUI 面板**：左侧栏「能力授权」入口（`adapter/client.js` 注册 `main` 面板 + `sidebar.panellist` 图标）；
-2. **独立只读页面**：`http://127.0.0.1:8787/`，浏览器可直接打开，不依赖 DSH 页面。
+1. **【一眼】对话内常驻提示条**：输入框上方（`conversation.input.dock`），打开会话就能看到
+   「放开了什么 / 还剩多久 / 到期会怎样 / 提前收回」，**不需要点开任何东西**；
+2. **【详情】会话内「能力授权」标签页**：排在 对话 / 轨迹 之后的第三个 tab（`conversation.view`，order 20），
+   整页展示本会话的每条授权、权限级别状态、到期后果、技术详情与本会话最近记录；
+3. **【排障】独立只读页面**：`http://127.0.0.1:8787/`，用于没有 Web GUI 的组合或接口排障，
+   不再是面向使用者的入口。
 
-三个视图：
+> 2026-10-31 按项目所有者要求调整：**先不做全局中台**。原先挂在左侧栏的「能力授权」面板与图标已移除，
+> 全局视图（全部会话 / 审计 / 挡位设置）暂时只在独立页面提供。
+
+对话内提示条长这样（**没有授权时也保留一行**，否则用户会以为功能不存在）：
 
 ```text
-授权与剩余时间   每条 Lease 的 Session / Tool / Scope / 状态 / 实时倒计时（相对 TTL 的进度条）
-审计             按 sessionId / toolName / decision 过滤的治理事件流，含沙箱档位提升与回滚
-范围挡位与 TTL   默认范围挡位的可视化切换（只列出允许作为默认值的挡位）、TTL 上下限、只读部署规则
+● 本会话临时放开：pwsh 可以免审批升到「完全访问」
+  还剩 4 分 12 秒 · 到期后会自动收回，之后同类操作会再问你一次。        [ 提前收回 ]
+
+⚠ 临时授权已经到期，但权限还停在「完全访问」，没有收回。
+  点「现在收回」可以立刻恢复；不点的话，下次执行命令时也会自动收回。    [ 现在收回 ]
+
+✓ 已收回：本会话的临时授权结束了，权限已回到「工作区可写」。
 ```
+
+该槽位是 **session 作用域**，组件直接拿宿主传入的 `sessionId`，所以提示条显示的**一定是当前会话**（不是「最近有授权的会话」那种推断）。提示条上唯一的写操作是「提前收回」（纯收缩），审批与签发仍然只走 DSH 原生流程。
+
+独立页面（与上面的会话内 tab 共用同一份数据源）的视图：
+
+```text
+当前会话       会话名 · 授权状态与剩余时间 · 沙箱档位是否已恢复 · 到期后会怎样 · 立即收回 / 立即回滚档位
+全部会话       本进程内出现过的授权会话，点会话名可切换聚焦
+审计           按 sessionId / toolName / decision 过滤的治理事件流（含档位提升、回滚与收回）
+设置           默认范围挡位、TTL 上下限、只读部署规则、运行信息
+```
+
+**授权状态与沙箱档位是两个独立状态**，页面分行显示，绝不合并成一个倒计时：
+
+| 授权状态 | 含义 |
+|---|---|
+| 生效中 / 即将到期 | 还有可复用的短期授权（≤30s 标为即将到期） |
+| 已到期 / 已撤销 | 授权已失效，接下来的同类调用会重新询问 |
+
+| 沙箱档位状态 | 含义 |
+|---|---|
+| 已提升：完全访问 | Guard 提升过档位，且授权仍有效 |
+| 未改动（本来就够宽） | 授权有效，但档位本来就够宽，Guard 没动过 |
+| 由你设定 | 档位是你自己改的，Guard 不会覆盖你的选择 |
+| **待回滚** | **授权已失效，但档位还没收回**——倒计时归零并不等于恢复完成，页面会明确显示并提供「立即回滚档位」 |
+| 已恢复 | 授权已失效，档位已回滚 |
+| 无法确认 | 读不到宿主档位（能力缺失），页面不会假装已恢复 |
+| 不涉及沙箱档位 | 本会话只有普通工具授权 |
+
+原始 `Lease ID`、`sessionId`、Scope 哈希与完整 Scope 串只出现在「技术详情」展开区；会话名来自 DSH 的会话标题（`ctx.sessionTitle`），读不到时降级为工作目录名或短 ID。
+
+档位自动回滚（`sweepIntervalMs`，默认 **30000**，`0` 表示关闭）：
+
+```ts
+{
+  sweepIntervalMs: 30000,   // 每 30s 结算一次「授权已失效但档位还没收回」的会话
+  console: { enabled: true, host: "127.0.0.1", port: 8787 }
+}
+```
+
+> 定时器**不是安全机制**：授权是否有效始终在读写时实时判定；关掉它只会让回滚推迟到「下次任意工具调用」或用户点按钮。
 
 配置（默认**已开启**；端口被占用时自动回退到系统分配的随机端口，实际地址写在 stderr 里）：
 
@@ -218,12 +271,13 @@ SHA-256(toolName + 目标沙箱模式)
 只提供：
 
 ```text
-GET   /                 前端页面（独立入口）
+GET   /                 前端页面（独立入口；支持 ?session=<id> 聚焦会话）
 GET   /console.js       共享前端脚本（面板与独立页面复用）
-GET   /api/snapshot     全量治理快照（含每条授权的剩余毫秒）
+GET   /api/snapshot     治理快照（会话视图 + 每条授权的剩余毫秒；可带 ?session=<id>）
 GET   /api/audit        审计过滤查询
-GET   /api/config       运行期策略 + 挡位目录（含哪些挡位允许作为默认值）
-PATCH /api/config       唯一的写接口：defaultScope / defaultTtlSeconds / maxTtlSeconds
+GET   /api/config       运行期策略 + 挡位目录 + 收缩动作可用性 + 自动回滚节拍
+PATCH /api/config       写接口：defaultScope / defaultTtlSeconds / maxTtlSeconds
+POST  /api/revoke       收缩型动作：action=revoke（撤销本会话全部授权）| restore-sandbox（只回滚档位）
 ```
 
 此外，插件会尝试把同一组接口挂到 DSH Web 服务器上的**同源**前缀 `/guard/…`（`registerGuardWebRoutes`）。
@@ -246,10 +300,14 @@ PATCH /api/config       唯一的写接口：defaultScope / defaultTtlSeconds / 
 
 ### 治理台的写权限边界
 
-- 只能改 `defaultScope` / `defaultTtlSeconds` / `maxTtlSeconds`；
+- 策略写接口只能改 `defaultScope` / `defaultTtlSeconds` / `maxTtlSeconds`；
 - `enabled` 与 `rules` **接口层不可写**（返回 400）——页面不能关掉 Guard，也不能凭空新增授权规则；
 - 运行期改动**不落盘**：Guard 不改写 profile 的 `cordis.patch.yml`，重启后回到 profile 配置值；
-- 面板不做任何审批、撤销或签发动作（那些必须走 DSH 原生审批与 API）。
+- **收缩型动作**（`POST /api/revoke`）只有两个方向，且都只能让权限变小：
+  - `action=revoke`：撤销该会话仍有效的全部授权，并回滚会话沙箱档位；
+  - `action=restore-sandbox`：只结算该会话中**已经失效**的授权并回写档位，仍有效的授权原样不动。
+  - 两者都写审计（`LEASE_REVOKED` / `SANDBOX_MODE_RESTORED`），都遵守「用户手动改过档位则跳过回滚」的红线；
+  - 页面仍然**不做任何审批与签发**动作（那些必须走 DSH 原生审批与 API）。
 
 安全属性：
 
@@ -440,7 +498,9 @@ SANDBOX_MODE_SKIPPED_USER_OVERRIDE   检测到用户已手动改动模式，跳�
 | 真 cordis 集成测试（真实 `Context` / `waterfall` / `emit`） | ✅ 已实现 |
 | 权限生命周期端到端集成测试（ask→签发→复用→过期/撤销） | ✅ 已实现（`integration/permission-lifecycle.test.ts`） |
 | DSH 行为基线核实（逐行核对已安装版本源码） | ✅ 已完成（`docs/集成基线-真实DSH行为.md`） |
-| 治理台：授权剩余时间 / 审计 / 范围挡位 | ✅ 已实现（Web GUI 面板 + 独立页面 + `/guard/` 同源路由） |
+| 治理台：会话视图 / 授权剩余时间 / 两状态（授权有效 vs 档位已恢复）/ 审计 / 范围挡位 | ✅ 已实现（Web GUI 面板 + 独立页面 + `/guard/` 同源路由） |
+| 治理台收缩型动作：立即收回 / 立即回滚档位（只收缩，带审计） | ✅ 已实现（`POST /api/revoke`） |
+| 档位自动回滚（`sweepIntervalMs`，默认 30s，可关） | ✅ 已实现（非安全机制，只负责及时性） |
 | Secret-safe Audit | ✅ 已实现 |
 | Ubuntu / Windows / macOS CI workflow | ✅ 已配置 |
 | 在真实 profile 中安装并实跑（hook 挂载 + 治理台 + 面板注册） | ✅ 已完成（本机 desktop profile） |
@@ -458,12 +518,12 @@ adapter/
 ├── client.js                 # DSH 治理台面板与侧栏入口
 ├── cordis.patch.yml          # 插件配置与默认沙箱升级规则
 └── src/
-    ├── index.ts              # 插件装配与宿主适配
-    ├── capability/           # 四个 hook、Scope、Lease、沙箱提升与回滚
+    ├── index.ts              # 插件装配与宿主适配（含 30s 档位结算节拍）
+    ├── capability/           # 四个 hook、Scope、Lease、沙箱提升与回滚、回滚审计
     ├── integration/          # 真 cordis 接线与权限生命周期测试
     ├── audit/                # 脱敏审计
-    └── console/              # 共享治理视图、接口与运行期策略
-scripts/smoke-console.mjs     # 治理台冒烟脚本
+    └── console/              # 会话视图 / 共享前端 / HTTP 接口 / 收缩型动作 / 会话名解析
+scripts/smoke-console.mjs     # 治理台冒烟脚本（示例数据 + 真实收缩动作）
 .github/workflows/ci.yml      # Windows / macOS / Linux 构建与测试
 ```
 

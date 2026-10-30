@@ -105,7 +105,7 @@ adapter/src/
 ├── broker/                  # errors / provider / registry / broker / providers/github.ts
 ├── audit/                   # types / audit-service
 └── console/                 # types / policy（运行期挡位与 TTL）/ console-service / http-server / console-ui
-adapter/client.js            # DSH 客户端半边：治理台面板（main + sidebar.panellist 槽位）
+adapter/client.js            # DSH 客户端半边：对话内提示条（conversation.input.dock）+ 会话内「能力授权」tab（conversation.view）
 sdk/typescript/              # @dsh-capsule/extension-sdk
 extensions/github-demo/      # Managed Extension 示例
 scripts/smoke-console.mjs    # 本地手工冒烟（示例数据 + 独立治理页面）
@@ -121,21 +121,53 @@ scripts/smoke-console.mjs    # 本地手工冒烟（示例数据 + 独立治理�
 3. **跨源访问要走 loopback CORS**：DSH Web GUI 与独立 Console 端口不同源；Console 只对
    `http://127.0.0.1|localhost|[::1]` 来源回显 CORS 头，其余来源 403；写接口另有自定义头 +
    JSON content-type 两道闸门（浏览器预检挡住 CSRF）。
-4. **治理台写接口只能改 `defaultScope` / `defaultTtlSeconds` / `maxTtlSeconds`**：
+4. **策略写接口只能改 `defaultScope` / `defaultTtlSeconds` / `maxTtlSeconds`**：
    `enabled` 与 `rules` 是部署配置，接口层返回 400；`tool` 挡位禁止作为默认值（规格第 7 条）。
    运行期改动**不落盘**（Guard 不写 profile 的 `cordis.patch.yml`）。
-5. **客户端半边注册槽位**：`ctx.slots.inject('main', …)` 提供面板、`ctx.slots.inject('sidebar.panellist', …)`
-   提供侧栏入口，两者的 `id`/`key` 必须一致（`guard`）才能互相寻址。
+4.1. **收缩型动作接口（2026-10-31 项目所有者批准新增）**：`POST /api/revoke` 只有两个方向，
+   且都只能让权限变小，不得扩展为任何「授予 / 放宽」入口：
+   - `action=revoke`（默认）＝ 撤销该会话全部有效授权 + `releaseSession` 回滚档位；
+   - `action=restore-sandbox` ＝ 只结算该会话中**已失效**的授权（`SandboxGrantManager.restoreSession`），
+     仍有效的授权与用户手动设定的档位一律不动（红线 2）。
+   它与 PATCH /api/config 共用同一套闸门（`x-dsh-guard` 头 + `application/json` + loopback 来源），
+   非 POST 一律 405；动作都写审计（`LEASE_REVOKED` / `SANDBOX_MODE_RESTORED`）。
+5. **客户端半边的槽位（2026-10-31 更新）**：`conversation.input.dock`（一眼层）与
+   `conversation.view`（详情层）都是 session 作用域，组件直接拿到 `sessionId`；
+   **不再注册 `main` 面板与 `sidebar.panellist` 图标**（项目所有者要求"先不做全局中台"）。
+   旧的 `main` 槽是 root-scoped、`ownerProps` 为空，拿不到会话绑定——这正是放弃全局面板、
+   改为会话内嵌的原因，不要再用服务端「最近活动」推断去冒充当前会话。
 6. **改完插件代码必须重启 DSH**：profile 的 HMR 只重组配置，不会重新加载已装载模块的新一代 JavaScript。
+7. **治理台的两个状态必须分开（2026-10-31）**：「授权是否仍有效」（`LeaseManager`）与
+   「沙箱档位是否已恢复」（`SandboxGrantManager.grantStates()` 的实时读数）是两条独立状态。
+   **倒计时归零只表示授权到期，不得据此显示「已恢复」**；读不到宿主档位就是 `unknown`。
+   `SandboxModeResult` 必须携带 `sessionId`/`leaseId`，否则回滚事件无法归属会话
+   （历史缺陷：审计里的 `SANDBOX_MODE_RESTORED` 没有 sessionId）。
+8. **档位自动回滚节拍 `sweepIntervalMs`（默认 30000，0 = 关闭）不是安全机制**：
+   它只调用 `UniversalGate.settleNow()` 做收缩方向结算；授权有效性始终由 `LeaseManager` 实时判定。
+9. **对话内提示条挂在 `conversation.input.dock`（2026-10-31 Inspect 实测，一眼层）**：
+   该槽位是 **list + `replaceRisk: none`**（只追加，不覆盖 DSH 自带的 todo / goal / queue），
+   `standardProps` 直接包含 **`sessionId`**，所以提示条显示的一定是**当前会话**——
+   不要再靠服务端「最近活动」推断去冒充当前会话。提示条上唯一的写操作是「提前收回」（纯收缩，
+   `POST /api/revoke`），不得在提示条里做审批、签发或放宽。
+10. **会话内详情页挂在 `conversation.view`（2026-10-31 Inspect 实测，详情层）**：
+    该槽位是 list，现有占位者是 `chat`(order 0) 与 `trajectory`(order 10)，我们的
+    `guard`(order 20, label 能力授权) 就是**第三个 tab**；`replaceRisk: none`，不会顶掉前两个，
+    同样直接拿到 `sessionId`。
+    **全局入口已按项目所有者要求移除**：`main` 面板与 `sidebar.panellist` 图标不再注册（"先不做全局中台"）；
+    独立 HTTP 页面保留，仅作排障与接口验证，不作为面向使用者的入口。
+    提示条与 tab 都必须遵守同一条规则：**没有值得说的状态也要给一行**（无授权时显示"本会话没有临时放开的操作"，
+    否则用户会认为功能不存在——2026-10-31 实测反馈）。
 
 ## 7.2 当前验收基线
 
 - **通用权限生命周期已跑通**：`adapter/src/integration/permission-lifecycle.test.ts` 在真 cordis 上覆盖
   ask → allowed-once → 签发 → 复用 → TTL 过期 / 撤销 → 重新询问，以及沙箱升级的
-  「提升档位 → 复用 → 到期回滚 → 用户手动改动则跳过回滚」。
+  「提升档位 → 复用 → 到期回滚 → 用户手动改动则跳过回滚」，并覆盖「无工具调用时靠 sweeper 收回档位」
+  以及治理视图在 `pending-restore` → `restored` 之间的状态迁移。
 - **权限代理（Managed Broker 代理链路）按项目决策暂不实跑**：代码仍在（`broker/`、`service/`），
   但不作为当前验收标准，也不要为了它改动 Universal 链路。
-- 治理台的两个入口（DSH 面板 / 独立页面）共用 `console/console-ui.ts` 一份前端代码，禁止再造第二套视图。
+- 治理界面的入口：**对话内提示条**（`conversation.input.dock`，一眼层）＋**会话内「能力授权」tab**
+  （`conversation.view`，详情层），见 7.1 第 9、10 条；独立页面仅作排障，不注册全局面板。
 
 ## 8. 安全声明边界（README / 注释不得混淆）
 
