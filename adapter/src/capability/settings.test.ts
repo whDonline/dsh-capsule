@@ -7,15 +7,16 @@ describe("GuardSettings（用户可见的三档设置）", () => {
     expect(settings.mode).toBe("same-operation");
     expect(settings.snapshot()).toMatchObject({ ...DEFAULT_GUARD_SETTINGS, revision: 1 });
   });
-  it("切换模式 / 关闭开关即时生效，revision 递增", () => {
+  it("切换模式 / 关闭开关即时生效，revision 递增（旧 same-family 归一成 same-operation）", () => {
     const settings = new GuardSettings({ maxTtlSeconds: 1800 });
-    expect(settings.update({ mode: "same-family" }).mode).toBe("same-family");
+    expect(settings.update({ mode: "same-family" }).mode).toBe("same-operation");
+    expect(settings.update({ mode: "do-not-disturb" }).mode).toBe("do-not-disturb");
     const off = settings.update({ enabled: false });
     expect(off.enabled).toBe(false);
     expect(settings.active).toBe(false);
-    expect(off.revision).toBe(3);
-    // 关闭开关不影响其它字段：重新打开后仍是同族模式
-    expect(settings.update({ enabled: true }).mode).toBe("same-family");
+    expect(off.revision).toBe(4);
+    // 关闭开关不影响其它字段：重新打开后仍是免打扰
+    expect(settings.update({ enabled: true }).mode).toBe("do-not-disturb");
   });
   it("非法值整体拒绝（Fail Closed），已生效的值保持不变", () => {
     const settings = new GuardSettings({ maxTtlSeconds: 1800 });

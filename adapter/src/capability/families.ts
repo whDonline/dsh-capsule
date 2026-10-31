@@ -89,13 +89,13 @@ export function identifyFamilies(toolName: string, args: unknown, mode?: string)
     // ④ 命令族：只读程序 + 允许的子命令
     const parsed = parseReadOnlyCommand(command);
     if (parsed) families.push({ kind: "command", key: sha256Scope({ family: "command", program: parsed.program, sub: parsed.sub }), label: `同类命令 ${parsed.program}${parsed.sub ? " " + parsed.sub : ""}` });
-    // ④ 目录族 / ⑤ 程序族：写操作也能复用（破坏性程序永不参与，见 DESTRUCTIVE_PROGRAMS）
+    // ④ 目录族：写操作也能复用（破坏性程序永不参与，见 DESTRUCTIVE_PROGRAMS）。
+    // 「同程序」不再单独成族——前缀族已经覆盖它，且前缀族带目标档位，不会把不同档位混在一起。
     const shape = parseCommandShape(command);
     if (shape && !DESTRUCTIVE_PROGRAMS.has(shape.program)) {
       for (const dir of shape.dirs) {
-        families.push({ kind: "dir", key: sha256Scope({ family: "dir", program: shape.program, dir }), label: `同目录 ${shape.program} @ ${dir}` });
+        families.push({ kind: "dir", key: sha256Scope({ family: "dir", program: shape.program, dir, mode: requestedMode ?? null }), label: `同目录 ${shape.program} @ ${dir}` });
       }
-      families.push({ kind: "program", key: sha256Scope({ family: "program", program: shape.program }), label: `同程序 ${shape.program}` });
     }
   }
   return families;

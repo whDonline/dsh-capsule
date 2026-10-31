@@ -377,10 +377,10 @@ export class UniversalGate {
       return "allowed-once";
     }
     // 族放行：① 档只看「同前缀」（Claude Code 的 `Bash(npm run *)`），② 档看全部族。
-    // 族只由人工批准建立/续期，且只在 reuseTtlSeconds 内有效；破坏性程序没有族（见 families.ts）。
+    // 族放行（两档合并后**始终生效**）：前缀族是 ALL 语义（复合命令逐条都要有放行），
+    // 文件/目录/只读工具族是 ANY 语义；族只由人工批准建立，并在 reuseTtlSeconds 后失效。
     if (record.families && record.families.length > 0) {
-      const kinds = this.deps.settings?.mode === "same-family" ? undefined : (["prefix"] as const);
-      const familyGrant = this.familyGrants.match(record.families, this.now(), kinds, (leaseId) => this.deps.leases.isLive(leaseId));
+      const familyGrant = this.familyGrants.match(record.families, this.now(), undefined, (leaseId) => this.deps.leases.isLive(leaseId));
       if (familyGrant) {
         this.deps.audit.record({
           sessionId: record.sessionId,

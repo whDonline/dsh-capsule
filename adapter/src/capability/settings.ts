@@ -7,20 +7,24 @@
 //   ② same-family     同族模式：命中内置/学习到的操作族即复用（同文件 / 同工具 / 同命令）
 //   ③ do-not-disturb  免打扰模式：整个会话提升到目标档位，到期自动回滚
 import { isSandboxMode, SANDBOX_MODE_LABELS, type SandboxMode } from "./escalation.js";
-export const GUARD_MODES = ["same-operation", "same-family", "do-not-disturb"] as const;
+export const GUARD_MODES = ["same-operation", "do-not-disturb"] as const;
 export type GuardMode = (typeof GUARD_MODES)[number];
 export const GUARD_MODE_LABELS: Record<GuardMode, string> = {
-  "same-operation": "同操作模式",
-  "same-family": "同族模式",
+  "same-operation": "同类复用",
   "do-not-disturb": "免打扰模式",
 };
 export const GUARD_MODE_SUMMARIES: Record<GuardMode, string> = {
-  "same-operation": "只有和刚才完全一样的调用才不再询问",
-  "same-family": "同一文件、同一工具、同一类命令都不再询问",
+  "same-operation": "同一条命令、同一个文件或目录、同一个只读工具都不再询问",
   "do-not-disturb": "整个会话放宽权限级别，到期自动回滚",
 };
 export function isGuardMode(value: unknown): value is GuardMode {
+  // 兼容旧值：`same-family` 已合并进 `same-operation`（2026-10-31 产品精简为两档）
+  if (value === "same-family") return true;
   return typeof value === "string" && (GUARD_MODES as readonly string[]).includes(value);
+}
+/** 作用：把旧挡位名归一成两档模型（`same-family` → `same-operation`）。 */
+export function normalizeGuardMode(value: unknown): GuardMode {
+  return value === "same-family" ? "same-operation" : (isGuardMode(value) ? value : "same-operation");
 }
 export interface GuardSettingsSnapshot {
   /** 用户开关：关闭后 Guard 完全不介入（所有 hook 直接透传，不签发任何授权） */
@@ -103,6 +107,8 @@ export class GuardSettings {
   private validate(next: Omit<GuardSettingsSnapshot, "revision">): Omit<GuardSettingsSnapshot, "revision"> {
     if (typeof next.enabled !== "boolean") throw new GuardSettingsError("enabled must be a boolean");
     if (!isGuardMode(next.mode)) throw new GuardSettingsError(`unknown mode ${String(next.mode)}`);
+    // 旧挡位名归一：same-family → same-operation（合并后不再有单独的同族挡位）
+    next = { ...next, mode: normalizeGuardMode(next.mode) };
     if (!isSandboxMode(next.dndTargetMode)) throw new GuardSettingsError(`unknown dndTargetMode ${String(next.dndTargetMode)}`);
     if (next.dndTargetMode === "read-only") throw new GuardSettingsError("dndTargetMode must be wider than read-only");
     assertSeconds("reuseTtlSeconds", next.reuseTtlSeconds, this.deps.maxTtlSeconds);

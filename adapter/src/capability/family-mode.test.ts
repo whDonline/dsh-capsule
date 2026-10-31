@@ -87,22 +87,21 @@ describe("操作族识别（② 同族模式的判据）", () => {
     expect(parseCommandPrefix("npm publish")).toBeUndefined();
     expect(parseCommandPrefix("Remove-Item D:\\a")).toBeUndefined();
   });
-  it("目录族 / 程序族：写操作也能复用，但破坏性程序永不参与", () => {
+  it("目录族：写操作也能复用，但破坏性程序永不参与", () => {
     const a = identifyFamilies("pwsh", { command: "New-Item -ItemType Directory -Path D:\\work\\a" });
     expect(a.some((item) => item.kind === "dir")).toBe(true);
-    expect(a.some((item) => item.kind === "program")).toBe(true);
-    // 换目录：目录族不命中，但「同前缀」（New-Item）仍命中——比同程序更具体，优先返回
+    // 「同程序」族已删除：前缀族已经覆盖它，且前缀族带目标档位
+    expect(a.some((item) => item.kind === "program")).toBe(false);
+    // 换目录：目录族不命中，但「同前缀」（New-Item）仍命中——比目录更宽，优先返回
     const b = identifyFamilies("pwsh", { command: "New-Item -ItemType Directory -Path D:\\other\\b" });
     const store = new FamilyGrantStore();
     store.grant(a, 60, 1_000);
     expect(store.match(b, 1_000)?.kind).toBe("prefix");
-    // 破坏性程序：连程序族与目录族都没有（换参数必须重新问）
+    // 破坏性程序：连目录族也没有（换参数必须重新问）
     for (const command of ["Remove-Item D:\\work\\a", "del D:\\work\\a.txt", "Move-Item D:\\work\\a D:\\work\\b"]) {
       const families = identifyFamilies("pwsh", { command });
-      expect(families.some((item) => item.kind === "dir" || item.kind === "program")).toBe(false);
+      expect(families.some((item) => item.kind === "dir")).toBe(false);
     }
-    // git 不参与程序族（git status 的批准不能放过 git push）
-    expect(identifyFamilies("pwsh", { command: "git push origin main" }).some((item) => item.kind === "program")).toBe(false);
   });
   it("族放行表：只在 TTL 内有效，按对象族优先匹配", () => {
     const store = new FamilyGrantStore();
@@ -121,11 +120,11 @@ describe("② 同族模式：同一类操作不再询问", () => {
     const second = await callTool(stack, "c2", "read", { file_path: "D:\\proj\\b.ts" });
     expect(second.human).not.toHaveBeenCalled();
   });
-  it("① 同操作模式下同样的场景仍然要问（对照组）", async () => {
+  it("两档合并后：只读工具族在默认档位就生效（不再需要单独的「同族」档）", async () => {
     const stack = makeStack("same-operation");
     await callTool(stack, "c1", "read", { file_path: "D:\\proj\\a.ts" });
     const second = await callTool(stack, "c2", "read", { file_path: "D:\\proj\\b.ts" });
-    expect(second.human).toHaveBeenCalledTimes(1);
+    expect(second.human).not.toHaveBeenCalled();
   });
   it("写类工具即使在同一族模式下，换文件也必须问（无同工具族）", async () => {
     const stack = makeStack("same-family");

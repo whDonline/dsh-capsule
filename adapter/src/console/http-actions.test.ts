@@ -35,8 +35,8 @@ describe("用户可见的三档设置（GET/PATCH /api/config 的 settings）", 
   it("GET 返回 settings 与模式目录（含中文名，前端不再自己映射）", async () => {
     await withServer(undefined, async (handle) => {
       const body = (await (await fetch(`${handle.url}api/config`)).json()) as { settings: { enabled: boolean; mode: string; modeLabel: string }; catalog: { guardModes: { id: string; label: string }[] } };
-      expect(body.settings).toMatchObject({ enabled: true, mode: "same-operation", modeLabel: "同操作模式" });
-      expect(body.catalog.guardModes.map((item) => item.id)).toEqual(["same-operation", "same-family", "do-not-disturb"]);
+      expect(body.settings).toMatchObject({ enabled: true, mode: "same-operation", modeLabel: "同类复用" });
+      expect(body.catalog.guardModes.map((item) => item.id)).toEqual(["same-operation", "do-not-disturb"]);
     }, new GuardSettings({ maxTtlSeconds: 1800 }));
   });
   it("PATCH settings 生效；非法值 → 409 且不改动", async () => {
@@ -44,7 +44,8 @@ describe("用户可见的三档设置（GET/PATCH /api/config 的 settings）", 
     await withServer(undefined, async (handle) => {
       const ok = await fetch(`${handle.url}api/config`, { method: "PATCH", headers: JSON_HEADERS, body: JSON.stringify({ settings: { mode: "same-family", reuseTtlSeconds: 120 } }) });
       expect(ok.status).toBe(200);
-      expect(settings.snapshot()).toMatchObject({ mode: "same-family", reuseTtlSeconds: 120 });
+      // 旧挡位名 same-family 会被归一成 same-operation（两档合并）
+      expect(settings.snapshot()).toMatchObject({ mode: "same-operation", reuseTtlSeconds: 120 });
       const bad = await fetch(`${handle.url}api/config`, { method: "PATCH", headers: JSON_HEADERS, body: JSON.stringify({ settings: { reuseTtlSeconds: 1801 } }) });
       expect(bad.status).toBe(409);
       expect(settings.snapshot().reuseTtlSeconds).toBe(120);
