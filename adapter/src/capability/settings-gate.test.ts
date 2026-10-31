@@ -35,9 +35,10 @@ describe("用户开关（settings.active）", () => {
   });
   it("开启：同样的调用链会签发授权——对照组，证明关闭分支不是「永远不签发」", async () => {
     const { gate, leases } = makeGate(true);
-    const ask = { callId: "c2", name: "pwsh", agent: { id: "s1" }, arguments: { command: "Get-Date" } };
-    await gate.handlePreExecute(ask, async () => ({ kind: "ask", reason: "原生审批" }));
-    await gate.handleApprovalRequest({ callId: "c2", agent: { id: "s1" }, toolName: "pwsh" }, async () => "allowed-once");
+    // 新语义：签发依赖 tools/execute 阶段记录的操作指纹（审批载荷本身没有 arguments）
+    await gate.handleExecute({ callId: "c2", name: "pwsh", agent: { id: "s1" }, arguments: { command: "Get-Date" } }, async () => "ok");
+    const outcome = await gate.handleApprovalRequest({ callId: "c2", agent: { id: "s1" }, toolName: "pwsh" }, async () => "allowed-once");
+    expect(outcome).toBe("allowed-once");
     expect(await leases.list()).toHaveLength(1);
   });
 });

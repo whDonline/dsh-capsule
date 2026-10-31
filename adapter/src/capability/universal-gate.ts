@@ -1,6 +1,8 @@
 import type { AuditService } from "../audit/audit-service.js";
 import type { AuditDecision } from "../audit/types.js";
 import { parseEscalation, type SandboxMode } from "./escalation.js";
+import { operationFingerprint } from "./operation.js";
+import { OperationRegistry } from "./operation-registry.js";
 import type { SandboxGrantManager, SandboxModeResult } from "./sandbox-grant.js";
 import { recordSandboxOutcome } from "./sandbox-audit.js";
 import type { ResolvedToolPolicy, PolicyResolver } from "./policy.js";
@@ -31,8 +33,9 @@ export interface UniversalGateDeps {
   /**
    * 用户可见的三档设置（开关 / 同操作 / 同族 / 免打扰）。**未注入等价于始终启用**；
    * 注入后 `enabled === false` 时所有 hook 直接透传——不签发、不提升、不改写任何状态。
+   * 注入同时意味着启用【按操作复用】的新语义（①② 不改变沙箱档位）；未注入则保持历史行为。
    */
-  settings?: { readonly active: boolean; readonly mode: string };
+  settings?: { readonly active: boolean; readonly mode: string; readonly reuseTtlSeconds: number };
   /** 可注入时钟（默认 Date.now），保证 TTL/GC 语义可模拟时间测试 */
   now?: () => number;
 }
@@ -50,6 +53,8 @@ export class UniversalGate {
   private readonly now: () => number;
   /** P0-2：按 callId 关联的「沙箱升级待批准」记录（approval/request 载荷无 arguments，只能这样关联） */
   private readonly escalations = new Map<string, EscalationGrant>();
+  /** 按 callId 记录的操作指纹（新语义：① 同操作复用的判据） */
+  private readonly operations = new OperationRegistry();
   constructor(private readonly deps: UniversalGateDeps) {
     this.now = deps.now ?? Date.now;
   }
@@ -67,8 +72,30 @@ export class UniversalGate {
     //   3. 始终 await next() 并原样返回结果，绝不改写、绝不否决。
     if (!this.active) return await next();
     await this.settleAll();
+    // 新版（settings 注入时）：为本次调用记录操作指纹。approval/request 拿不到 arguments，
+    // 只能在这里把「这次是什么操作」按 callId 存下来，等审批到达时反查。
+    // 【注意】此分支【不提升会话档位】——① ② 两档只改变"问不问"，不改变沙箱权限。
+    if (this.deps.settings && typeof exec?.callId === "string" && exec.callId.length > 0 && typeof exec?.name === "string" && exec.name.length > 0) {
+      const sessionId = exec.agent?.id;
+      if (typeof sessionId === "string" && sessionId.length > 0) {
+        const escalation = parseEscalation(exec.arguments);
+        const fingerprint = operationFingerprint(exec.name, exec.arguments, escalation?.requestedMode);
+        this.operations.gc(this.now());
+        this.operations.set({
+          callId: exec.callId,
+          sessionId,
+          toolName: exec.name,
+          key: fingerprint.key,
+          display: fingerprint.display,
+          mode: fingerprint.mode,
+          recordedAt: this.now(),
+        });
+      }
+    }
     const grants = this.deps.sandboxGrants;
-    if (grants && typeof exec?.callId === "string" && exec.callId.length > 0 && typeof exec?.name === "string" && exec.name.length > 0) {
+    // 旧版（未注入 settings，仅兼容/回滚用）：识别沙箱升级并主动提升会话模式。
+    // 插件装配始终注入 settings，因此生产路径不会走到这里。
+    if (!this.deps.settings && grants && typeof exec?.callId === "string" && exec.callId.length > 0 && typeof exec?.name === "string" && exec.name.length > 0) {
       const sessionId = exec.agent?.id;
       const escalation = parseEscalation(exec.arguments);
       if (escalation && typeof sessionId === "string" && sessionId.length > 0) {
@@ -193,6 +220,10 @@ export class UniversalGate {
     if (typeof req?.callId !== "string" || req.callId.length === 0) {
       return await next();
     }
+    // 新版（settings 注入时）：按操作指纹判定复用 / 签发，绝不提升会话档位
+    if (this.deps.settings) {
+      return await this.handleOperationApproval(req, next);
+    }
     // P0-2：本次审批可能对应两种上下文之一——① pre-execute 阶段已 ASK 的调用（pending）；
     // ② tools/execute 阶段识别的沙箱升级（escalations，其 GetScope 只能在那里算）。
     // 两者都不命中即完全不接管（保持 DSH 原生语义）。
@@ -265,6 +296,83 @@ export class UniversalGate {
       this.deps.pending.delete(req.callId);
       this.escalations.delete(req.callId);
     }
+    return result;
+  }
+  /**
+   * 作用：新语义下的审批处理——「批准一次 = 同一条操作在一段时间内不再问」。
+   *
+   * 【这是唯一允许合成 outcome 的地方，条件必须严格】
+   * 代答 allowed-once 的前提（缺一不可）：
+   *   ① 本 callId 在 tools/execute 被 Guard 亲自记录过操作指纹；
+   *   ② 审批请求的会话与工具名与记录一致；
+   *   ③ 存在仍然有效（ACTIVE 且未过期）的授权，且 scope key 与指纹完全一致；
+   *   ④ 用户开关处于启用状态（已在 handleApprovalRequest 入口判断）。
+   * 任何一条不满足 → 必须 `await next()` 交还给人类答话器。
+   *
+   * 未命中时的批准行为：签发一条「操作授权」（exact-arguments 语义），**不调用 setSandboxMode**。
+   */
+  private async handleOperationApproval(req: ApprovalRequestLike, next: () => Promise<ApprovalOutcome>): Promise<ApprovalOutcome> {
+    const callId: unknown = req.callId;
+    if (typeof callId !== "string" || callId.length === 0) return await next();
+    const record = this.operations.get(callId);
+    if (!record) return await next();
+    const requesterId = approvalAgentId(req);
+    if (requesterId !== undefined && requesterId !== record.sessionId) return await next();
+    if (typeof req.toolName === "string" && req.toolName.length > 0 && req.toolName !== record.toolName) return await next();
+    // ① 命中已有授权 → 代答（不调用人类答话器，也不提升任何权限）
+    const reusable = await this.deps.leases.findMatching(record.sessionId, record.toolName, record.key, "universal");
+    if (reusable) {
+      this.deps.audit.record({
+        sessionId: record.sessionId,
+        callId: record.callId,
+        rootCallId: record.callId,
+        toolName: record.toolName,
+        scopeKey: record.key,
+        scopeDisplay: record.display,
+        leaseId: reusable.id,
+        decision: "LEASE_REUSED",
+      });
+      this.operations.delete(callId);
+      return "allowed-once";
+    }
+    // ② 未命中 → 交给人类（next 只调用一次，结果原样返回）
+    const result = await next();
+    if (normalizeOutcome(result) === "allowed-once") {
+      try {
+        const lease = await this.deps.leases.issue({
+          sessionId: record.sessionId,
+          toolName: record.toolName,
+          scope: { kind: "exact-arguments", key: record.key, display: record.display },
+          ttlSeconds: this.deps.settings?.reuseTtlSeconds ?? 300,
+          kind: "universal",
+          sourceCallId: callId,
+        });
+        this.deps.audit.record({
+          sessionId: record.sessionId,
+          callId: record.callId,
+          rootCallId: record.callId,
+          toolName: record.toolName,
+          scopeKey: record.key,
+          scopeDisplay: record.display,
+          leaseId: lease.id,
+          decision: "LEASE_ISSUED",
+        });
+      } catch (err) {
+        // 签发失败：Fail Closed——不签发、不放宽，只写不含 Secret 的诊断日志
+        process.stderr.write(`[dsh-guard] operation lease issue failed for call ${callId}: ${String(err)}\n`);
+      }
+    } else {
+      this.deps.audit.record({
+        sessionId: record.sessionId,
+        callId: record.callId,
+        rootCallId: record.callId,
+        toolName: record.toolName,
+        scopeKey: record.key,
+        scopeDisplay: record.display,
+        decision: "APPROVAL_REJECTED",
+      });
+    }
+    this.operations.delete(callId);
     return result;
   }
   handleToolResult(exec: ToolExecutionLike, result: { isError?: boolean }): void {

@@ -33,7 +33,7 @@ DSH Capability Guard（TS 插件，横切）
    ├── Universal Gate（四个 hook，全部 prepend 观察）
    │     ├── tools/pre-execute：只接管下游 ask（真实 DSH 中通常为 allow → 透传；仅 hook 插件会 ask）
    │     ├── tools/execute：识别沙箱升级参数 → 按 (toolName, 目标模式) 算语义 Scope → 记 pending（唯一能拿到 arguments 的时机）
-   │     ├── approval/request：始终 next() 委派给人/机 answerer；allowed-once → 签发 Lease + setSandboxMode 提升会话模式 + 记回滚点
+   │     ├── approval/request：默认 `next()` 委派给人/机 answerer；命中【同一条操作】的有效授权时代答 allowed-once（见红线 (a) 的 5 个条件）；人批准后签发操作授权，**不提升档位**
    │     └── tools/result：清理 pending + 记录结果（沙箱模式回滚与 Lease 回收在此协同）
    ├── LeaseManager（MemoryLeaseStore，接口抽象可换持久化）
    └── Console（提示条 / 输入框模式 chip / 能力授权 tab：配置 + 状态 + 审计 + 统计）
@@ -76,8 +76,13 @@ DSH Capability Guard（TS 插件，横切）
 15. 错误统一使用规格第 18 节错误码（`LEASE_REQUIRED` / `CAPABILITY_MISMATCH` / `CREDENTIAL_NOT_CONFIGURED` 等），禁止杂乱字符串。
 16. 每完成一个 Phase，先补齐规格要求的测试并全部通过，再进入下一 Phase；禁止为通过测试删除安全断言。
 17. V1 禁止顺手实现 Dashboard/Web UI（Phase 4 才做）；禁止在同一 Phase 大规模 Rename 仓库（项目名暂保 dsh-capsule，新模块内部命名用 Capability Guard / LeaseManager）。
-18. **审批瀑布三条红线（2026-09-14 基线新增，违反即为严重越权）**：
-    (a) `approval/request` 处理器**只观察、绝不合成 outcome** —— 任何路径都必须 `await next()` 并原样返回其结果；Guard 以 prepend 排在最前，一旦提前 return 就会在零人工交互下批准一切并旁路人类答话器。由 `universal-gate.test.ts` 的 P0-3 用例与 `integration/cordis-pipeline.test.ts` 的真 cordis 用例守护。
+18. **审批瀑布三条红线（2026-09-14 基线新增；2026-10-31 按产品定稿窄化 (a)）**：
+    (a) `approval/request` 处理器**默认只观察**：默认路径必须 `await next()` 并原样返回其结果。
+    **唯一例外（代答 `allowed-once`）必须同时满足 5 个条件**：① 本 `callId` 在 `tools/execute` 被 Guard 亲自记录过操作指纹；
+    ② 审批请求的会话与工具名与记录一致；③ 存在 ACTIVE 且未过期的授权；④ 授权 scope key 与本次操作指纹完全一致；
+    ⑤ 用户开关处于启用状态。任一不满足 → 必须 `await next()`；**未注入 `settings` 时永不代答**（保持历史行为，供回滚）。
+    该例外只表示「同一条操作，人已经批准过一次」，不提升任何权限。由 `operation-reuse.test.ts` 九条用例守护
+    （无记录 / 会话不符 / 参数不同 / 目标档位不同 / 过期 / 撤销 / 被拒绝 / 关闭开关 全部必须惊动人类答话器）。
     (a2) **`approval/request` 上只允许注册这一个 prepend 监听器**（2026-09-14 真 cordis 实测：prepend 监听器互相遮蔽——后注册的 prepend 排最前，认领后不再调用 `next()`，先注册者收不到事件）。任何额外的 prepend 监听器都会把 Guard 挤出观察位置，造成"审批通过却静默不签发 Lease"。同时必须校验审批发起者 session 与上下文一致，不一致一律不接管。
     (b) 提升授权**只能用 `setSandboxMode`**；**严禁** `permissionPresets.set` / `approval.setPolicy`（内置 `danger-full-access` preset 配 `approval: never`，调用即永久关闭审批）。回滚前必须做冲突检测：当前模式已非 Guard 写入值（用户手动改过）则**跳过回滚**并记审计，绝不冲掉用户选择。
     (c) **禁止为子 session 签发 Lease** —— 子 agent 的 approval policy 被 DSH 钉死为 `never`，其授权请求在瀑布派发前就 fail-closed；跨 session 继承授权在设计上不可能，也不允许尝试。
