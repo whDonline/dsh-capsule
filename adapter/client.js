@@ -452,6 +452,8 @@ window.__ModuleLoader__.load({
       const [audit, setAudit] = React.useState([]);
       const [host, setHost] = React.useState(null);
       const [busy, setBusy] = React.useState('');
+      /** 指标与审计的时间范围（天）：0 = 全部。默认近 30 天，避免历史测试数据污染指标。 */
+      const [rangeDays, setRangeDays] = React.useState(30);
       const [message, setMessage] = React.useState('');
       const [detailsOpen, setDetailsOpen] = React.useState(false);
       const [rawOpen, setRawOpen] = React.useState(false);
