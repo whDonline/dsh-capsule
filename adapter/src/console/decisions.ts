@@ -39,6 +39,8 @@ export interface DecisionRecord {
   ttlSeconds: number;
   /** 这条授权被复用的次数（= 用户少点的批准次数） */
   uses: number;
+  /** ② 同族模式的复用来自哪个族（审计串「凭族放行：xxx」里取回） */
+  familyLabel?: string;
   lastUsedAt?: number;
   /** active = 仍可复用；expired = 自然到期；revoked = 被提前收回 */
   outcome: "active" | "expired" | "revoked";
@@ -62,6 +64,10 @@ export interface DecisionSummary {
   raised: number;
   /** 授权已失效但权限级别还没收回（需要人处理） */
   pendingRestore: number;
+  /** 复用来源分布：精确匹配 / 族放行 / 免打扰窗口 */
+  reuseByKind: { exact: number; family: number; window: number };
+  /** 命中最多的族（Top 3，只有 ② 同族模式会产生） */
+  topFamilies: { label: string; count: number }[];
 }
 export interface DecisionBuildInput {
   leases: readonly CapabilityLease[];
@@ -137,6 +143,7 @@ export function buildDecisions(input: DecisionBuildInput): DecisionRecord[] {
       expiresAt: lease.expiresAt,
       ttlSeconds: Math.max(0, Math.round((lease.expiresAt - lease.issuedAt) / 1000)),
       uses: reused.length,
+      familyLabel: reused.map((event) => familyOf(event)).find((label) => label !== undefined),
       lastUsedAt: reused.length > 0 ? Math.max(...reused.map((event) => event.timestamp)) : undefined,
       outcome: active ? "active" : lease.status === "REVOKED" ? "revoked" : "expired",
       endedAt,
@@ -155,17 +162,38 @@ export function summarizeDecisions(records: readonly DecisionRecord[]): Decision
   let raised = 0;
   let active = 0;
   let pendingRestore = 0;
+  // 复用来源分布：① 精确匹配 / ② 族放行（审计串里带「凭族放行」）/ ③ 免打扰窗口（sandbox-mode 授权被复用）
+  const reuseByKind = { exact: 0, family: 0, window: 0 };
+  const familyCounts = new Map<string, number>();
   for (const record of records) {
     savedApprovals += record.uses;
     longestWindowMs = Math.max(longestWindowMs, record.windowMs);
     if (record.sandbox?.raisedTo) raised += 1;
     if (record.outcome === "active") active += 1;
+    if (record.uses > 0) {
+      if (record.kind === "sandbox-mode") reuseByKind.window += record.uses;
+      else if (record.familyLabel) {
+        reuseByKind.family += record.uses;
+        familyCounts.set(record.familyLabel, (familyCounts.get(record.familyLabel) ?? 0) + record.uses);
+      } else reuseByKind.exact += record.uses;
+    }
     // 「授权已结束但权限级别没被收回」：沙箱授权提升过、已结束、且没有恢复记录也没有跳过记录
     if (record.sandbox?.raisedTo && record.outcome !== "active" && !record.sandbox.restoredAt && !record.sandbox.skipped) {
       pendingRestore += 1;
     }
   }
-  return { total: records.length, active, savedApprovals, longestWindowMs, raised, pendingRestore };
+  const topFamilies = [...familyCounts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 3)
+    .map(([label, count]) => ({ label, count }));
+  return { total: records.length, active, savedApprovals, longestWindowMs, raised, pendingRestore, reuseByKind, topFamilies };
+}
+/** 作用：从「凭族放行：xxx」审计串里取出族名（只有 ② 同族模式会写这种串）。 */
+function familyOf(event: ToolAuditEvent): string | undefined {
+  const text = event.scopeDisplay ?? "";
+  const marker = "凭族放行：";
+  const index = text.indexOf(marker);
+  return index >= 0 ? text.slice(index + marker.length).trim() : undefined;
 }
 /** 作用：从审计事件里取「批准时的说明」——优先用事件里的脱敏 scopeDisplay，其次给出结构化默认文案。 */
 function approvedReason(issued: ToolAuditEvent | undefined, lease: CapabilityLease): string {

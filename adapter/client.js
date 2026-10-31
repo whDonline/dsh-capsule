@@ -817,6 +817,10 @@ window.__ModuleLoader__.load({
               }),
             ),
             stats.longestWindowMs > 0 ? h('div', { style: Object.assign({}, S.note, { marginTop: '8px' }) }, '最长一次放开：' + fmtCn(stats.longestWindowMs)) : null,
+            h('div', { style: Object.assign({}, S.note, { marginTop: '4px' }) }, '复用来源：精确 ' + ((stats.reuseByKind && stats.reuseByKind.exact) || 0) + ' 次 · 族 ' + ((stats.reuseByKind && stats.reuseByKind.family) || 0) + ' 次 · 窗口 ' + ((stats.reuseByKind && stats.reuseByKind.window) || 0) + ' 次'),
+            stats.topFamilies && stats.topFamilies.length > 0
+              ? h('div', { style: S.note }, '最常命中的族：' + stats.topFamilies.map(function (item) { return item.label + ' ×' + item.count; }).join(' · '))
+              : null,
           )
         : null;
 
