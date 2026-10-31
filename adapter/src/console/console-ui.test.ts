@@ -291,6 +291,35 @@ describe("DSH 客户端半边（adapter/client.js）", () => {
     const rendered = (dock?.component as (props: Record<string, unknown>) => FakeElement | null)({ sessionId: "session-x" });
     expect(rendered).toBeNull();
   });
+  it("面板模型（纯函数）：时间范围过滤 + 指标聚合，避免再有渲染期空白", () => {
+    const { registrations } = registerPlugin();
+    const view = registrations.find((item) => item.slot === "conversation.view")?.component as unknown as {
+      buildModel(records: unknown[], rangeDays: number, now: number): { rows: unknown[]; metrics: { label: string; value: string }[]; topFamilies: [string, number][] };
+    };
+    expect(typeof view.buildModel).toBe("function");
+    const now = 1_800_000_000_000;
+    const day = 86_400_000;
+    const base = { kind: "universal", outcome: "expired", uses: 0, windowMs: 0 };
+    const records = [
+      { ...base, leaseId: "old", grantedAt: now - 60 * day },
+      { ...base, leaseId: "exact", grantedAt: now - 1 * day, uses: 2 },
+      { ...base, leaseId: "family", grantedAt: now - 2 * day, uses: 3, familyLabel: "同前缀 tsc" },
+      { ...base, leaseId: "window", grantedAt: now - 3 * day, uses: 1, kind: "sandbox-mode" },
+      { ...base, leaseId: "active", grantedAt: now - 1 * day, outcome: "active", windowMs: 90_000 },
+    ];
+    // 默认近 30 天：60 天前那条被过滤掉
+    const model = view.buildModel(records, 30, now);
+    expect(model.rows).toHaveLength(4);
+    const pick = (label: string) => model.metrics.find((m) => m.label === label)?.value;
+    expect(pick("人工批准")).toBe("4");
+    expect(pick("命中复用")).toBe("6");
+    expect(pick("复用率")).toBe("60");
+    expect(pick("生效中")).toBe("1");
+    expect(pick("精确 / 族 / 免打扰")).toBe("2 / 3 / 1");
+    expect(model.topFamilies[0]).toEqual(["同前缀 tsc", 3]);
+    // rangeDays=0 → 全部
+    expect(view.buildModel(records, 0, now).rows).toHaveLength(5);
+  });
   it("对话内提示条：四种状态的文案（没有授权时也必须显示一行，否则用户以为功能不存在）", () => {
     const { registrations } = registerPlugin();
     const dock = registrations.find((item) => item.slot === "conversation.input.dock")?.component as unknown as {

@@ -351,6 +351,8 @@ window.__ModuleLoader__.load({
     }
     // 作用：把文案判定挂成静态方法，便于 Node 单测四种状态，不必伪造 React 渲染。运行时无影响。
     GuardDock.describe = describe;
+    // 测试用接口：面板模型是纯函数（防止"漏声明变量 → 整页空白"那类渲染期错误）
+    GuardSessionView.buildModel = buildPanelModel;
 
     // ---------------- 会话内的「能力授权」详情页 ----------------
     const COLORS = {
@@ -436,6 +438,51 @@ window.__ModuleLoader__.load({
         return n < 10 ? '0' + n : String(n);
       };
       return h > 0 ? h + ':' + pad(m) + ':' + pad(s) : m + ':' + pad(s);
+    }
+    /**
+     * 作用：把「授权决策记录」折算成面板要展示的模型（纯函数，便于单测）。
+     * 之前这段逻辑直接写在组件里，漏声明一个状态变量就会让整个 tab 渲成空白（2026-10-31 实测）。
+     * @param records 决策记录（/api/decisions 的 records）
+     * @param rangeDays 时间范围（天），0 = 全部
+     * @param now 当前时间戳
+     */
+    function buildPanelModel(records, rangeDays, now) {
+      const list = Array.isArray(records) ? records : [];
+      const cutoff = rangeDays > 0 ? now - rangeDays * 86_400_000 : 0;
+      const rows = list.filter(function (record) { return record.grantedAt >= cutoff; });
+      const reuse = { exact: 0, family: 0, window: 0 };
+      let saved = 0;
+      let longestWindowMs = 0;
+      let activeCount = 0;
+      const familyCounts = new Map();
+      for (const record of rows) {
+        saved += record.uses || 0;
+        longestWindowMs = Math.max(longestWindowMs, record.windowMs || 0);
+        if (record.outcome === 'active') activeCount += 1;
+        if (record.uses > 0) {
+          if (record.kind === 'sandbox-mode') reuse.window += record.uses;
+          else if (record.familyLabel) {
+            reuse.family += record.uses;
+            familyCounts.set(record.familyLabel, (familyCounts.get(record.familyLabel) || 0) + record.uses);
+          } else reuse.exact += record.uses;
+        }
+      }
+      const total = rows.length;
+      const reuseRate = total + saved > 0 ? Math.round((saved / (total + saved)) * 100) : 0;
+      const topFamilies = [...familyCounts.entries()].sort(function (a, b) { return b[1] - a[1]; }).slice(0, 3);
+      return {
+        rows,
+        topFamilies,
+        metrics: [
+          { label: '人工批准', value: String(total), unit: '次' },
+          { label: '命中复用', value: String(saved), unit: '次' },
+          { label: '复用率', value: String(reuseRate), unit: '%' },
+          { label: '生效中', value: String(activeCount), unit: '条' },
+          { label: '精确 / 族 / 免打扰', value: reuse.exact + ' / ' + reuse.family + ' / ' + reuse.window, unit: '次' },
+          { label: '最长放开', value: longestWindowMs > 0 ? fmtCn(longestWindowMs) : '-', unit: '' },
+          { label: '最常命中族', value: topFamilies.length > 0 ? topFamilies.map(function (f) { return f[0] + '×' + f[1]; }).join('，') : '-', unit: '' },
+        ],
+      };
     }
     /** 作用：会话内的「能力授权」详情页（conversation.view，排在 对话 / 轨迹 之后）。
      * 数据来自 GET /api/snapshot?session=<id>（实时状态）与 GET /api/decisions?sessionId=<id>
@@ -945,42 +992,10 @@ window.__ModuleLoader__.load({
           : null,
       );
 
-      // ---- 指标区（自进化用）：按时间范围重新折算，避免历史测试数据污染 ----
-      const nowMs0 = Date.now();
-      const cutoff = rangeDays > 0 ? nowMs0 - rangeDays * 86_400_000 : 0;
-      const rows = records.filter(function (record) {
-        return record.grantedAt >= cutoff;
-      });
-      const reuse = { exact: 0, family: 0, window: 0 };
-      let saved = 0;
-      let longestWindowMs = 0;
-      let activeCount = 0;
-      const familyCounts = new Map();
-      for (const record of rows) {
-        saved += record.uses || 0;
-        longestWindowMs = Math.max(longestWindowMs, record.windowMs || 0);
-        if (record.outcome === 'active') activeCount += 1;
-        if (record.uses > 0) {
-          if (record.kind === 'sandbox-mode') reuse.window += record.uses;
-          else if (record.familyLabel) {
-            reuse.family += record.uses;
-            familyCounts.set(record.familyLabel, (familyCounts.get(record.familyLabel) || 0) + record.uses);
-          } else reuse.exact += record.uses;
-        }
-      }
-      const totalApprovals = rows.length;
-      const reuseRate = totalApprovals + saved > 0 ? Math.round((saved / (totalApprovals + saved)) * 100) : 0;
-      const topFamilies = [...familyCounts.entries()].sort(function (a, b) { return b[1] - a[1]; }).slice(0, 3);
-      const metricCards = [
-        ["人工批准", String(totalApprovals), '次'],
-        ["命中复用", String(saved), '次'],
-        ["复用率", String(reuseRate), '%'],
-        ["生效中", String(activeCount), '条'],
-        ["精确 / 族 / 免打扰", reuse.exact + ' / ' + reuse.family + ' / ' + reuse.window, '次'],
-        ["最长放开", longestWindowMs > 0 ? fmtCn(longestWindowMs) : '-', ''],
-        ["待收回档位", String((summary && summary.pendingRestore) || 0), '条'],
-        ["最常命中族", topFamilies.length > 0 ? topFamilies.map(function (f) { return f[0] + '×' + f[1]; }).join('，') : '-', ''],
-      ];
+      // ---- 指标区（自进化用）：纯函数算模型，便于单测（见 GuardSessionView.buildModel）----
+      const model = buildPanelModel(records, rangeDays, Date.now());
+      const rows = model.rows;
+      const metricCards = model.metrics.map(function (item) { return [item.label, item.value, item.unit]; });
       const metricsCard = h(
         'div',
         { style: S.card },
