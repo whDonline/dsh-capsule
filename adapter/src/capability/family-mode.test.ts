@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { AuditService } from "../audit/audit-service.js";
-import { FamilyGrantStore, identifyFamilies, parseCommandPrefix, parseReadOnlyCommand } from "./families.js";
+import { FamilyGrantStore, identifyFamilies, parseCommandPrefix, parseReadOnlyCommand, splitSubcommands } from "./families.js";
 import { LeaseManager } from "./lease-manager.js";
 import { MemoryLeaseStore } from "./lease-store.js";
 import { PendingRegistry } from "./pending.js";
@@ -52,13 +52,28 @@ describe("操作族识别（② 同族模式的判据）", () => {
     const b = identifyFamilies("pwsh", { command: "git status --short" }).find((item) => item.kind === "command");
     expect(a?.key).toBe(b?.key);
   });
+  it("复合命令：拆成子命令逐个匹配，全部有放行才允许整条脚本", () => {
+    // `$p = Join-Path ...` 只是赋值，真正执行的是 Join-Path 与 New-Item 两条子命令
+    expect(splitSubcommands("$p = Join-Path D:\\x a\nNew-Item $p")).toEqual(["Join-Path D:\\x a", "New-Item $p"]);
+    const scriptA = identifyFamilies("pwsh", { command: "$p = Join-Path D:\\x a\nNew-Item $p" });
+    const prefixes = scriptA.filter((item) => item.kind === "prefix");
+    expect(prefixes).toHaveLength(2);
+    const store = new FamilyGrantStore();
+    // 只批准其中一条子命令 → 整条脚本仍然不能复用
+    store.grant([prefixes[0]!], 60, 1_000);
+    const scriptB = identifyFamilies("pwsh", { command: "$q = Join-Path D:\\y b\nNew-Item $q" });
+    expect(store.match(scriptB, 1_000, ["prefix"])).toBeUndefined();
+    // 两条都批准后 → 同类脚本复用
+    store.grant([prefixes[1]!], 60, 1_000);
+    expect(store.match(scriptB, 1_000, ["prefix"])?.kind).toBe("prefix");
+  });
   it("【安全回归】多行脚本 / 变量赋值 / 脚本内含破坏性命令 → 一律不给前缀", () => {
     // 实测缺陷：`$p = Join-Path ...` 曾被解析成前缀 `$p =`，导致所有脚本互相复用、Remove-Item 被放行
     expect(parseCommandPrefix("$p = Join-Path $env:USERPROFILE 'Desktop\\a'")).toBeUndefined();
     expect(parseCommandPrefix("New-Item -ItemType Directory -Path D:\\a\nRemove-Item D:\\b")).toBeUndefined();
     expect(parseCommandPrefix("Get-Date\nRemove-Item D:\\x")).toBeUndefined();
     // 正常单行命令仍然生成前缀
-    expect(parseCommandPrefix("New-Item -ItemType Directory -Path D:\\a")?.text).toBe("new-item directory");
+    expect(parseCommandPrefix("New-Item -ItemType Directory -Path D:\\a")?.text).toBe("new-item");
     // 高危子命令 / 破坏性程序不生成前缀
     expect(parseCommandPrefix("git push origin main")).toBeUndefined();
     expect(parseCommandPrefix("npm publish")).toBeUndefined();

@@ -58,10 +58,21 @@ export function identifyFamilies(toolName: string, args: unknown, mode?: string)
   }
   const command = typeof obj.command === "string" ? obj.command : typeof obj.script === "string" ? obj.script : undefined;
   if (command) {
-    // ③ 前缀族（**任何模式都生效**）：程序 + 子命令，等价于 Claude Code 的 `Bash(npm run *)`。
-    // 这是"每次命令都不一样"场景下的主力归一化手段。
-    const prefix = parseCommandPrefix(command);
-    if (prefix) families.push({ kind: "prefix", key: sha256Scope({ family: "prefix", program: prefix.program, sub: prefix.sub, mode: requestedMode ?? null }), label: `同前缀 ${prefix.text}${requestedMode ? " → " + requestedMode : ""}` });
+    // ③ 前缀族（**任何模式都生效**）：把复合命令拆成子命令，每条各自算「程序 + 子命令」，
+    // 与 Claude Code 一致：`a && b` 需要 a、b 都已被允许；批准时则为每个子命令各建一条。
+    // 【关键】只要有任何一个子命令拿不到前缀（破坏性程序、未知形态），整个脚本就【不产生前缀族】——
+    // 否则 `$p = ...; Remove-Item $p` 会靠 join-path 的前缀混过去。
+    const prefixes = splitSubcommands(command).map((piece) => parseCommandPrefix(piece));
+    if (prefixes.length > 0 && prefixes.every((item) => item !== undefined)) {
+      const seen = new Set<string>();
+      for (const prefix of prefixes) {
+        if (!prefix) continue;
+        const key = sha256Scope({ family: "prefix", program: prefix.program, sub: prefix.sub, mode: requestedMode ?? null });
+        if (seen.has(key)) continue;
+        seen.add(key);
+        families.push({ kind: "prefix", key, label: `同前缀 ${prefix.text}${requestedMode ? " → " + requestedMode : ""}` });
+      }
+    }
     // ④ 命令族：只读程序 + 允许的子命令
     const parsed = parseReadOnlyCommand(command);
     if (parsed) families.push({ kind: "command", key: sha256Scope({ family: "command", program: parsed.program, sub: parsed.sub }), label: `同类命令 ${parsed.program}${parsed.sub ? " " + parsed.sub : ""}` });
@@ -86,6 +97,9 @@ function modeOfArgs(obj: Record<string, unknown>): string | undefined {
   }
   return undefined;
 }
+/** 只有这些程序才把第二个 token 当作"子命令"——其余程序（New-Item / Get-ChildItem）的第二个 token
+ *  是普通参数，硬当子命令会把 `Join-Path D:\x a` 和 `Join-Path D:\y b` 拆成两个不同前缀。 */
+const SUBCOMMAND_PROGRAMS: ReadonlySet<string> = new Set(["git", "npm", "pnpm", "yarn", "dotnet", "cargo", "go", "docker", "kubectl", "helm", "terraform", "gh", "pip", "uv", "poetry", "composer"]);
 /** 破坏性程序：**永不**获得目录族 / 程序族（换参数必须重新问）。 */
 export const DESTRUCTIVE_PROGRAMS: ReadonlySet<string> = new Set(["rm", "del", "erase", "rmdir", "rd", "remove-item", "mv", "move", "move-item", "format", "diskpart", "shutdown", "drop", "truncate", "mkfs", "dd", "git"]);
 /** 前缀族也不能用的程序（比 DESTRUCTIVE_PROGRAMS 更保守的那一批）。 */
@@ -109,22 +123,38 @@ function containsDestructive(command: string): boolean {
   return tokens.some((token) => NO_PREFIX_PROGRAMS.has(token));
 }
 /**
+ * 作用：把复合命令拆成子命令——按换行、`;`、`&&`、`||`、`|` 切分（与 Claude Code 的复合命令语义一致：
+ * `a && b` 需要 a、b 都已被允许）。同时剥掉 PowerShell / JS 的变量赋值前缀（`$p = Join-Path ...`）。
+ */
+export function splitSubcommands(command: string): string[] {
+  const pieces: string[] = [];
+  for (const rawLine of command.split(/\r?\n/)) {
+    for (const piece of rawLine.split(/;|&&|\|\||\|/)) {
+      const cleaned = piece.trim().replace(/^(?:const\s+|let\s+|var\s+)?\$?[\w.:]+\s*=\s*(?=[\w$"'])/, "").trim();
+      if (cleaned.length === 0 || cleaned.startsWith("#")) continue;
+      pieces.push(cleaned);
+    }
+  }
+  return pieces;
+}
+/**
  * 作用：解析「命令前缀」——程序名 + 子命令，等价于 Claude Code 的 `Bash(npm run *)`。
  * 这是"命令每次都不同"时唯一稳定的归一化：`npm run build` / `npm run test` 同属 `npm run`。
  * 破坏性程序与高危子命令返回 undefined（只能精确匹配）。
  */
 export function parseCommandPrefix(command: string): { program: string; sub: string; text: string } | undefined {
-  const text = firstLine(command);
+  // 注意：本函数接收的是**单个子命令**（复合命令由 splitSubcommands 先拆开）
+  const text = command.trim();
   if (text.length === 0) return undefined;
-  // 多行脚本：不做前缀归一化（实测会把 `$p = Join-Path ...` 解析成 `$p =` 这种垃圾前缀）
-  if (command.trim() !== text) return undefined;
   // 变量赋值 / 子表达式开头：不是命令
   if (/^[$@(]/.test(text)) return undefined;
-  if (containsDestructive(command)) return undefined;
+  if (containsDestructive(text)) return undefined;
   const tokens = text.split(/\s+/);
   const program = tokens[0]?.split(/[\\/]/).pop()?.replace(/\.(exe|cmd|bat|ps1)$/i, "").toLowerCase() ?? "";
   if (!NAME_RE.test(program) || NO_PREFIX_PROGRAMS.has(program)) return undefined;
-  const sub = (tokens.slice(1).find((token) => !token.startsWith("-") && !token.startsWith("/") && !looksLikePath(token) && NAME_RE.test(token.toLowerCase())) ?? "").toLowerCase();
+  const sub = SUBCOMMAND_PROGRAMS.has(program)
+    ? (tokens.slice(1).find((token) => !token.startsWith("-") && !token.startsWith("/") && !looksLikePath(token) && NAME_RE.test(token.toLowerCase())) ?? "").toLowerCase()
+    : "";
   const excluded = PREFIX_EXCLUDED_SUBCOMMANDS.get(program);
   if (sub !== "" && excluded?.has(sub)) return undefined;
   return { program, sub, text: sub === "" ? program : `${program} ${sub}` };
@@ -183,19 +213,29 @@ export class FamilyGrantStore {
     for (const ref of refs) this.grants.set(ref.key, { kind: ref.kind, label: ref.label, expiresAt, leaseId });
   }
   match(refs: readonly FamilyRef[], now: number, kinds?: readonly FamilyKind[], isLive?: (leaseId: string) => boolean): FamilyGrant | undefined {
-    // 作用：按「最具体优先」匹配——对象 > 目录 > 前缀 > 只读命令 > 程序 > 工具（越具体越先命中）
+    // 作用：按「最具体优先」匹配——对象 > 目录 > 前缀 > 只读命令 > 程序 > 工具（越具体越先命中）。
+    // 【前缀族是 ALL 语义】复合命令拆出来的每个子命令都必须已有放行，才允许整条脚本免问
+    //（等价于 Claude Code：`a && b` 需要 a、b 都被允许）。
     const order: FamilyKind[] = kinds ? [...kinds] : ["object", "dir", "prefix", "command", "program", "tool"];
+    const live = (grant: FamilyGrant | undefined): grant is FamilyGrant => {
+      if (!grant) return false;
+      if (grant.expiresAt <= now) return false;
+      if (grant.leaseId !== undefined && isLive !== undefined && !isLive(grant.leaseId)) return false;
+      return true;
+    };
     for (const kind of order) {
-      for (const ref of refs) {
-        if (ref.kind !== kind) continue;
+      const ofKind = refs.filter((ref) => ref.kind === kind);
+      if (ofKind.length === 0) continue;
+      if (kind === "prefix") {
+        const granted = ofKind.map((ref) => this.grants.get(ref.key));
+        // 任一子命令没有有效放行 → 整条脚本不走前缀复用
+        if (granted.every((grant) => live(grant))) return granted[0];
+        continue;
+      }
+      for (const ref of ofKind) {
         const grant = this.grants.get(ref.key);
-        if (!grant) continue;
-        // 授权被撤销 / 过期后，族必须立刻失效（否则「收回了还在免问」）
-        if (grant.expiresAt <= now || (grant.leaseId !== undefined && isLive !== undefined && !isLive(grant.leaseId))) {
-          this.grants.delete(ref.key);
-          continue;
-        }
-        return grant;
+        if (live(grant)) return grant;
+        if (grant) this.grants.delete(ref.key);
       }
     }
     return undefined;
