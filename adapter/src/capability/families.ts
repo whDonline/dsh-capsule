@@ -48,6 +48,8 @@ export function identifyFamilies(toolName: string, args: unknown, mode?: string)
   const requestedMode = mode ?? modeOfArgs(obj);
   // ① 对象族：参数里"像路径"的值（所有工具）
   for (const key of Object.keys(obj).sort()) {
+    // command / script 是命令文本，不是路径参数——否则整条脚本会因为含 `\` 被误判成"同一对象"
+    if (key === "command" || key === "script") continue;
     const value = obj[key];
     if (typeof value !== "string" || !looksLikePath(value)) continue;
     families.push({ kind: "object", key: sha256Scope({ family: "object", tool: toolName, arg: key, value: value.toLowerCase() }), label: `同一对象 ${value}` });
