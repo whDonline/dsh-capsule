@@ -7,6 +7,7 @@
 //
 // 隐私：只对外暴露「参数键名 + 指纹前缀」，不输出参数值——参数里可能夹着 Token / 密码。
 import { canonicalize, sha256Scope } from "./canonical.js";
+import { redactCommand } from "./families.js";
 import type { SandboxMode } from "./escalation.js";
 export interface OperationFingerprint {
   /** 匹配用：sha256(工具 + 参数去 justification + 目标档位) */
@@ -31,6 +32,11 @@ function describeOperation(toolName: string, args: unknown, mode?: SandboxMode):
   const keys = args !== null && typeof args === "object" && !Array.isArray(args) ? Object.keys(args as Record<string, unknown>).sort() : [];
   const shape = keys.length > 0 ? `(${keys.join(", ")})` : "";
   const modeText = mode ? ` → ${mode}` : "";
+  // 有命令文本时直接展示（截断 + 脱敏）——审计要能看出「批准的是哪条命令」
+  const command = args !== null && typeof args === "object" && typeof (args as Record<string, unknown>).command === "string"
+    ? redactCommand((args as Record<string, unknown>).command as string)
+    : undefined;
+  if (command) return `${toolName}: ${command}${modeText}`;
   // canonical 只用于给出长度与稳定性校验，避免把值写进展示串
   const size = canonicalize(args ?? null).length;
   return `${toolName}${shape}${modeText} [${size}B]`;

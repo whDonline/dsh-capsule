@@ -56,11 +56,11 @@ describe("操作族识别（② 同族模式的判据）", () => {
     const a = identifyFamilies("pwsh", { command: "New-Item -ItemType Directory -Path D:\\work\\a" });
     expect(a.some((item) => item.kind === "dir")).toBe(true);
     expect(a.some((item) => item.kind === "program")).toBe(true);
-    // 换目录：目录族不命中，但同程序仍命中
+    // 换目录：目录族不命中，但「同前缀」（New-Item）仍命中——比同程序更具体，优先返回
     const b = identifyFamilies("pwsh", { command: "New-Item -ItemType Directory -Path D:\\other\\b" });
     const store = new FamilyGrantStore();
     store.grant(a, 60, 1_000);
-    expect(store.match(b, 1_000)?.kind).toBe("program");
+    expect(store.match(b, 1_000)?.kind).toBe("prefix");
     // 破坏性程序：连程序族与目录族都没有（换参数必须重新问）
     for (const command of ["Remove-Item D:\\work\\a", "del D:\\work\\a.txt", "Move-Item D:\\work\\a D:\\work\\b"]) {
       const families = identifyFamilies("pwsh", { command });

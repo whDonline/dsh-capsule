@@ -32,7 +32,7 @@ export function looksLikePath(value: string): boolean {
   if (value.includes("\\") || value.includes("/")) return true;
   return /^[A-Za-z]:$/.test(value.slice(0, 2)) && value.length > 2;
 }
-export type FamilyKind = "object" | "dir" | "command" | "program" | "tool";
+export type FamilyKind = "object" | "dir" | "command" | "program" | "prefix" | "tool";
 export interface FamilyRef {
   kind: FamilyKind;
   /** 族键（sha256）——只保存哈希，不保存参数原文 */
@@ -41,9 +41,11 @@ export interface FamilyRef {
   label: string;
 }
 /** 作用：从一次调用算出它属于哪些族（可能为空 = 不参与族复用）。 */
-export function identifyFamilies(toolName: string, args: unknown): FamilyRef[] {
+export function identifyFamilies(toolName: string, args: unknown, mode?: string): FamilyRef[] {
   const families: FamilyRef[] = [];
   const obj = args !== null && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, unknown>) : {};
+  // 目标档位也是操作的一部分：同一条命令"升到完全访问"与"升到工作区可写"不能互相顶替。
+  const requestedMode = mode ?? modeOfArgs(obj);
   // ① 对象族：参数里"像路径"的值（所有工具）
   for (const key of Object.keys(obj).sort()) {
     const value = obj[key];
@@ -56,7 +58,11 @@ export function identifyFamilies(toolName: string, args: unknown): FamilyRef[] {
   }
   const command = typeof obj.command === "string" ? obj.command : typeof obj.script === "string" ? obj.script : undefined;
   if (command) {
-    // ③ 命令族：只读程序 + 允许的子命令
+    // ③ 前缀族（**任何模式都生效**）：程序 + 子命令，等价于 Claude Code 的 `Bash(npm run *)`。
+    // 这是"每次命令都不一样"场景下的主力归一化手段。
+    const prefix = parseCommandPrefix(command);
+    if (prefix) families.push({ kind: "prefix", key: sha256Scope({ family: "prefix", program: prefix.program, sub: prefix.sub, mode: requestedMode ?? null }), label: `同前缀 ${prefix.text}${requestedMode ? " → " + requestedMode : ""}` });
+    // ④ 命令族：只读程序 + 允许的子命令
     const parsed = parseReadOnlyCommand(command);
     if (parsed) families.push({ kind: "command", key: sha256Scope({ family: "command", program: parsed.program, sub: parsed.sub }), label: `同类命令 ${parsed.program}${parsed.sub ? " " + parsed.sub : ""}` });
     // ④ 目录族 / ⑤ 程序族：写操作也能复用（破坏性程序永不参与，见 DESTRUCTIVE_PROGRAMS）
@@ -70,8 +76,50 @@ export function identifyFamilies(toolName: string, args: unknown): FamilyRef[] {
   }
   return families;
 }
+/** 作用：从参数里读出目标档位——兼容 `sandbox_permissions: "x"` 与 `{ mode: "x" }` 两种写法。 */
+function modeOfArgs(obj: Record<string, unknown>): string | undefined {
+  const raw = obj.sandbox_permissions ?? obj.sandboxPermissions;
+  if (typeof raw === "string") return raw;
+  if (raw !== null && typeof raw === "object") {
+    const mode = (raw as Record<string, unknown>).mode;
+    if (typeof mode === "string") return mode;
+  }
+  return undefined;
+}
 /** 破坏性程序：**永不**获得目录族 / 程序族（换参数必须重新问）。 */
 export const DESTRUCTIVE_PROGRAMS: ReadonlySet<string> = new Set(["rm", "del", "erase", "rmdir", "rd", "remove-item", "mv", "move", "move-item", "format", "diskpart", "shutdown", "drop", "truncate", "mkfs", "dd", "git"]);
+/** 前缀族也不能用的程序（比 DESTRUCTIVE_PROGRAMS 更保守的那一批）。 */
+const NO_PREFIX_PROGRAMS: ReadonlySet<string> = new Set(["rm", "del", "erase", "rmdir", "rd", "remove-item", "mv", "move", "move-item", "format", "diskpart", "shutdown", "drop", "truncate", "mkfs", "dd"]);
+/** 前缀族要按子命令再排除的高危组合（`git push` 不能被 `git log` 的批准放过）。 */
+const PREFIX_EXCLUDED_SUBCOMMANDS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ["git", new Set(["push", "reset", "clean", "checkout", "rebase", "merge", "stash", "tag"])],
+  ["npm", new Set(["publish", "unpublish"])],
+  ["pnpm", new Set(["publish"])],
+  ["yarn", new Set(["publish"])],
+]);
+/**
+ * 作用：解析「命令前缀」——程序名 + 子命令，等价于 Claude Code 的 `Bash(npm run *)`。
+ * 这是"命令每次都不同"时唯一稳定的归一化：`npm run build` / `npm run test` 同属 `npm run`。
+ * 破坏性程序与高危子命令返回 undefined（只能精确匹配）。
+ */
+export function parseCommandPrefix(command: string): { program: string; sub: string; text: string } | undefined {
+  const text = command.trim();
+  if (text.length === 0) return undefined;
+  const tokens = text.split(/\s+/);
+  const program = tokens[0]?.split(/[\\/]/).pop()?.replace(/\.(exe|cmd|bat|ps1)$/i, "").toLowerCase() ?? "";
+  if (program.length === 0 || NO_PREFIX_PROGRAMS.has(program)) return undefined;
+  const sub = (tokens.slice(1).find((token) => !token.startsWith("-") && !token.startsWith("/") && !looksLikePath(token)) ?? "").toLowerCase();
+  const excluded = PREFIX_EXCLUDED_SUBCOMMANDS.get(program);
+  if (sub !== "" && excluded?.has(sub)) return undefined;
+  return { program, sub, text: sub === "" ? program : `${program} ${sub}` };
+}
+/** 作用：命令展示前的脱敏——把可能夹带密钥的赋值替换掉，并截断到 120 字。 */
+export function redactCommand(command: string, limit = 120): string {
+  let text = command.replace(/((?:password|passwd|token|secret|api[-_]?key|access[-_]?key)\s*[=:]\s*)(\S+)/gi, "$1***");
+  text = text.replace(/(--(?:password|token|secret|api-key)\s+)(\S+)/gi, "$1***");
+  text = text.replace(/(Bearer\s+)[\w.\-]+/gi, "$1***");
+  return text.length > limit ? `${text.slice(0, limit)}…` : text;
+}
 /** 作用：从命令里取出「程序名 + 出现过的目录」——用于目录族 / 程序族。 */
 export function parseCommandShape(command: string): { program: string; dirs: string[] } | undefined {
   const text = command.trim();
@@ -107,23 +155,30 @@ export interface FamilyGrant {
   kind: FamilyKind;
   label: string;
   expiresAt: number;
+  /** 建立这条族放行的授权 id——授权被撤销后族立即失效（否则「收回了还在免问」） */
+  leaseId?: string;
 }
 /** 作用：族的放行窗口——只有「最近一次人工批准 + TTL 内」有效，过期立刻失效（不是安全机制之外的状态）。 */
 export class FamilyGrantStore {
   private readonly grants = new Map<string, FamilyGrant>();
-  grant(refs: readonly FamilyRef[], ttlSeconds: number, now: number): void {
+  grant(refs: readonly FamilyRef[], ttlSeconds: number, now: number, leaseId?: string): void {
     const expiresAt = now + ttlSeconds * 1000;
-    for (const ref of refs) this.grants.set(ref.key, { kind: ref.kind, label: ref.label, expiresAt });
+    for (const ref of refs) this.grants.set(ref.key, { kind: ref.kind, label: ref.label, expiresAt, leaseId });
   }
-  match(refs: readonly FamilyRef[], now: number): FamilyGrant | undefined {
-    // 作用：按「最具体优先」匹配——对象 > 目录 > 只读命令 > 程序 > 工具（越具体越先命中）
-    const order: FamilyKind[] = ["object", "dir", "command", "program", "tool"];
+  match(refs: readonly FamilyRef[], now: number, kinds?: readonly FamilyKind[], isLive?: (leaseId: string) => boolean): FamilyGrant | undefined {
+    // 作用：按「最具体优先」匹配——对象 > 目录 > 前缀 > 只读命令 > 程序 > 工具（越具体越先命中）
+    const order: FamilyKind[] = kinds ? [...kinds] : ["object", "dir", "prefix", "command", "program", "tool"];
     for (const kind of order) {
       for (const ref of refs) {
         if (ref.kind !== kind) continue;
         const grant = this.grants.get(ref.key);
-        if (grant && grant.expiresAt > now) return grant;
-        if (grant) this.grants.delete(ref.key);
+        if (!grant) continue;
+        // 授权被撤销 / 过期后，族必须立刻失效（否则「收回了还在免问」）
+        if (grant.expiresAt <= now || (grant.leaseId !== undefined && isLive !== undefined && !isLive(grant.leaseId))) {
+          this.grants.delete(ref.key);
+          continue;
+        }
+        return grant;
       }
     }
     return undefined;

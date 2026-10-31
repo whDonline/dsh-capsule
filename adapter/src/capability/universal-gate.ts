@@ -117,7 +117,7 @@ export class UniversalGate {
           key: fingerprint.key,
           display: fingerprint.display,
           mode: fingerprint.mode,
-          families: identifyFamilies(exec.name, exec.arguments),
+          families: identifyFamilies(exec.name, exec.arguments, escalation?.requestedMode),
           recordedAt: this.now(),
         });
       }
@@ -376,9 +376,11 @@ export class UniversalGate {
       this.operations.delete(callId);
       return "allowed-once";
     }
-    // 族只由人工批准建立/续期，且只在 reuseTtlSeconds 内有效；写/删类工具没有 tool/command 族（见 families.ts）。
-    if (this.deps.settings?.mode === "same-family" && record.families && record.families.length > 0) {
-      const familyGrant = this.familyGrants.match(record.families, this.now());
+    // 族放行：① 档只看「同前缀」（Claude Code 的 `Bash(npm run *)`），② 档看全部族。
+    // 族只由人工批准建立/续期，且只在 reuseTtlSeconds 内有效；破坏性程序没有族（见 families.ts）。
+    if (record.families && record.families.length > 0) {
+      const kinds = this.deps.settings?.mode === "same-family" ? undefined : (["prefix"] as const);
+      const familyGrant = this.familyGrants.match(record.families, this.now(), kinds, (leaseId) => this.deps.leases.isLive(leaseId));
       if (familyGrant) {
         this.deps.audit.record({
           sessionId: record.sessionId,
@@ -399,10 +401,6 @@ export class UniversalGate {
     const result = await next();
     if (normalizeOutcome(result) === "allowed-once") {
       const ttlSeconds = this.deps.settings?.reuseTtlSeconds ?? 300;
-      // ② 同族模式：人工批准即建立/续期这次操作所属的族（只在 ② 档生效，① 档不产生族放行）
-      if (this.deps.settings?.mode === "same-family" && record.families && record.families.length > 0) {
-        this.familyGrants.grant(record.families, ttlSeconds, this.now());
-      }
       try {
         const lease = await this.deps.leases.issue({
           sessionId: record.sessionId,
@@ -412,6 +410,11 @@ export class UniversalGate {
           kind: "universal",
           sourceCallId: callId,
         });
+        // 人工批准即建立/续期这次操作所属的族（两种档位都记：① 之后只用 prefix，② 用全部）。
+        // 族绑定这条授权：授权被撤销/过期后族立即失效（见 FamilyGrantStore.match 的 isLive 检查）。
+        if (record.families && record.families.length > 0) {
+          this.familyGrants.grant(record.families, ttlSeconds, this.now(), lease.id);
+        }
         this.deps.audit.record({
           sessionId: record.sessionId,
           callId: record.callId,
