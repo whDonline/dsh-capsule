@@ -52,6 +52,23 @@ describe("操作族识别（② 同族模式的判据）", () => {
     const b = identifyFamilies("pwsh", { command: "git status --short" }).find((item) => item.kind === "command");
     expect(a?.key).toBe(b?.key);
   });
+  it("目录族 / 程序族：写操作也能复用，但破坏性程序永不参与", () => {
+    const a = identifyFamilies("pwsh", { command: "New-Item -ItemType Directory -Path D:\\work\\a" });
+    expect(a.some((item) => item.kind === "dir")).toBe(true);
+    expect(a.some((item) => item.kind === "program")).toBe(true);
+    // 换目录：目录族不命中，但同程序仍命中
+    const b = identifyFamilies("pwsh", { command: "New-Item -ItemType Directory -Path D:\\other\\b" });
+    const store = new FamilyGrantStore();
+    store.grant(a, 60, 1_000);
+    expect(store.match(b, 1_000)?.kind).toBe("program");
+    // 破坏性程序：连程序族与目录族都没有（换参数必须重新问）
+    for (const command of ["Remove-Item D:\\work\\a", "del D:\\work\\a.txt", "Move-Item D:\\work\\a D:\\work\\b"]) {
+      const families = identifyFamilies("pwsh", { command });
+      expect(families.some((item) => item.kind === "dir" || item.kind === "program")).toBe(false);
+    }
+    // git 不参与程序族（git status 的批准不能放过 git push）
+    expect(identifyFamilies("pwsh", { command: "git push origin main" }).some((item) => item.kind === "program")).toBe(false);
+  });
   it("族放行表：只在 TTL 内有效，按对象族优先匹配", () => {
     const store = new FamilyGrantStore();
     const refs = identifyFamilies("read", { file_path: "D:\\a.ts" });

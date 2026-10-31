@@ -32,7 +32,7 @@ export function looksLikePath(value: string): boolean {
   if (value.includes("\\") || value.includes("/")) return true;
   return /^[A-Za-z]:$/.test(value.slice(0, 2)) && value.length > 2;
 }
-export type FamilyKind = "object" | "tool" | "command";
+export type FamilyKind = "object" | "dir" | "command" | "program" | "tool";
 export interface FamilyRef {
   kind: FamilyKind;
   /** 族键（sha256）——只保存哈希，不保存参数原文 */
@@ -54,13 +54,40 @@ export function identifyFamilies(toolName: string, args: unknown): FamilyRef[] {
   if (READ_ONLY_TOOLS.has(toolName)) {
     families.push({ kind: "tool", key: sha256Scope({ family: "tool", tool: toolName }), label: `同工具 ${toolName}` });
   }
-  // ③ 命令族：只读程序 + 允许的子命令
   const command = typeof obj.command === "string" ? obj.command : typeof obj.script === "string" ? obj.script : undefined;
   if (command) {
+    // ③ 命令族：只读程序 + 允许的子命令
     const parsed = parseReadOnlyCommand(command);
     if (parsed) families.push({ kind: "command", key: sha256Scope({ family: "command", program: parsed.program, sub: parsed.sub }), label: `同类命令 ${parsed.program}${parsed.sub ? " " + parsed.sub : ""}` });
+    // ④ 目录族 / ⑤ 程序族：写操作也能复用（破坏性程序永不参与，见 DESTRUCTIVE_PROGRAMS）
+    const shape = parseCommandShape(command);
+    if (shape && !DESTRUCTIVE_PROGRAMS.has(shape.program)) {
+      for (const dir of shape.dirs) {
+        families.push({ kind: "dir", key: sha256Scope({ family: "dir", program: shape.program, dir }), label: `同目录 ${shape.program} @ ${dir}` });
+      }
+      families.push({ kind: "program", key: sha256Scope({ family: "program", program: shape.program }), label: `同程序 ${shape.program}` });
+    }
   }
   return families;
+}
+/** 破坏性程序：**永不**获得目录族 / 程序族（换参数必须重新问）。 */
+export const DESTRUCTIVE_PROGRAMS: ReadonlySet<string> = new Set(["rm", "del", "erase", "rmdir", "rd", "remove-item", "mv", "move", "move-item", "format", "diskpart", "shutdown", "drop", "truncate", "mkfs", "dd", "git"]);
+/** 作用：从命令里取出「程序名 + 出现过的目录」——用于目录族 / 程序族。 */
+export function parseCommandShape(command: string): { program: string; dirs: string[] } | undefined {
+  const text = command.trim();
+  if (text.length === 0) return undefined;
+  const tokens = text.split(/\s+/);
+  const program = tokens[0]?.split(/[\\/]/).pop()?.replace(/\.(exe|cmd|bat|ps1)$/i, "").toLowerCase() ?? "";
+  if (program.length === 0) return undefined;
+  const dirs = new Set<string>();
+  for (const token of tokens.slice(1)) {
+    const cleaned = token.replace(/^['"]|['"]$/g, "");
+    if (!looksLikePath(cleaned)) continue;
+    const separator = Math.max(cleaned.lastIndexOf("\\"), cleaned.lastIndexOf("/"));
+    if (separator <= 0) continue;
+    dirs.add(cleaned.slice(0, separator).toLowerCase());
+  }
+  return { program, dirs: [...dirs].sort() };
 }
 /** 作用：解析命令的「程序名 + 子命令」——只读白名单之外一律返回 undefined（不给族）。 */
 export function parseReadOnlyCommand(command: string): { program: string; sub: string } | undefined {
@@ -89,8 +116,8 @@ export class FamilyGrantStore {
     for (const ref of refs) this.grants.set(ref.key, { kind: ref.kind, label: ref.label, expiresAt });
   }
   match(refs: readonly FamilyRef[], now: number): FamilyGrant | undefined {
-    // 作用：按「最具体优先」匹配——对象族 > 命令族 > 工具族（越具体越先命中）
-    const order: FamilyKind[] = ["object", "command", "tool"];
+    // 作用：按「最具体优先」匹配——对象 > 目录 > 只读命令 > 程序 > 工具（越具体越先命中）
+    const order: FamilyKind[] = ["object", "dir", "command", "program", "tool"];
     for (const kind of order) {
       for (const ref of refs) {
         if (ref.kind !== kind) continue;
