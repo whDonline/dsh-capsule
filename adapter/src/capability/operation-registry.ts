@@ -2,6 +2,7 @@
 //（集成基线第 2 条），所以只能在 tools/execute 阶段（arguments 可用）把指纹记下来，等审批到达时按
 // callId 反查。记录有界、按时间回收：它只是短命上下文，不是持久状态。
 import type { SandboxMode } from "./escalation.js";
+import type { FamilyRef } from "./families.js";
 export interface RecordedOperation {
   callId: string;
   sessionId: string;
@@ -11,6 +12,8 @@ export interface RecordedOperation {
   /** 可安全展示的描述（只有参数键名） */
   display: string;
   mode?: SandboxMode;
+  /** 这次调用所属的操作族（② 同族模式用；可能为空） */
+  families?: readonly FamilyRef[];
   recordedAt: number;
 }
 /** 记录最长存活时间：一次调用的审批往返远小于它，超过即视为「工具早已结束、callId 被重放」。 */

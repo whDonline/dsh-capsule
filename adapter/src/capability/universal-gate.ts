@@ -3,6 +3,7 @@ import type { AuditDecision } from "../audit/types.js";
 import { parseEscalation, type SandboxMode } from "./escalation.js";
 import { operationFingerprint } from "./operation.js";
 import { OperationRegistry } from "./operation-registry.js";
+import { FamilyGrantStore, identifyFamilies } from "./families.js";
 import type { SandboxGrantManager, SandboxModeResult } from "./sandbox-grant.js";
 import { recordSandboxOutcome } from "./sandbox-audit.js";
 import type { ResolvedToolPolicy, PolicyResolver } from "./policy.js";
@@ -55,6 +56,8 @@ export class UniversalGate {
   private readonly escalations = new Map<string, EscalationGrant>();
   /** 按 callId 记录的操作指纹（新语义：① 同操作复用的判据） */
   private readonly operations = new OperationRegistry();
+  /** ② 同族模式：最近一次人工批准后 TTL 内有效的族放行表 */
+  private readonly familyGrants = new FamilyGrantStore();
   constructor(private readonly deps: UniversalGateDeps) {
     this.now = deps.now ?? Date.now;
   }
@@ -81,6 +84,7 @@ export class UniversalGate {
         const escalation = parseEscalation(exec.arguments);
         const fingerprint = operationFingerprint(exec.name, exec.arguments, escalation?.requestedMode);
         this.operations.gc(this.now());
+        this.familyGrants.gc(this.now());
         this.operations.set({
           callId: exec.callId,
           sessionId,
@@ -88,6 +92,7 @@ export class UniversalGate {
           key: fingerprint.key,
           display: fingerprint.display,
           mode: fingerprint.mode,
+          families: identifyFamilies(exec.name, exec.arguments),
           recordedAt: this.now(),
         });
       }
@@ -335,15 +340,38 @@ export class UniversalGate {
       this.operations.delete(callId);
       return "allowed-once";
     }
+    // ② 同族模式：精确指纹没命中时，再看是否命中「最近一次人工批准建立的族放行」。
+    // 族只由人工批准建立/续期，且只在 reuseTtlSeconds 内有效；写/删类工具没有 tool/command 族（见 families.ts）。
+    if (this.deps.settings?.mode === "same-family" && record.families && record.families.length > 0) {
+      const familyGrant = this.familyGrants.match(record.families, this.now());
+      if (familyGrant) {
+        this.deps.audit.record({
+          sessionId: record.sessionId,
+          callId: record.callId,
+          rootCallId: record.callId,
+          toolName: record.toolName,
+          scopeKey: record.key,
+          scopeDisplay: `${record.display} · 凭族放行：${familyGrant.label}`,
+          decision: "LEASE_REUSED",
+        });
+        this.operations.delete(callId);
+        return "allowed-once";
+      }
+    }
     // ② 未命中 → 交给人类（next 只调用一次，结果原样返回）
     const result = await next();
     if (normalizeOutcome(result) === "allowed-once") {
+      const ttlSeconds = this.deps.settings?.reuseTtlSeconds ?? 300;
+      // ② 同族模式：人工批准即建立/续期这次操作所属的族（只在 ② 档生效，① 档不产生族放行）
+      if (this.deps.settings?.mode === "same-family" && record.families && record.families.length > 0) {
+        this.familyGrants.grant(record.families, ttlSeconds, this.now());
+      }
       try {
         const lease = await this.deps.leases.issue({
           sessionId: record.sessionId,
           toolName: record.toolName,
           scope: { kind: "exact-arguments", key: record.key, display: record.display },
-          ttlSeconds: this.deps.settings?.reuseTtlSeconds ?? 300,
+          ttlSeconds,
           kind: "universal",
           sourceCallId: callId,
         });
