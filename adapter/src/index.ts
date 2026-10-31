@@ -14,6 +14,11 @@ import { GovernanceConsole } from "./console/console-service.js";
 import { GovernancePolicy } from "./console/policy.js";
 import { createHostSessionDirectory } from "./console/session-directory.js";
 import { DEFAULT_GUARD_SETTINGS, GuardSettings, isGuardMode, type GuardMode } from "./capability/settings.js";
+import { AuditJournal } from "./audit/journal.js";
+import type { ToolAuditEvent } from "./audit/types.js";
+import type { CapabilityLease } from "./capability/types.js";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { registerGuardWebRoutes, startConsoleServer, DEFAULT_CONSOLE_HOST, DEFAULT_CONSOLE_PORT, GUARD_WEB_PREFIX, ROUTE_RETRY_DELAYS_MS, guardRouteStatus, type GuardRouteStatus, type ConsoleHttpHandle } from "./console/http-server.js";
 import type { ConsoleHttpConfig } from "./console/types.js";
 export type CapsuleHostContext = Record<string, unknown>;
@@ -81,6 +86,14 @@ export interface GuardPluginConfig extends Partial<UniversalPolicyConfig> {
   /** ③ 免打扰的目标档位与时长（秒） */
   dndTargetMode?: SandboxMode;
   dndDurationSeconds?: number;
+  /** 审计持久化（默认开启）：事件与授权追加写入本地 NDJSON，重启后可重放 */
+  persistAudit?: boolean;
+  /** 审计日志路径（默认 <用户目录>/.dsh/capability-guard/audit.ndjson） */
+  auditFile?: string;
+}
+/** 作用：默认审计日志路径——放用户目录而不是 workspace，避免被误提交进仓库。 */
+export function defaultAuditFile(): string {
+  return join(homedir(), ".dsh", "capability-guard", "audit.ndjson");
 }
 /** 默认低频结算节拍——多快把「已失效授权的会话宽档位」收回去（治理台会显示「待回滚」直到收回）。 */
 export const DEFAULT_SWEEP_INTERVAL_MS = 30_000;
@@ -138,8 +151,29 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
     },
     maxTtlSeconds: governance.current.maxTtlSeconds,
   });
-  const leases = new LeaseManager(new MemoryLeaseStore());
-  const audit = new AuditService();
+  // 审计持久化：追加式 NDJSON（事件 + 授权），重启时重放——否则 DSH 一重启，历史审计全丢。
+  // 关闭方式：profile 里 `persistAudit: false`；路径可用 `auditFile` 覆盖（默认用户目录）。
+  const journal = config?.persistAudit === false ? undefined : new AuditJournal(config?.auditFile ?? defaultAuditFile());
+  const store = new MemoryLeaseStore();
+  const audit = new AuditService(1000, journal ? (event) => journal.append({ type: "event", event }) : undefined);
+  if (journal) {
+    // 重放：同一 Lease 的多条记录只保留最后一条状态（签发 → 撤销/过期），避免重复入库
+    const events: ToolAuditEvent[] = [];
+    const latestLeases = new Map<string, CapabilityLease>();
+    for (const record of journal.load()) {
+      if (record.type === "event") events.push(record.event);
+      else latestLeases.set(record.lease.id, record.lease);
+    }
+    audit.restore(events);
+    for (const lease of latestLeases.values()) {
+      try {
+        store.insert(lease);
+      } catch {
+        // 单条坏数据跳过，不影响其余历史
+      }
+    }
+  }
+  const leases = new LeaseManager(store, Date.now, journal ? (lease) => journal.append({ type: "lease", lease }) : undefined);
   // P0-2：沙箱模式有界授权。宿主服务缺失时该链路自动失效（Fail Closed：不提升 = 不越权），
   // 其余 Universal Mode 行为完全不受影响。实例在此保留引用：治理台要读它的档位状态，
   // 收缩型动作要经它回滚档位（此前只注入 Gate，导致治理台完全看不到沙箱状态）。

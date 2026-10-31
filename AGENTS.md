@@ -195,6 +195,11 @@ assets/                      # README 用示意图（结构示意，非截图）
     `do-not-disturb`（整个会话提升到目标档位，到期自动回滚并回到 ①）。
     **①② 只改变"问不问"，绝不改变沙箱档位**；只有 ③ 会写档位，且必须由用户点「开始免打扰」才生效（选中配置不算）。
     `enabled=false`（用户开关关闭）时所有 hook 直接透传：不记 pending、不签发、不提升、不写审计。
+15. **审计持久化（2026-10-31）**：`audit/journal.ts` 把「审计事件」与「授权记录」以 **NDJSON 追加**写入
+    `<用户目录>/.dsh/capability-guard/audit.ndjson`（可用 `auditFile` 覆盖，`persistAudit: false` 关闭），
+    启动时重放回 `AuditService` 与 `MemoryLeaseStore`（同一 Lease 只保留最后状态）。
+    文件超过 20 MB 轮转为 `.1`（只保留一代）；坏行跳过、写失败静默（**绝不影响审批主链路**）。
+    日志里只有工具名 / scope 哈希 / 脱敏展示串，**没有任何参数原文与 Secret**。它只存在本机，不涉及任何远端。
 
 ## 7.2 当前验收基线
 

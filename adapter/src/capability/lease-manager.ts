@@ -12,7 +12,20 @@ export interface IssueLeaseInput {
   sourceCallId?: string;
 }
 export class LeaseManager {
-  constructor(private readonly store: LeaseStore, private readonly now: () => number = Date.now) {}
+  constructor(
+    private readonly store: LeaseStore,
+    private readonly now: () => number = Date.now,
+    /** 可选：Lease 状态变化回调——仅用于持久化（审计日志），抛错绝不影响主链路 */
+    private readonly onChange?: (lease: CapabilityLease) => void,
+  ) {}
+  private notify(lease: CapabilityLease): void {
+    if (!this.onChange) return;
+    try {
+      this.onChange(lease);
+    } catch {
+      // 持久化失败不影响授权判定
+    }
+  }
   async issue(input: IssueLeaseInput): Promise<CapabilityLease> {
     // 作用：签发 Lease——参数防御校验（Fail Closed）：sessionId/toolName/scope.key 必须非空字符串，
     // TTL 必须正整数；签发结果立即写入 store，expiresAt = now + ttlSeconds * 1000
@@ -41,6 +54,7 @@ export class LeaseManager {
       sourceCallId: input.sourceCallId,
     };
     await Promise.resolve(this.store.insert(lease));
+    this.notify(lease);
     return lease;
   }
   async findMatching(sessionId: string, toolName: string, scopeKey: string, kind?: LeaseKind): Promise<CapabilityLease | undefined> {
@@ -93,7 +107,10 @@ export class LeaseManager {
   }
   async revoke(leaseId: string, reason?: string): Promise<boolean> {
     // 作用：撤销单个 Lease——下一次同 Scope 调用重新 Ask（规格 22.11）
-    return await Promise.resolve(this.store.revoke(leaseId, reason));
+    const ok = await Promise.resolve(this.store.revoke(leaseId, reason));
+    const updated = this.store.get(leaseId) as CapabilityLease | undefined;
+    if (ok && updated) this.notify(updated);
+    return ok;
   }
   async list(): Promise<CapabilityLease[]> {
     return await Promise.resolve(this.store.list());
