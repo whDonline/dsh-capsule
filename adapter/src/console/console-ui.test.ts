@@ -298,10 +298,9 @@ describe("DSH 客户端半边（adapter/client.js）", () => {
     };
     const describe = dock.describe;
     expect(typeof describe).toBe("function");
-    // ① 没有任何授权：一行静默提示（实测反馈：不显示等于功能不存在）
+    // ① 没有任何授权：提示条整条隐藏（模式 chip 已常驻显示"功能存在且当前档位"，不再写占位行）
     const idle = describe({ sessionId: "s", auth: { state: "none", activeCount: 0, grants: [] }, sandbox: { state: "not-involved" } }, 1_000);
-    expect(idle?.tone).toBe("idle");
-    expect(idle?.title).toContain("没有临时放开");
+    expect(idle).toBeNull();
     // ② 生效中：说清「放开了什么 + 还剩多久 + 到期会怎样」
     const active = describe(
       { sessionId: "s", auth: { state: "active", activeCount: 1, nextExpiresAt: 61_000, grants: [{ capabilityText: "pwsh 可以免审批升到「完全访问」" }] }, sandbox: { state: "raised", currentMode: "danger-full-access", currentModeText: "完全访问" } },
