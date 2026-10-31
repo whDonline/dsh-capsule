@@ -67,6 +67,14 @@ describe("操作族识别（② 同族模式的判据）", () => {
     store.grant([prefixes[1]!], 60, 1_000);
     expect(store.match(scriptB, 1_000, ["prefix"])?.kind).toBe("prefix");
   });
+  it("【回归】脚本里的收尾表达式不应作废整条脚本的前缀（线上实测 familyGrants=0）", () => {
+    const script = "$p = Join-Path $env:USERPROFILE 'Desktop\\a'\nNew-Item -ItemType Directory -Path $p -Force | Out-Null\n\"created=\" + (Test-Path $p)";
+    const prefixes = identifyFamilies("pwsh", { command: script }).filter((item) => item.kind === "prefix");
+    expect(prefixes.map((item) => item.label)).toEqual(["同前缀 join-path", "同前缀 new-item", "同前缀 out-null"]);
+    // 只要脚本里出现破坏性命令，整条脚本就不给任何族
+    const risky = "$p = Join-Path D:\\x a\nRemove-Item $p -Force\n\"done\"";
+    expect(identifyFamilies("pwsh", { command: risky })).toHaveLength(0);
+  });
   it("【安全回归】多行脚本 / 变量赋值 / 脚本内含破坏性命令 → 一律不给前缀", () => {
     // 实测缺陷：`$p = Join-Path ...` 曾被解析成前缀 `$p =`，导致所有脚本互相复用、Remove-Item 被放行
     expect(parseCommandPrefix("$p = Join-Path $env:USERPROFILE 'Desktop\\a'")).toBeUndefined();
