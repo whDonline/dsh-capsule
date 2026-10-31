@@ -89,7 +89,8 @@ describe("操作族识别（② 同族模式的判据）", () => {
   it("【回归】脚本里的收尾表达式不应作废整条脚本的前缀（线上实测 familyGrants=0）", () => {
     const script = "$p = Join-Path $env:USERPROFILE 'Desktop\\a'\nNew-Item -ItemType Directory -Path $p -Force | Out-Null\n\"created=\" + (Test-Path $p)";
     const prefixes = identifyFamilies("pwsh", { command: script }).filter((item) => item.kind === "prefix");
-    expect(prefixes.map((item) => item.label)).toEqual(["同前缀 join-path", "同前缀 new-item", "同前缀 out-null"]);
+    // out-null 属无副作用命令，不参与族（2026-10-31 改定）
+    expect(prefixes.map((item) => item.label)).toEqual(["同前缀 join-path", "同前缀 new-item"]);
     // 混合粒度（方案 C）：有子命令语义的程序细分，cmdlet 只到程序
     const keyOf = (command: string) => identifyFamilies("pwsh", { command }).find((item) => item.kind === "prefix");
     expect(keyOf("npm run build")?.label).toBe("同前缀 npm run");
@@ -182,7 +183,7 @@ describe("② 同族模式：同一类操作不再询问", () => {
   it("族放行过期后必须重新询问", async () => {
     const stack = makeStack("same-family");
     await callTool(stack, "c1", "read", { file_path: "D:\\proj\\a.ts" });
-    stack.advance(301_000);
+    stack.advance(1_900_000);
     const later = await callTool(stack, "c2", "read", { file_path: "D:\\proj\\b.ts" });
     expect(later.human).toHaveBeenCalledTimes(1);
   });

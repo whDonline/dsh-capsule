@@ -72,8 +72,9 @@ describe("① 同操作模式：批准一次，同一条操作不再询问", () 
   it("授权过期 / 被撤销后必须重新询问", async () => {
     const stack = makeStack();
     await callTool(stack, "c1", { command: "Get-Date" });
-    expect((await stack.leases.list())[0]).toMatchObject({ status: "ACTIVE", expiresAt: 301_000 });
-    stack.advance(400_000);
+    // 默认复用时长 1800 秒（30 分钟）：覆盖一次开发会话
+    expect((await stack.leases.list())[0]).toMatchObject({ status: "ACTIVE", expiresAt: 1_801_000 });
+    stack.advance(1_900_000);
     const expired = await callTool(stack, "c2", { command: "Get-Date" });
     expect(expired.human).toHaveBeenCalledTimes(1);
     // 过期那次会重新签发一条新授权：撤销【所有仍有效的】再验证

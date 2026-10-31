@@ -60,7 +60,8 @@ export class GuardSettingsError extends Error {
 export const DEFAULT_GUARD_SETTINGS: Omit<GuardSettingsSnapshot, "revision"> = {
   enabled: true,
   mode: "same-operation",
-  reuseTtlSeconds: 300,
+  // 默认 30 分钟：短期授权的定位是"一次开发会话"，5 分钟覆盖不到连续开发/提交的节奏
+  reuseTtlSeconds: 1800,
   dndTargetMode: "danger-full-access",
   dndDurationSeconds: 900,
 };

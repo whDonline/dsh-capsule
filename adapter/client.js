@@ -1038,12 +1038,14 @@ window.__ModuleLoader__.load({
                     const hitText = record.familyLabel ? '族：' + record.familyLabel : '精确';
                     const approvalText = '人工' + (record.uses > 0 ? ' + 复用 ' + record.uses + ' 次' : '');
                     const leftText = record.outcome === 'active' ? fmtCn(remaining) : record.outcome === 'revoked' ? '已收回' : '已过期';
-                    const command = String(record.reason || record.capability || '').replace(/\s+/g, ' ').slice(0, 80);
+                    // 完整命令保留在 title 里（悬停/长按可看全文）；列表内只显示单行摘要
+                    const fullCommand = String(record.reason || record.capability || '');
+                    const command = fullCommand.replace(/\s+/g, ' ').slice(0, 90);
                     return h(
                       'tr',
                       { key: record.leaseId, style: record.outcome === 'active' ? null : { opacity: 0.6 } },
                       h('td', { style: cell }, fmtTime(record.grantedAt)),
-                      h('td', { style: Object.assign({}, cell, { maxWidth: '360px', fontFamily: 'ui-monospace, monospace' }) }, command),
+                      h('td', { style: Object.assign({}, cell, { maxWidth: '360px', fontFamily: 'ui-monospace, monospace', cursor: 'help' }), title: fullCommand }, command),
                       h('td', { style: cell }, modeText),
                       h('td', { style: cell }, hitText),
                       h('td', { style: cell }, approvalText),

@@ -74,6 +74,9 @@ export function identifyFamilies(toolName: string, args: unknown, mode?: string)
     const prefixList: { program: string; sub: string; text: string }[] = [];
     for (const piece of splitSubcommands(command)) {
       if (containsDestructive(piece)) continue;
+      // 无副作用命令（导航 / 管道 / 格式化）不参与族：它们不改变系统状态，
+      // 却会让"动作集合"永远对不齐（实测：Set-Location 一出现，两条脚本就互相不命中）。
+      if (NOISE_PROGRAMS.has(firstProgramOf(piece))) continue;
       const prefix = parseCommandPrefix(piece);
       if (prefix) prefixList.push(prefix);
     }
@@ -138,6 +141,22 @@ function containsDestructive(command: string): boolean {
   return tokens.some((token) => NO_PREFIX_PROGRAMS.has(token));
 }
 /**
+ * 无副作用命令：导航 / 管道 / 格式化 / 输出控制——**不产生族、不参与 ALL 判定**。
+ * 它们不改变系统状态，却会让"动作集合"永远对不齐（实测：Set-Location 一出现两条脚本就互相不命中）。
+ */
+export const NOISE_PROGRAMS: ReadonlySet<string> = new Set([
+  "set-location", "cd", "push-location", "pop-location", "pwd", "get-location",
+  "select-object", "sort-object", "where-object", "foreach-object", "group-object", "measure-object",
+  "format-table", "format-list", "out-null", "out-string", "out-default", "out-host", "out-file", "tee-object",
+  "write-host", "write-output", "write-verbose", "echo", "sleep", "start-sleep", "wait-event",
+  "test-path", "get-childitem", "dir", "ls", "select-string", "get-content", "type", "cat", "get-item", "resolve-path",
+]);
+/** 作用：取一条子命令的程序名（与 parseCommandPrefix 同一套规则）。 */
+function firstProgramOf(piece: string): string {
+  const first = piece.trim().split(/\s+/)[0] ?? "";
+  return first.split(/[\\/]/).pop()?.replace(/\.(exe|cmd|bat|ps1)$/i, "").toLowerCase() ?? "";
+}
+/**
  * 作用：整条命令里是否含破坏性程序——含则本次调用**永不走族复用**（只能精确匹配）。
  * 这是"逐条判定"方案的配套：破坏性命令不再废掉整条脚本的族，
  * 但含它的那一次调用必须重新征求同意（否则 Remove-Item 会蹭 Join-Path 的族）。
@@ -183,8 +202,9 @@ export function parseCommandPrefix(command: string): { program: string; sub: str
   if (sub !== "" && excluded?.has(sub)) return undefined;
   return { program, sub, text: sub === "" ? program : `${program} ${sub}` };
 }
-/** 作用：命令展示前的脱敏——把可能夹带密钥的赋值替换掉，并截断到 120 字。 */
-export function redactCommand(command: string, limit = 120): string {
+/** 作用：命令展示前的脱敏——把可能夹带密钥的赋值替换掉。
+ *  **默认不截断**（保留全文供审计展开查看）；界面层自行截断显示。 */
+export function redactCommand(command: string, limit = 4000): string {
   let text = command.replace(/((?:password|passwd|token|secret|api[-_]?key|access[-_]?key)\s*[=:]\s*)(\S+)/gi, "$1***");
   text = text.replace(/(--(?:password|token|secret|api-key)\s+)(\S+)/gi, "$1***");
   text = text.replace(/(Bearer\s+)[\w.\-]+/gi, "$1***");
