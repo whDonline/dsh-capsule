@@ -84,7 +84,7 @@ describe("授权决策日志（把事件流折叠成一条授权一份记录）"
   });
   it("能力文案是人话，且不泄露 Scope 哈希", () => {
     expect(describeCapability(lease(), "danger-full-access")).toBe("pwsh 可以免审批升到「完全访问」");
-    expect(describeCapability(lease({ kind: "universal", scope: { kind: "exact-arguments", key: "hash", display: "d" } }))).toContain("完全相同的参数");
+    expect(describeCapability(lease({ kind: "universal", scope: { kind: "exact-arguments", key: "hash", display: "d" } }))).toContain("完全一致");
     expect(describeCapability(lease(), "danger-full-access")).not.toContain(scope.key);
   });
 });

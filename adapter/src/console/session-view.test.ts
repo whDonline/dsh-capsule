@@ -113,14 +113,14 @@ describe("治理台会话视图：聚焦、命名与降级", () => {
     expect(snap.focus.sessionId).toBe("newer");
     expect(snap.sessions.map((view) => view.sessionId)).toEqual(["newer", "older"]);
   });
-  it("能力文案是人话：exact-arguments 说「与上次完全相同的参数」，沙箱授权带上目标档位", async () => {
+  it("能力文案是人话：exact-arguments 说「与上次完全一致」，沙箱授权带上目标档位", async () => {
     const { gov, leases, states } = makeConsole();
     await leases.issue({ sessionId: "s1", toolName: "deploy", scope: argsScope, ttlSeconds: 60 });
     const sandboxLease = await leases.issue({ sessionId: "s1", toolName: "pwsh", scope: sandboxScope, ttlSeconds: 300, kind: "sandbox-mode" });
     states.push(grantState({ sessionId: "s1", liveCount: 1, grants: [{ leaseId: sandboxLease.id, toolName: "pwsh", requestedMode: "danger-full-access", writtenMode: "danger-full-access", raised: true, live: true }] }));
     const view = (await gov.snapshot()).sessions[0];
     const texts = view?.auth.grants.map((grant) => grant.capabilityText) ?? [];
-    expect(texts.join("|")).toContain("与上次完全相同的参数");
+    expect(texts.join("|")).toContain("与上次完全一致");
     expect(texts.join("|")).toContain("免审批升到「完全访问」");
     // 用户可见文案里不出现内部档位标识（danger-full-access 只能出现在机器字段里）
     expect(texts.join("|")).not.toContain("danger-full-access");
