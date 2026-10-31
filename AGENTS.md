@@ -190,10 +190,12 @@ assets/                      # README 用示意图（结构示意，非截图）
     `/api/snapshot` 的 `currentModeText`/`baselineModeText`/`targetModeText`。
     **前端（`client.js` / `console-ui.ts`）禁止再维护任何决策、档位或模式的映射表**——新增一项只应改对应 catalog；
     历史缺陷正是"加一个决策要改三个文件，漏一处就静默不显示"。
-14. **三档范围模式（2026-10-31 产品定稿，P1 已落配置层）**：
-    `same-operation`（默认：工具 + 参数去掉 justification + 目标档位完全一致）/ `same-family`（命中操作族）/
-    `do-not-disturb`（整个会话提升到目标档位，到期自动回滚并回到 ①）。
-    **①② 只改变"问不问"，绝不改变沙箱档位**；只有 ③ 会写档位，且必须由用户点「开始免打扰」才生效（选中配置不算）。
+14. **两档范围模式（2026-10-31 产品精简：原三档合并为两档）**：
+    `same-operation`（默认，UI 名「同类复用」）/ `do-not-disturb`（免打扰：整个会话提升到目标档位，到期自动回滚）。
+    「同类复用」= 命令前缀（程序 + 子命令；复合命令按 ALL 语义逐条都要有放行）+ 同一文件 / 同一目录（均带目标档位）+
+    只读工具族；破坏性程序（rm/del/Remove-Item/mv/format…）与高危子命令（git push 等）**不产生任何族**。
+    旧的 `same-family` 只作为**输入别名**保留，读入即归一成 `same-operation`（不再注册为独立挡位）。
+    **只有免打扰会写沙箱档位**，且必须由用户点「开始免打扰」才生效（选中配置不算）。
     `enabled=false`（用户开关关闭）时所有 hook 直接透传：不记 pending、不签发、不提升、不写审计。
 15. **审计持久化（2026-10-31）**：`audit/journal.ts` 把「审计事件」与「授权记录」以 **NDJSON 追加**写入
     `<用户目录>/.dsh/capability-guard/audit.ndjson`（可用 `auditFile` 覆盖，`persistAudit: false` 关闭），
