@@ -87,7 +87,7 @@ export function describeCapability(lease: CapabilityLease, targetMode?: SandboxM
   if (lease.kind === "sandbox-mode") {
     return targetMode ? `${lease.toolName} 可以免审批升到「${sandboxModeLabel(targetMode)}」` : `${lease.toolName} 的沙箱升级已获批准`;
   }
-  if (lease.scope.kind === "exact-arguments") return `${lease.toolName} 可以用与上次完全相同的参数重试，不再询问`;
+  if (lease.scope.kind === "exact-arguments") return `${lease.toolName} 的这条操作（与上次完全一致）在到期前不再询问`;
   if (lease.scope.kind === "fields") return `${lease.toolName} 在相同字段范围内重试，不再询问`;
   if (lease.scope.kind === "tool") return `${lease.toolName} 的任何调用都不再询问（范围最宽）`;
   return `${lease.toolName} 的同类调用不再询问`;

@@ -266,6 +266,10 @@ window.__ModuleLoader__.load({
         };
       }, []);
 
+      // 2026-10-31 项目所有者要求：移除对话内提示条。
+      // 信息已由「输入框左侧模式 chip（同操作/同族/免打扰·倒计时）」与「能力授权 tab」承担，
+      // 这里不再渲染任何内容（下一步会连同槽位注册一起删除）。
+      return null;
       const view = viewOf(snapshot, sessionId);
       const info = describe(view, Date.now());
       if (!view || !info) return null;
