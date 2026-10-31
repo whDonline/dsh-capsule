@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { AuditService } from "../audit/audit-service.js";
-import { FamilyGrantStore, identifyFamilies, parseCommandPrefix, parseReadOnlyCommand, splitSubcommands } from "./families.js";
+import { FamilyGrantStore, identifyFamilies, hasDestructiveCommand, parseCommandPrefix, parseReadOnlyCommand, splitSubcommands } from "./families.js";
 import { LeaseManager } from "./lease-manager.js";
 import { MemoryLeaseStore } from "./lease-store.js";
 import { PendingRegistry } from "./pending.js";
@@ -72,6 +72,20 @@ describe("操作族识别（② 同族模式的判据）", () => {
     store.grant([prefixes[1]!], 60, 1_000);
     expect(store.match(scriptB, 1_000, ["prefix"])?.kind).toBe("prefix");
   });
+  it("含破坏性命令的脚本：族照常登记，但这一次仍必须人工确认", async () => {
+    const stack = makeStack("same-operation");
+    const first = await callTool(stack, "c1", "pwsh", { command: "$p = Join-Path D:\\x a\nRemove-Item $p -Force" });
+    expect(first.human).toHaveBeenCalledTimes(1);
+    const second = await callTool(stack, "c2", "pwsh", { command: "$p = Join-Path D:\\x b\nRemove-Item $p -Force" });
+    // blocked=true → 即使 Join-Path 的族已登记，也不允许自动放行
+    expect(second.human).toHaveBeenCalledTimes(1);
+  });
+  it("不含破坏性命令的同类脚本仍会自动复用（对照组）", async () => {
+    const stack = makeStack("same-operation");
+    await callTool(stack, "c1", "pwsh", { command: "$p = Join-Path D:\\x a\nNew-Item -Path $p -Force | Out-Null" });
+    const second = await callTool(stack, "c2", "pwsh", { command: "$p = Join-Path D:\\x b\nNew-Item -Path $p -Force | Out-Null" });
+    expect(second.human).not.toHaveBeenCalled();
+  });
   it("【回归】脚本里的收尾表达式不应作废整条脚本的前缀（线上实测 familyGrants=0）", () => {
     const script = "$p = Join-Path $env:USERPROFILE 'Desktop\\a'\nNew-Item -ItemType Directory -Path $p -Force | Out-Null\n\"created=\" + (Test-Path $p)";
     const prefixes = identifyFamilies("pwsh", { command: script }).filter((item) => item.kind === "prefix");
@@ -82,9 +96,13 @@ describe("操作族识别（② 同族模式的判据）", () => {
     expect(keyOf("npm run build")?.key).not.toBe(keyOf("npm install")?.key);
     expect(keyOf("git log")?.label).toBe("同前缀 git log");
     expect(keyOf("New-Item -ItemType File -Path D:\\b")?.key).toBe(keyOf("New-Item -ItemType Directory -Path D:\\a")?.key);
-    // 只要脚本里出现破坏性命令，整条脚本就不给任何族
+    // 逐条判定（2026-10-31 改定）：含破坏性命令的脚本仍有其它子命令的族，
+    // 但整条命令被标记为 blocked —— 这一次调用不允许走族复用（由 gate 保证）。
     const risky = "$p = Join-Path D:\\x a\nRemove-Item $p -Force\n\"done\"";
-    expect(identifyFamilies("pwsh", { command: risky })).toHaveLength(0);
+    expect(hasDestructiveCommand(risky)).toBe(true);
+    expect(identifyFamilies("pwsh", { command: risky }).some((item) => item.kind === "prefix")).toBe(true);
+    // 不含破坏性命令的脚本 blocked = false
+    expect(hasDestructiveCommand("New-Item -ItemType Directory -Path D:\\a")).toBe(false);
   });
   it("【安全回归】多行脚本 / 变量赋值 / 脚本内含破坏性命令 → 一律不给前缀", () => {
     // 实测缺陷：`$p = Join-Path ...` 曾被解析成前缀 `$p =`，导致所有脚本互相复用、Remove-Item 被放行

@@ -66,21 +66,18 @@ export function identifyFamilies(toolName: string, args: unknown, mode?: string)
     // ③ 前缀族（**任何模式都生效**）：把复合命令拆成子命令，每条各自算「程序 + 子命令」，
     // 与 Claude Code 一致：`a && b` 需要 a、b 都已被允许；批准时则为每个子命令各建一条。
     // 两条规则：
-    //   - 某行**解析不出程序名**（表达式 `"x=" + (Test-Path $p)`、字符串、残留赋值）→ **忽略该行**，
-    //     不能因为它作废整条脚本（实测：这类收尾行的存在会让多行脚本永远命中不了）；
-    //   - 某行含**破坏性程序**（Remove-Item / del / mv / format…）→ **整条脚本不产生前缀族**，
-    //     否则 `$p = ...; Remove-Item $p` 会靠 Join-Path 的前缀混过去（实测越权缺陷）。
-    let blocked = false;
+    //   - 某行**解析不出程序名**（表达式、字符串、残留赋值）→ **忽略该行**；
+    //   - 某行含**破坏性程序**（Remove-Item / del / mv / format…）→ **该行不产生族**，
+    //     并且这条调用会被标记为 blocked（见 gate）：**本次调用永不走族复用**，
+    //     这样 `$p = ...; Remove-Item $p` 依然不能靠 Join-Path 的前缀混过去（越权防护不变）；
+    //     同时其它子命令的族照常登记，避免"一条清理命令废掉整条脚本"。
     const prefixList: { program: string; sub: string; text: string }[] = [];
     for (const piece of splitSubcommands(command)) {
-      if (containsDestructive(piece)) {
-        blocked = true;
-        break;
-      }
+      if (containsDestructive(piece)) continue;
       const prefix = parseCommandPrefix(piece);
       if (prefix) prefixList.push(prefix);
     }
-    if (!blocked && prefixList.length > 0) {
+    if (prefixList.length > 0) {
       const seen = new Set<string>();
       for (const prefix of prefixList) {
         // 混合粒度（方案 C）：
@@ -139,6 +136,15 @@ function firstLine(text: string): string {
 function containsDestructive(command: string): boolean {
   const tokens = command.toLowerCase().split(/[^a-z0-9._-]+/);
   return tokens.some((token) => NO_PREFIX_PROGRAMS.has(token));
+}
+/**
+ * 作用：整条命令里是否含破坏性程序——含则本次调用**永不走族复用**（只能精确匹配）。
+ * 这是"逐条判定"方案的配套：破坏性命令不再废掉整条脚本的族，
+ * 但含它的那一次调用必须重新征求同意（否则 Remove-Item 会蹭 Join-Path 的族）。
+ */
+export function hasDestructiveCommand(command: string): boolean {
+  if (typeof command !== "string" || command.length === 0) return false;
+  return splitSubcommands(command).some((piece) => containsDestructive(piece));
 }
 /**
  * 作用：把复合命令拆成子命令——按换行、`;`、`&&`、`||`、`|` 切分（与 Claude Code 的复合命令语义一致：

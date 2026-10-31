@@ -3,7 +3,7 @@ import type { AuditDecision } from "../audit/types.js";
 import { parseEscalation, type SandboxMode } from "./escalation.js";
 import { operationFingerprint } from "./operation.js";
 import { OperationRegistry } from "./operation-registry.js";
-import { FamilyGrantStore, identifyFamilies } from "./families.js";
+import { FamilyGrantStore, hasDestructiveCommand, identifyFamilies } from "./families.js";
 import type { SandboxGrantManager, SandboxModeResult } from "./sandbox-grant.js";
 import { recordSandboxOutcome } from "./sandbox-audit.js";
 import type { ResolvedToolPolicy, PolicyResolver } from "./policy.js";
@@ -160,6 +160,8 @@ export class UniversalGate {
           display: fingerprint.display,
           mode: fingerprint.mode,
           families: identifyFamilies(exec.name, exec.arguments, escalation?.requestedMode),
+          // 含破坏性程序的脚本：族照常登记（供其它脚本复用），但**这一次**调用不允许走族复用
+          blocked: hasDestructiveCommand(commandOf(exec.arguments)),
           recordedAt: this.now(),
         });
       }
@@ -436,6 +438,11 @@ export class UniversalGate {
     // 族放行：① 档只看「同前缀」（Claude Code 的 `Bash(npm run *)`），② 档看全部族。
     // 族放行（两档合并后**始终生效**）：前缀族是 ALL 语义（复合命令逐条都要有放行），
     // 文件/目录/只读工具族是 ANY 语义；族只由人工批准建立，并在 reuseTtlSeconds 后失效。
+    // 含破坏性程序的调用：族照常登记给别人用，但**这一次**必须重新征求同意。
+    if (record.blocked) {
+      this.opStats.noLease += 1;
+      return await next();
+    }
     if (record.families && record.families.length > 0) {
       const familyGrant = this.familyGrants.match(record.families, this.now(), undefined, (leaseId) => this.deps.leases.isLive(leaseId));
       if (familyGrant) {
@@ -606,6 +613,14 @@ export class UniversalGate {
       ...extra,
     });
   }
+}
+/** 作用：从工具参数里取命令文本（只有 shell 类工具有）——用于判断是否含破坏性程序。 */
+function commandOf(args: unknown): string {
+  if (args === null || typeof args !== "object") return "";
+  const record = args as Record<string, unknown>;
+  if (typeof record.command === "string") return record.command;
+  if (typeof record.script === "string") return record.script;
+  return "";
 }
 function approvalAgentId(req: ApprovalRequestLike): string | undefined {
   // 作用：从审批请求中确定性提取发起者 session id——DSH 的载荷 agent 是 Agent 实例（id 为 SessionId）；

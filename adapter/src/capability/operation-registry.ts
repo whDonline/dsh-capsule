@@ -14,6 +14,8 @@ export interface RecordedOperation {
   mode?: SandboxMode;
   /** 这次调用所属的操作族（② 同族模式用；可能为空） */
   families?: readonly FamilyRef[];
+  /** 这条命令里含破坏性程序：本次调用**永不走族复用**（只能精确匹配） */
+  blocked?: boolean;
   recordedAt: number;
 }
 /** 记录最长存活时间：一次调用的审批往返远小于它，超过即视为「工具早已结束、callId 被重放」。 */
