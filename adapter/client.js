@@ -420,6 +420,17 @@ window.__ModuleLoader__.load({
       return '本会话当前没有临时授权；工具调用会照常征求你的同意。';
     }
 
+    /** 作用：紧凑倒计时（3:07 / 1:02:33）——用于 chip，不参与任何判定。 */
+    function clockText(ms) {
+      const total = Math.max(0, Math.floor(ms / 1000));
+      const h = Math.floor(total / 3600);
+      const m = Math.floor((total % 3600) / 60);
+      const s = total % 60;
+      const pad = function (n) {
+        return n < 10 ? '0' + n : String(n);
+      };
+      return h > 0 ? h + ':' + pad(m) + ':' + pad(s) : m + ':' + pad(s);
+    }
     /** 作用：会话内的「能力授权」详情页（conversation.view，排在 对话 / 轨迹 之后）。
      * 数据来自 GET /api/snapshot?session=<id>（实时状态）与 GET /api/decisions?sessionId=<id>
      * （授权决策日志：一条授权一份记录）；原始事件只在展开「排障」时按需拉取。都只读。 */
@@ -439,11 +450,6 @@ window.__ModuleLoader__.load({
       const [detailsOpen, setDetailsOpen] = React.useState(false);
       const [rawOpen, setRawOpen] = React.useState(false);
       const [copied, setCopied] = React.useState('');
-      const [winTool, setWinTool] = React.useState('');
-      const [winMode, setWinMode] = React.useState('danger-full-access');
-      const [winMinutes, setWinMinutes] = React.useState('30');
-      const [winBusy, setWinBusy] = React.useState(false);
-      const [winMsg, setWinMsg] = React.useState('');
       const [nowTick, setNowTick] = React.useState(0);
 
       React.useEffect(
@@ -647,7 +653,6 @@ window.__ModuleLoader__.load({
         .map(function (rule) {
           return rule.match;
         });
-      const maxTtl = policy && Number.isInteger(policy.maxTtlSeconds) ? policy.maxTtlSeconds : 1800;
       // 窗口档位选项来自宿主下发的 catalog.sandboxModes（read-only 不作为放宽目标）
       const catalogModes = config && config.catalog && Array.isArray(config.catalog.sandboxModes) ? config.catalog.sandboxModes : [];
       const windowModes = catalogModes.filter(function (item) {
@@ -659,71 +664,6 @@ window.__ModuleLoader__.load({
         }
         return id;
       };
-      const durationOptions = [15, 30, 60].filter(function (m) {
-        return m * 60 <= maxTtl;
-      });
-      const toolValue = winTool || escalationTools[0] || '';
-      const minutesValue = durationOptions.indexOf(Number(winMinutes)) >= 0 ? Number(winMinutes) : durationOptions[0] || 15;
-      const openWindowNow = async function () {
-        if (winBusy || !host || !toolValue) return;
-        const text =
-          '接下来 ' + minutesValue + ' 分钟，本会话的 ' + toolValue + ' 可以升到「' + windowModeLabel(winMode) + '」，期间不再询问你。到期会自动收回，也可以随时提前收回。确定开启？';
-        if (typeof window !== 'undefined' && typeof window.confirm === 'function' && !window.confirm(text)) return;
-        setWinBusy(true);
-        setWinMsg('');
-        try {
-          await fetchJson(host, '/api/window', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json', 'x-dsh-guard': '1' },
-            body: JSON.stringify({ sessionId: sessionId, toolName: toolValue, mode: winMode, ttlSeconds: minutesValue * 60 }),
-          });
-          setWinMsg('已开启：' + minutesValue + ' 分钟内 ' + toolValue + ' 不再询问你');
-          const snap = await fetchJson(host, '/api/snapshot?session=' + encodeURIComponent(sessionId));
-          setSnapshot(snap);
-          const decisionBody = await fetchJson(host, '/api/decisions?sessionId=' + encodeURIComponent(sessionId) + '&limit=' + AUDIT_LIMIT);
-          setDecisions(decisionBody);
-        } catch (err) {
-          setWinMsg('未能开启：' + (err && err.message ? err.message : String(err)));
-        } finally {
-          setWinBusy(false);
-        }
-      };
-      const windowCard = h(
-        'div',
-        { style: S.card },
-        h('div', { style: S.title }, '免打扰窗口'),
-        h('div', { style: S.note }, '让这个会话在一段时间内不必为同一件事反复问你。它只是把「允许一次」提前批量给你自己：有明确时长、到期自动收回、随时可以提前收回。'),
-        escalationTools.length === 0
-          ? h('div', { style: S.empty }, '当前配置里没有可升级的工具（需要在 profile 的 cordis.patch.yml 里给某个工具配置 sandbox-escalation 规则）。')
-          : h(
-              'div',
-              { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap', marginTop: '10px' } },
-              h(
-                'select',
-                { value: toolValue, onChange: function (e) { setWinTool(e.target.value); }, style: S.select },
-                escalationTools.map(function (tool) {
-                  return h('option', { key: tool, value: tool }, tool);
-                }),
-              ),
-              h(
-                'select',
-                { value: winMode, onChange: function (e) { setWinMode(e.target.value); }, style: S.select },
-                windowModes.map(function (item) {
-                  return h('option', { key: item.id, value: item.id }, '升到「' + item.label + '」');
-                }),
-              ),
-              h(
-                'select',
-                { value: String(minutesValue), onChange: function (e) { setWinMinutes(e.target.value); }, style: S.select },
-                durationOptions.map(function (m) {
-                  return h('option', { key: m, value: String(m) }, m + ' 分钟');
-                }),
-              ),
-              h('button', { type: 'button', style: S.btn, disabled: winBusy, onClick: function () { void openWindowNow(); } }, winBusy ? '开启中…' : '开启窗口'),
-            ),
-        winMsg ? h('div', { style: S.note }, winMsg) : null,
-      );
-
       // ---- ① 配置区：开关 + 三档 + 时长/目标档位（唯一的用户入口；不再放设置页）----
       const guardSettings = config && config.settings ? config.settings : null;
       const guardModes = config && config.catalog && Array.isArray(config.catalog.guardModes) ? config.catalog.guardModes : [];
@@ -993,7 +933,7 @@ window.__ModuleLoader__.load({
           : null,
       );
 
-      return h('div', { style: S.page }, h('div', { style: S.wrap }, modeCard, header, statsCard, granted, h('div', null, actions), windowCard, recordCard, details, rawCard));
+      return h('div', { style: S.page }, h('div', { style: S.wrap }, modeCard, header, statsCard, granted, h('div', null, actions), recordCard, details, rawCard));
     }
 
     /** 作用：输入框工具栏左侧的模式 chip（conversation.input.left）——只显示当前模式，不抢原生档位控件。
@@ -1002,6 +942,18 @@ window.__ModuleLoader__.load({
       const sessionId = props && props.sessionId ? String(props.sessionId) : '';
       const [settings, setSettings] = React.useState(null);
       const [reachable, setReachable] = React.useState(true);
+      // ③ 免打扰：从会话快照里取这条窗口授权还剩多久（到期后自动回落到 ① 同操作语义）
+      const [dndRemaining, setDndRemaining] = React.useState(0);
+      React.useEffect(function () {
+        const timer = setInterval(function () {
+          setDndRemaining(function (value) {
+            return value > 0 ? Math.max(0, value - 1000) : 0;
+          });
+        }, 1000);
+        return function () {
+          clearInterval(timer);
+        };
+      }, []);
       React.useEffect(
         function () {
           let alive = true;
@@ -1017,6 +969,16 @@ window.__ModuleLoader__.load({
               if (!alive) return;
               setSettings(cfg && cfg.settings ? cfg.settings : null);
               setReachable(true);
+              const isDnd = cfg && cfg.settings && cfg.settings.mode === 'do-not-disturb';
+              if (isDnd && sessionId) {
+                const snap = await fetchJson(base, '/api/snapshot?session=' + encodeURIComponent(sessionId));
+                if (!alive) return;
+                const view = viewOf(snap, sessionId);
+                const nextExpiresAt = view && view.auth ? view.auth.nextExpiresAt : undefined;
+                setDndRemaining(typeof nextExpiresAt === 'number' ? Math.max(0, nextExpiresAt - Date.now()) : 0);
+              } else {
+                setDndRemaining(0);
+              }
             } catch (err) {
               if (alive) setReachable(false);
             }
@@ -1035,7 +997,13 @@ window.__ModuleLoader__.load({
       if (!reachable) return null;
       if (!settings) return null;
       const mode = settings.mode || 'same-operation';
-      const label = settings.enabled === false ? '能力授权已关闭' : settings.modeLabel || mode;
+      const label = settings.enabled === false
+        ? '能力授权已关闭'
+        : mode === 'do-not-disturb'
+          ? dndRemaining > 0
+            ? '免打扰 · ' + clockText(dndRemaining)
+            : '免打扰已结束'
+          : settings.modeLabel || mode;
       const tone = settings.enabled === false ? COLORS.idle : mode === 'do-not-disturb' ? COLORS.warn : COLORS.ok;
       return h(
         'span',
