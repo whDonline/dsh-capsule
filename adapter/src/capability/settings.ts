@@ -10,7 +10,7 @@ import { isSandboxMode, SANDBOX_MODE_LABELS, type SandboxMode } from "./escalati
 export const GUARD_MODES = ["same-operation", "do-not-disturb"] as const;
 export type GuardMode = (typeof GUARD_MODES)[number];
 export const GUARD_MODE_LABELS: Record<GuardMode, string> = {
-  "same-operation": "同类复用",
+  "same-operation": "短期授权",
   "do-not-disturb": "免打扰模式",
 };
 export const GUARD_MODE_SUMMARIES: Record<GuardMode, string> = {

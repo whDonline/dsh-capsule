@@ -35,7 +35,7 @@ describe("用户可见的三档设置（GET/PATCH /api/config 的 settings）", 
   it("GET 返回 settings 与模式目录（含中文名，前端不再自己映射）", async () => {
     await withServer(undefined, async (handle) => {
       const body = (await (await fetch(`${handle.url}api/config`)).json()) as { settings: { enabled: boolean; mode: string; modeLabel: string }; catalog: { guardModes: { id: string; label: string }[] } };
-      expect(body.settings).toMatchObject({ enabled: true, mode: "same-operation", modeLabel: "同类复用" });
+      expect(body.settings).toMatchObject({ enabled: true, mode: "same-operation", modeLabel: "短期授权" });
       expect(body.catalog.guardModes.map((item) => item.id)).toEqual(["off", "same-operation", "do-not-disturb"]);
     }, new GuardSettings({ maxTtlSeconds: 1800 }));
   });

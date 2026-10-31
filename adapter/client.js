@@ -943,7 +943,84 @@ window.__ModuleLoader__.load({
           : null,
       );
 
-      return h('div', { style: S.page }, h('div', { style: S.wrap }, header, statsCard, granted, h('div', null, actions), recordCard, details, rawCard));
+      // ---- 指标区（自进化用）：尽量给可比较、可回放的数字 ----
+      const reuse = (summary && summary.reuseByKind) || { exact: 0, family: 0, window: 0 };
+      const totalApprovals = (summary && summary.total) || 0;
+      const saved = (summary && summary.savedApprovals) || 0;
+      const reuseRate = totalApprovals + saved > 0 ? Math.round((saved / (totalApprovals + saved)) * 100) : 0;
+      const metricCards = [
+        ["人工批准", String(totalApprovals), '次'],
+        ["命中复用", String(saved), '次'],
+        ["复用率", String(reuseRate), '%'],
+        ["生效中", String((summary && summary.active) || 0), '条'],
+        ["精确 / 族 / 免打扰", reuse.exact + ' / ' + reuse.family + ' / ' + reuse.window, '次'],
+        ["最长放开", summary && summary.longestWindowMs > 0 ? fmtCn(summary.longestWindowMs) : '-', ''],
+        ["待收回档位", String((summary && summary.pendingRestore) || 0), '条'],
+        ["最常命中族", summary && summary.topFamilies && summary.topFamilies.length > 0 ? summary.topFamilies.map(function (f) { return f.label + '×' + f.count; }).join('，') : '-', ''],
+      ];
+      const metricsCard = h(
+        'div',
+        { style: S.card },
+        h('div', { style: S.title }, '指标'),
+        h(
+          'div',
+          { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '10px', marginTop: '8px' } },
+          metricCards.map(function (item) {
+            return h(
+              'div',
+              { key: item[0], style: { padding: '10px', borderRadius: '8px', border: '1px solid ' + COLORS.line } },
+              h('div', { style: S.note }, item[0]),
+              h('div', { style: { fontSize: '16px', fontWeight: '600', marginTop: '2px' } }, item[1] + (item[2] ? ' ' + item[2] : '')),
+            );
+          }),
+        ),
+      );
+
+      // ---- 审计区：一行一条 ----
+      const nowMs = Date.now();
+      const cell = { padding: '6px 8px', fontSize: '12px', borderBottom: '1px solid ' + COLORS.line, verticalAlign: 'top' };
+      const headCell = Object.assign({}, cell, { color: COLORS.fg2, fontWeight: '600' });
+      const columns = ['时间', '命令', '模式', '命中方式', '审批方式', '剩余'];
+      const auditCard = h(
+        'div',
+        { style: S.card },
+        h('div', { style: S.title }, '审计'),
+        records.length === 0
+          ? h('div', { style: S.empty }, '还没有记录。你批准一次之后，这里会出现一条。')
+          : h(
+              'div',
+              { style: { overflowX: 'auto', marginTop: '8px' } },
+              h(
+                'table',
+                { style: { borderCollapse: 'collapse', width: '100%' } },
+                h('thead', null, h('tr', null, columns.map(function (name) { return h('th', { key: name, style: Object.assign({}, headCell, { textAlign: 'left' }) }, name); }))),
+                h(
+                  'tbody',
+                  null,
+                  records.map(function (record) {
+                    const remaining = record.outcome === 'active' ? Math.max(0, record.expiresAt - nowMs) : 0;
+                    const modeText = record.kind === 'sandbox-mode' ? '免打扰' : '短期授权';
+                    const hitText = record.familyLabel ? '族：' + record.familyLabel : '精确';
+                    const approvalText = '人工' + (record.uses > 0 ? ' + 复用 ' + record.uses + ' 次' : '');
+                    const leftText = record.outcome === 'active' ? fmtCn(remaining) : record.outcome === 'revoked' ? '已收回' : '已过期';
+                    const command = String(record.reason || record.capability || '').replace(/\s+/g, ' ').slice(0, 80);
+                    return h(
+                      'tr',
+                      { key: record.leaseId, style: record.outcome === 'active' ? null : { opacity: 0.6 } },
+                      h('td', { style: cell }, fmtTime(record.grantedAt)),
+                      h('td', { style: Object.assign({}, cell, { maxWidth: '360px', fontFamily: 'ui-monospace, monospace' }) }, command),
+                      h('td', { style: cell }, modeText),
+                      h('td', { style: cell }, hitText),
+                      h('td', { style: cell }, approvalText),
+                      h('td', { style: cell }, leftText),
+                    );
+                  }),
+                ),
+              ),
+            ),
+      );
+
+      return h('div', { style: S.page }, h('div', { style: S.wrap }, metricsCard, auditCard));
     }
 
     /** 作用：输入框工具栏左侧的授权模式控件（conversation.input.left）——**可直接操作**：
