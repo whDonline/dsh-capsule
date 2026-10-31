@@ -145,7 +145,9 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
     initial: {
       enabled: config?.modeEnabled ?? DEFAULT_GUARD_SETTINGS.enabled,
       mode: isGuardMode(config?.mode) ? config.mode : DEFAULT_GUARD_SETTINGS.mode,
-      reuseTtlSeconds: config?.reuseTtlSeconds ?? governance.current.defaultTtlSeconds,
+      // 复用时长默认取「产品默认」（30 分钟 = 一次开发会话），而不是部署策略里的 defaultTtlSeconds；
+      // 否则把默认值调大也没用（实测：默认仍是 300 秒）。
+      reuseTtlSeconds: config?.reuseTtlSeconds ?? DEFAULT_GUARD_SETTINGS.reuseTtlSeconds,
       dndTargetMode: isSandboxMode(config?.dndTargetMode) ? config.dndTargetMode : DEFAULT_GUARD_SETTINGS.dndTargetMode,
       dndDurationSeconds: config?.dndDurationSeconds ?? DEFAULT_GUARD_SETTINGS.dndDurationSeconds,
     },
