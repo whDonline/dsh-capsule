@@ -62,13 +62,24 @@ export function identifyFamilies(toolName: string, args: unknown, mode?: string)
   if (command) {
     // ③ 前缀族（**任何模式都生效**）：把复合命令拆成子命令，每条各自算「程序 + 子命令」，
     // 与 Claude Code 一致：`a && b` 需要 a、b 都已被允许；批准时则为每个子命令各建一条。
-    // 【关键】只要有任何一个子命令拿不到前缀（破坏性程序、未知形态），整个脚本就【不产生前缀族】——
-    // 否则 `$p = ...; Remove-Item $p` 会靠 join-path 的前缀混过去。
-    const prefixes = splitSubcommands(command).map((piece) => parseCommandPrefix(piece));
-    if (prefixes.length > 0 && prefixes.every((item) => item !== undefined)) {
+    // 两条规则：
+    //   - 某行**解析不出程序名**（表达式 `"x=" + (Test-Path $p)`、字符串、残留赋值）→ **忽略该行**，
+    //     不能因为它作废整条脚本（实测：这类收尾行的存在会让多行脚本永远命中不了）；
+    //   - 某行含**破坏性程序**（Remove-Item / del / mv / format…）→ **整条脚本不产生前缀族**，
+    //     否则 `$p = ...; Remove-Item $p` 会靠 Join-Path 的前缀混过去（实测越权缺陷）。
+    let blocked = false;
+    const prefixList: { program: string; sub: string; text: string }[] = [];
+    for (const piece of splitSubcommands(command)) {
+      if (containsDestructive(piece)) {
+        blocked = true;
+        break;
+      }
+      const prefix = parseCommandPrefix(piece);
+      if (prefix) prefixList.push(prefix);
+    }
+    if (!blocked && prefixList.length > 0) {
       const seen = new Set<string>();
-      for (const prefix of prefixes) {
-        if (!prefix) continue;
+      for (const prefix of prefixList) {
         const key = sha256Scope({ family: "prefix", program: prefix.program, sub: prefix.sub, mode: requestedMode ?? null });
         if (seen.has(key)) continue;
         seen.add(key);
