@@ -38,9 +38,14 @@ describe("操作族识别（② 同族模式的判据）", () => {
     expect(families.map((item) => item.kind).sort()).toEqual(["object", "tool"]);
     expect(families.find((item) => item.kind === "object")?.label).toContain("a.ts");
   });
-  it("写/删类工具只有对象族——绝不能有同工具族", () => {
-    expect(identifyFamilies("write", { file_path: "D:\\proj\\a.ts", content: "x" }).map((item) => item.kind)).toEqual(["object"]);
+  it("工具族：除 shell 与破坏性工具外都成族（2026-10-31 归粗）", () => {
+    expect(identifyFamilies("write", { file_path: "D:\\proj\\a.ts", content: "x" }).map((item) => item.kind)).toEqual(["object", "tool"]);
+    // shell 工具不能成族：否则批准一次 pwsh 等于所有命令都不再问
+    expect(identifyFamilies("pwsh", { command: "Get-Date" }).some((item) => item.kind === "tool")).toBe(false);
+    // 破坏性工具不成族
     expect(identifyFamilies("rm", { path: "D:\\proj\\a.ts" }).some((item) => item.kind === "tool")).toBe(false);
+    // 只读工具也成族
+    expect(identifyFamilies("read", { file_path: "D:\\proj\\a.ts" }).some((item) => item.kind === "tool")).toBe(true);
   });
   it("命令族：只读程序 + 允许的子命令；写命令与未知子命令一律不给族", () => {
     expect(parseReadOnlyCommand("git status --short")).toEqual({ program: "git", sub: "status" });
@@ -70,7 +75,7 @@ describe("操作族识别（② 同族模式的判据）", () => {
   it("【回归】脚本里的收尾表达式不应作废整条脚本的前缀（线上实测 familyGrants=0）", () => {
     const script = "$p = Join-Path $env:USERPROFILE 'Desktop\\a'\nNew-Item -ItemType Directory -Path $p -Force | Out-Null\n\"created=\" + (Test-Path $p)";
     const prefixes = identifyFamilies("pwsh", { command: script }).filter((item) => item.kind === "prefix");
-    expect(prefixes.map((item) => item.label)).toEqual(["同前缀 join-path", "同前缀 new-item", "同前缀 out-null"]);
+    expect(prefixes.map((item) => item.label)).toEqual(["同程序 join-path", "同程序 new-item", "同程序 out-null"]);
     // 只要脚本里出现破坏性命令，整条脚本就不给任何族
     const risky = "$p = Join-Path D:\\x a\nRemove-Item $p -Force\n\"done\"";
     expect(identifyFamilies("pwsh", { command: risky })).toHaveLength(0);
@@ -126,11 +131,15 @@ describe("② 同族模式：同一类操作不再询问", () => {
     const second = await callTool(stack, "c2", "read", { file_path: "D:\\proj\\b.ts" });
     expect(second.human).not.toHaveBeenCalled();
   });
-  it("写类工具即使在同一族模式下，换文件也必须问（无同工具族）", async () => {
-    const stack = makeStack("same-family");
+  it("归粗后：写类工具同一个就行（同工具族）；破坏性工具仍然每次问", async () => {
+    const stack = makeStack("same-operation");
     await callTool(stack, "c1", "write", { file_path: "D:\\proj\\a.ts", content: "x" });
     const second = await callTool(stack, "c2", "write", { file_path: "D:\\proj\\b.ts", content: "y" });
-    expect(second.human).toHaveBeenCalledTimes(1);
+    expect(second.human).not.toHaveBeenCalled();
+    // 破坏性工具没有族：换一个目标仍然要问
+    await callTool(stack, "c3", "rm", { path: "D:\\proj\\a.ts" });
+    const destructive = await callTool(stack, "c4", "rm", { path: "D:\\proj\\b.ts" });
+    expect(destructive.human).toHaveBeenCalledTimes(1);
   });
   it("同一文件的不同参数命中对象族（跨工具不共享）", async () => {
     const stack = makeStack("same-family");

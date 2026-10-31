@@ -12,6 +12,8 @@
 import { sha256Scope } from "./canonical.js";
 /** 只读工具白名单——只有它们能获得「同工具」族。 */
 export const READ_ONLY_TOOLS: ReadonlySet<string> = new Set(["read", "read_image", "grep", "glob", "list", "search", "fetch", "web_fetch", "web_search", "session_search", "session_event_read", "session_event_search"]);
+/** shell 工具：它们承载"任意命令"，**永不**获得"同工具"族（否则一次批准等于全放开）。 */
+export const SHELL_TOOLS: ReadonlySet<string> = new Set(["pwsh", "bash", "sh", "zsh", "terminal_open", "terminal_read", "terminal_signal", "terminal_close", "terminal_list"]);
 /** 只读程序白名单——只有它们能获得「同类命令」族（写命令永不在内）。 */
 export const READ_ONLY_PROGRAMS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
   ["git", new Set(["status", "log", "diff", "show", "branch", "remote", "rev-parse", "grep", "ls-files"])],
@@ -54,9 +56,10 @@ export function identifyFamilies(toolName: string, args: unknown, mode?: string)
     if (typeof value !== "string" || !looksLikePath(value)) continue;
     families.push({ kind: "object", key: sha256Scope({ family: "object", tool: toolName, arg: key, value: value.toLowerCase() }), label: `同一对象 ${value}` });
   }
-  // ② 工具族：只读工具
-  if (READ_ONLY_TOOLS.has(toolName)) {
-    families.push({ kind: "tool", key: sha256Scope({ family: "tool", tool: toolName }), label: `同工具 ${toolName}` });
+  // ② 工具族：**所有非 shell、非破坏性的工具**都成族（2026-10-31 归粗：不再只限只读工具）。
+  // shell（pwsh/bash/terminal_*）不能成族——否则"批准一次 pwsh"等于"所有命令都不再问"。
+  if (!SHELL_TOOLS.has(toolName) && !DESTRUCTIVE_PROGRAMS.has(toolName)) {
+    families.push({ kind: "tool", key: sha256Scope({ family: "tool", tool: toolName, mode: requestedMode ?? null }), label: `同工具 ${toolName}` });
   }
   const command = typeof obj.command === "string" ? obj.command : typeof obj.script === "string" ? obj.script : undefined;
   if (command) {
@@ -80,17 +83,14 @@ export function identifyFamilies(toolName: string, args: unknown, mode?: string)
     if (!blocked && prefixList.length > 0) {
       const seen = new Set<string>();
       for (const prefix of prefixList) {
-        const key = sha256Scope({ family: "prefix", program: prefix.program, sub: prefix.sub, mode: requestedMode ?? null });
+        // 归粗：前缀族的键只到「程序」层（不再区分子命令）；高危子命令在 parseCommandPrefix 里已被拒绝。
+        const key = sha256Scope({ family: "prefix", program: prefix.program, mode: requestedMode ?? null });
         if (seen.has(key)) continue;
         seen.add(key);
-        families.push({ kind: "prefix", key, label: `同前缀 ${prefix.text}${requestedMode ? " → " + requestedMode : ""}` });
+        families.push({ kind: "prefix", key, label: `同程序 ${prefix.program}${requestedMode ? " → " + requestedMode : ""}` });
       }
     }
-    // ④ 命令族：只读程序 + 允许的子命令
-    const parsed = parseReadOnlyCommand(command);
-    if (parsed) families.push({ kind: "command", key: sha256Scope({ family: "command", program: parsed.program, sub: parsed.sub }), label: `同类命令 ${parsed.program}${parsed.sub ? " " + parsed.sub : ""}` });
     // ④ 目录族：写操作也能复用（破坏性程序永不参与，见 DESTRUCTIVE_PROGRAMS）。
-    // 「同程序」不再单独成族——前缀族已经覆盖它，且前缀族带目标档位，不会把不同档位混在一起。
     const shape = parseCommandShape(command);
     if (shape && !DESTRUCTIVE_PROGRAMS.has(shape.program)) {
       for (const dir of shape.dirs) {
