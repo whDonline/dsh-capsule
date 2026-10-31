@@ -91,6 +91,19 @@ export class UniversalGate {
     if (!Number.isInteger(ttlSeconds) || ttlSeconds <= 0) throw new Error("GUARD_DND_INVALID: ttlSeconds");
     const expiresAt = this.now() + ttlSeconds * 1000;
     this.dndWindows.set(sessionId, expiresAt);
+    // 记录载体：签发一条 sandbox-mode 授权**只用于记账**（不调用 setSandboxMode，档位不受影响），
+    // 这样审计表里会出现一行「免打扰」，也能被「收回」覆盖到。签发失败不影响时间窗本身。
+    void Promise.resolve(
+      this.deps.leases.issue({
+        sessionId,
+        toolName: "免打扰",
+        scope: { kind: "tool", key: `dnd:${sessionId}:${expiresAt}`, display: `免打扰窗口：${Math.round(ttlSeconds / 60)} 分钟内本会话审批自动放行（不改沙箱档位）` },
+        ttlSeconds,
+        kind: "sandbox-mode",
+      }),
+    ).catch((err: unknown) => {
+      process.stderr.write(`[dsh-guard] dnd record lease failed: ${String(err)}\n`);
+    });
     return expiresAt;
   }
   /** 作用：结束免打扰（提前收回）。 */

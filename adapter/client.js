@@ -943,20 +943,41 @@ window.__ModuleLoader__.load({
           : null,
       );
 
-      // ---- 指标区（自进化用）：尽量给可比较、可回放的数字 ----
-      const reuse = (summary && summary.reuseByKind) || { exact: 0, family: 0, window: 0 };
-      const totalApprovals = (summary && summary.total) || 0;
-      const saved = (summary && summary.savedApprovals) || 0;
+      // ---- 指标区（自进化用）：按时间范围重新折算，避免历史测试数据污染 ----
+      const nowMs0 = Date.now();
+      const cutoff = rangeDays > 0 ? nowMs0 - rangeDays * 86_400_000 : 0;
+      const rows = records.filter(function (record) {
+        return record.grantedAt >= cutoff;
+      });
+      const reuse = { exact: 0, family: 0, window: 0 };
+      let saved = 0;
+      let longestWindowMs = 0;
+      let activeCount = 0;
+      const familyCounts = new Map();
+      for (const record of rows) {
+        saved += record.uses || 0;
+        longestWindowMs = Math.max(longestWindowMs, record.windowMs || 0);
+        if (record.outcome === 'active') activeCount += 1;
+        if (record.uses > 0) {
+          if (record.kind === 'sandbox-mode') reuse.window += record.uses;
+          else if (record.familyLabel) {
+            reuse.family += record.uses;
+            familyCounts.set(record.familyLabel, (familyCounts.get(record.familyLabel) || 0) + record.uses);
+          } else reuse.exact += record.uses;
+        }
+      }
+      const totalApprovals = rows.length;
       const reuseRate = totalApprovals + saved > 0 ? Math.round((saved / (totalApprovals + saved)) * 100) : 0;
+      const topFamilies = [...familyCounts.entries()].sort(function (a, b) { return b[1] - a[1]; }).slice(0, 3);
       const metricCards = [
         ["人工批准", String(totalApprovals), '次'],
         ["命中复用", String(saved), '次'],
         ["复用率", String(reuseRate), '%'],
-        ["生效中", String((summary && summary.active) || 0), '条'],
+        ["生效中", String(activeCount), '条'],
         ["精确 / 族 / 免打扰", reuse.exact + ' / ' + reuse.family + ' / ' + reuse.window, '次'],
-        ["最长放开", summary && summary.longestWindowMs > 0 ? fmtCn(summary.longestWindowMs) : '-', ''],
+        ["最长放开", longestWindowMs > 0 ? fmtCn(longestWindowMs) : '-', ''],
         ["待收回档位", String((summary && summary.pendingRestore) || 0), '条'],
-        ["最常命中族", summary && summary.topFamilies && summary.topFamilies.length > 0 ? summary.topFamilies.map(function (f) { return f.label + '×' + f.count; }).join('，') : '-', ''],
+        ["最常命中族", topFamilies.length > 0 ? topFamilies.map(function (f) { return f[0] + '×' + f[1]; }).join('，') : '-', ''],
       ];
       const metricsCard = h(
         'div',
@@ -984,9 +1005,21 @@ window.__ModuleLoader__.load({
       const auditCard = h(
         'div',
         { style: S.card },
-        h('div', { style: S.title }, '审计'),
-        records.length === 0
-          ? h('div', { style: S.empty }, '还没有记录。你批准一次之后，这里会出现一条。')
+        h(
+          'div',
+          { style: { display: 'flex', alignItems: 'center', gap: '10px' } },
+          h('div', { style: S.title }, '审计'),
+          h(
+            'select',
+            { value: String(rangeDays), onChange: function (event) { setRangeDays(Number(event.target.value)); }, style: Object.assign({}, S.select, { width: '110px', marginLeft: 'auto' }) },
+            h('option', { value: '7' }, '近 7 天'),
+            h('option', { value: '30' }, '近 30 天'),
+            h('option', { value: '90' }, '近 90 天'),
+            h('option', { value: '0' }, '全部'),
+          ),
+        ),
+        rows.length === 0
+          ? h('div', { style: S.empty }, '所选时间范围内还没有记录。你批准一次之后，这里会出现一条。')
           : h(
               'div',
               { style: { overflowX: 'auto', marginTop: '8px' } },
@@ -997,7 +1030,7 @@ window.__ModuleLoader__.load({
                 h(
                   'tbody',
                   null,
-                  records.map(function (record) {
+                  rows.map(function (record) {
                     const remaining = record.outcome === 'active' ? Math.max(0, record.expiresAt - nowMs) : 0;
                     const modeText = record.kind === 'sandbox-mode' ? '免打扰' : '短期授权';
                     const hitText = record.familyLabel ? '族：' + record.familyLabel : '精确';
