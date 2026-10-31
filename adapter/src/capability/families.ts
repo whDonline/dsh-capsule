@@ -83,11 +83,16 @@ export function identifyFamilies(toolName: string, args: unknown, mode?: string)
     if (!blocked && prefixList.length > 0) {
       const seen = new Set<string>();
       for (const prefix of prefixList) {
-        // 归粗：前缀族的键只到「程序」层（不再区分子命令）；高危子命令在 parseCommandPrefix 里已被拒绝。
-        const key = sha256Scope({ family: "prefix", program: prefix.program, mode: requestedMode ?? null });
+        // 混合粒度（方案 C）：
+        //   - 有子命令语义的程序（npm / git / dotnet / docker…）→ 键到「程序 + 子命令」，`npm run build` 不覆盖 `npm install`；
+        //   - 其余程序（New-Item / Get-ChildItem 等 cmdlet）→ 键只到程序，因为第二个 token 是参数而非子命令。
+        const withSub = SUBCOMMAND_PROGRAMS.has(prefix.program);
+        const sub = withSub ? prefix.sub : "";
+        const key = sha256Scope({ family: "prefix", program: prefix.program, sub, mode: requestedMode ?? null });
         if (seen.has(key)) continue;
         seen.add(key);
-        families.push({ kind: "prefix", key, label: `同程序 ${prefix.program}${requestedMode ? " → " + requestedMode : ""}` });
+        const text = withSub && sub !== "" ? `${prefix.program} ${sub}` : prefix.program;
+        families.push({ kind: "prefix", key, label: `同前缀 ${text}${requestedMode ? " → " + requestedMode : ""}` });
       }
     }
     // ④ 目录族：写操作也能复用（破坏性程序永不参与，见 DESTRUCTIVE_PROGRAMS）。

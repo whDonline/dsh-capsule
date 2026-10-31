@@ -75,7 +75,13 @@ describe("操作族识别（② 同族模式的判据）", () => {
   it("【回归】脚本里的收尾表达式不应作废整条脚本的前缀（线上实测 familyGrants=0）", () => {
     const script = "$p = Join-Path $env:USERPROFILE 'Desktop\\a'\nNew-Item -ItemType Directory -Path $p -Force | Out-Null\n\"created=\" + (Test-Path $p)";
     const prefixes = identifyFamilies("pwsh", { command: script }).filter((item) => item.kind === "prefix");
-    expect(prefixes.map((item) => item.label)).toEqual(["同程序 join-path", "同程序 new-item", "同程序 out-null"]);
+    expect(prefixes.map((item) => item.label)).toEqual(["同前缀 join-path", "同前缀 new-item", "同前缀 out-null"]);
+    // 混合粒度（方案 C）：有子命令语义的程序细分，cmdlet 只到程序
+    const keyOf = (command: string) => identifyFamilies("pwsh", { command }).find((item) => item.kind === "prefix");
+    expect(keyOf("npm run build")?.label).toBe("同前缀 npm run");
+    expect(keyOf("npm run build")?.key).not.toBe(keyOf("npm install")?.key);
+    expect(keyOf("git log")?.label).toBe("同前缀 git log");
+    expect(keyOf("New-Item -ItemType File -Path D:\\b")?.key).toBe(keyOf("New-Item -ItemType Directory -Path D:\\a")?.key);
     // 只要脚本里出现破坏性命令，整条脚本就不给任何族
     const risky = "$p = Join-Path D:\\x a\nRemove-Item $p -Force\n\"done\"";
     expect(identifyFamilies("pwsh", { command: risky })).toHaveLength(0);
