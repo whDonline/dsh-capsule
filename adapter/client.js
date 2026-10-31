@@ -956,6 +956,8 @@ window.__ModuleLoader__.load({
       const [host, setHost] = React.useState(null);
       const [guardModes, setGuardModes] = React.useState([]);
       const [escalationTools, setEscalationTools] = React.useState([]);
+      /** 时间单位：秒 / 分 / 时（只影响输入框显示，落库统一用秒） */
+      const [unit, setUnit] = React.useState('m');
       const [busy, setBusy] = React.useState(false);
       // 免打扰：从会话快照里取窗口授权还剩多久（到期后自动回落到短期授权语义）
       const [dndRemaining, setDndRemaining] = React.useState(0);
@@ -1019,7 +1021,9 @@ window.__ModuleLoader__.load({
       const off = settings.enabled === false;
       const current = off ? 'off' : mode;
       const tone = off ? COLORS.idle : mode === 'do-not-disturb' ? COLORS.warn : COLORS.ok;
-      const minutes = Math.max(1, Math.round((mode === 'do-not-disturb' ? settings.dndDurationSeconds : settings.reuseTtlSeconds) / 60));
+      const seconds = mode === 'do-not-disturb' ? settings.dndDurationSeconds : settings.reuseTtlSeconds;
+      const FACTOR = { s: 1, m: 60, h: 3600 };
+      const amount = Math.max(1, Math.round(seconds / FACTOR[unit]));
       const save = async function (patch) {
         if (!host || busy) return;
         setBusy(true);
@@ -1038,17 +1042,15 @@ window.__ModuleLoader__.load({
         }
       };
       const startWindow = async function () {
-        if (!host || busy) return;
-        const tool = Array.isArray(escalationTools) ? escalationTools[0] : '';
+        if (!host || busy || !sessionId) return;
         setBusy(true);
         try {
-          if (tool) {
-            await fetchJson(host, '/api/window', {
-              method: 'POST',
-              headers: { 'content-type': 'application/json', 'x-dsh-guard': '1' },
-              body: JSON.stringify({ sessionId: sessionId, toolName: tool, mode: settings.dndTargetMode, ttlSeconds: settings.dndDurationSeconds }),
-            });
-          }
+          // 只开时间窗，不修改沙箱档位（档位保持 DSH 原生控件里用户设定的值）
+          await fetchJson(host, '/api/dnd', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'x-dsh-guard': '1' },
+            body: JSON.stringify({ sessionId: sessionId, ttlSeconds: settings.dndDurationSeconds }),
+          });
           const cfg = await fetchJson(host, '/api/config');
           setSettings(cfg && cfg.settings ? cfg.settings : null);
         } catch (err) {
@@ -1066,11 +1068,11 @@ window.__ModuleLoader__.load({
         }
         void save({ enabled: true, mode: 'same-operation' });
       };
-      const onMinutesChange = function (event) {
+      const onAmountChange = function (event) {
         const value = Number(event.target.value);
         if (!Number.isInteger(value) || value <= 0) return;
-        const seconds = value * 60;
-        void save(mode === 'do-not-disturb' ? { dndDurationSeconds: seconds } : { reuseTtlSeconds: seconds });
+        const target = value * FACTOR[unit];
+        void save(mode === 'do-not-disturb' ? { dndDurationSeconds: target } : { reuseTtlSeconds: target });
       };
       const selectStyle = { fontSize: '12px', padding: '2px 4px', borderRadius: '6px', border: '1px solid ' + COLORS.line, background: 'transparent', color: tone, cursor: 'pointer' };
       const inputStyle = { width: '48px', fontSize: '12px', padding: '2px 4px', borderRadius: '6px', border: '1px solid ' + COLORS.line, background: 'transparent', color: COLORS.fg2 };
@@ -1087,7 +1089,16 @@ window.__ModuleLoader__.load({
         ),
         off
           ? null
-          : h('input', { type: 'number', min: '1', defaultValue: String(minutes), onBlur: onMinutesChange, style: inputStyle, title: mode === 'do-not-disturb' ? '免打扰时长（分钟）' : '复用时长（分钟）' }),
+          : h('input', { type: 'number', min: '1', defaultValue: String(amount), onBlur: onAmountChange, style: inputStyle, title: mode === 'do-not-disturb' ? '免打扰时长' : '复用时长' }),
+        off
+          ? null
+          : h(
+              'select',
+              { value: unit, onChange: function (event) { setUnit(event.target.value); }, disabled: busy, style: selectStyle, title: '时间单位' },
+              h('option', { key: 's', value: 's' }, '秒'),
+              h('option', { key: 'm', value: 'm' }, '分'),
+              h('option', { key: 'h', value: 'h' }, '时'),
+            ),
         !off && mode === 'do-not-disturb'
           ? h('span', { style: { fontSize: '11px', color: dndRemaining > 0 ? COLORS.warn : COLORS.idle } }, dndRemaining > 0 ? clockText(dndRemaining) : '已结束')
           : null,

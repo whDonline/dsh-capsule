@@ -144,6 +144,8 @@ export interface ConsoleActions {
   restoreSandbox(sessionId: string): Promise<ConsoleRestoreResult>;
   /** 有界放宽：开启免打扰窗口（唯一由页面发起的放宽动作，受 TTL 上限与沙箱档位闭集约束） */
   openWindow(request: ConsoleWindowRequest): Promise<ConsoleWindowResult>;
+  /** 免打扰时间窗：只放行审批，**不改沙箱档位**（原生档位保持用户设定值） */
+  startDnd?(sessionId: string, ttlSeconds: number): { sessionId: string; expiresAt: number };
 }
 export interface GovernanceSummary {
   leasesTotal: number;

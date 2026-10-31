@@ -227,6 +227,15 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
     throw new Error("GUARD_INSTALL_FAILED: ctx.on unavailable");
   }
   const dispose = gate.install(ctx as unknown as Parameters<UniversalGate["install"]>[0]);
+  // 免打扰时间窗：只让 gate 记一个到期时间，**不调用 setSandboxMode**
+  //（否则 DSH 原生档位会显示成 Custom——2026-10-31 实测反馈）。
+  const consoleActions = {
+    // 显式委托：GuardActions 是 class，方法在原型上，展开运算符拷不过来
+    revokeSession: (sessionId: string) => actions.revokeSession(sessionId),
+    restoreSandbox: (sessionId: string) => actions.restoreSandbox(sessionId),
+    openWindow: (request: Parameters<typeof actions.openWindow>[0]) => actions.openWindow(request),
+    startDnd: (sessionId: string, ttlSeconds: number) => ({ sessionId, expiresAt: gate.startDoNotDisturb(sessionId, ttlSeconds) }),
+  };
   // 低频结算：把「授权已失效但档位还没收回」的会话宽模式及时收回去。
   // 正确性不依赖它（安全性由 LeaseManager 实时判定），关闭它只会让回滚推迟到下次工具调用。
   const sweepIntervalMs = resolveSweepInterval(config);
@@ -243,11 +252,11 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
   // 同源治理路由（优先）：挂到 DSH Web 服务器的 /guard/…，Web GUI 面板因此与页面同源，
   // 不需要跨源请求、也不依赖额外端口。宿主没有 webServer（headless 等组合）时自动跳过。
   // 注册结果记录在 guardRouteStatus 里（GET /api/config 的 routes 字段），失败可自证原因。
-  const disposeRoutes = registerGuardWebRoutes(ctx as { get?(name: string): unknown }, govConsole, governance, { actions, sweepIntervalMs, settings, diagnostics: () => gate.diagnostics() }) ?? (() => undefined);
+  const disposeRoutes = registerGuardWebRoutes(ctx as { get?(name: string): unknown }, govConsole, governance, { actions: consoleActions, sweepIntervalMs, settings, diagnostics: () => gate.diagnostics() }) ?? (() => undefined);
   let consoleHandle: ConsoleHttpHandle | undefined;
   const consoleConfig = resolveConsoleConfig(config);
   if (consoleConfig.enabled) {
-    consoleHandle = await startConsoleServer({ console: govConsole, policy: governance, actions, sweepIntervalMs, settings, diagnostics: () => gate.diagnostics(), host: consoleConfig.host, port: consoleConfig.port, fallbackPort: consoleConfig.fallbackPort });
+    consoleHandle = await startConsoleServer({ console: govConsole, policy: governance, actions: consoleActions, sweepIntervalMs, settings, diagnostics: () => gate.diagnostics(), host: consoleConfig.host, port: consoleConfig.port, fallbackPort: consoleConfig.fallbackPort });
     process.stderr.write(`[dsh-guard] governance console: ${consoleHandle.url} (同源入口 ${GUARD_WEB_PREFIX}/, sweep=${sweepIntervalMs}ms, routes=${JSON.stringify(guardRouteStatus)})\n`);
   }
   return async () => {

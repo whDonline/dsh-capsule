@@ -45,7 +45,7 @@ export const GUARD_WRITE_HEADER = "x-dsh-guard";
 /** Guard 治理接口挂到 DSH Web 服务器上的同源前缀（面板优先走这条路径，避免跨源与额外端口）。 */
 export const GUARD_WEB_PREFIX = "/guard";
 /** 同源路径与路径映射表——同一份路由同时服务独立端口与 DSH 同源前缀，避免两套实现漂移。 */
-const ROUTES: readonly string[] = ["/", "/index.html", "/console.js", "/api/snapshot", "/api/audit", "/api/decisions", "/api/config", "/api/revoke", "/api/window"];
+const ROUTES: readonly string[] = ["/", "/index.html", "/console.js", "/api/snapshot", "/api/audit", "/api/decisions", "/api/config", "/api/revoke", "/api/window", "/api/dnd"];
 const LOOPBACK_HOSTNAMES: readonly string[] = ["127.0.0.1", "localhost", "[::1]", "::1"];
 /** 允许被跨源读取的来源——只放行本机页面（http://127.0.0.1:任意端口 / http://localhost:任意端口）。
  * 为什么需要：DSH Web GUI 运行在 http://127.0.0.1:<DSH 端口>，与独立 Console 端口不同源；
@@ -127,7 +127,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, govConso
       return;
     }
     // 写接口只接受 POST：其他方法一律 405（不要让 GET 落到「未知路径」的 404 上，误导排障）
-    if ((pathname === "/api/revoke" || pathname === "/api/window") && req.method !== "POST") {
+    if ((pathname === "/api/revoke" || pathname === "/api/window" || pathname === "/api/dnd") && req.method !== "POST") {
       sendJson(res, 405, { error: "METHOD_NOT_ALLOWED" });
       return;
     }
@@ -185,6 +185,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, govConso
     }
     if (req.method === "POST" && pathname === "/api/window") {
       await handleWindow(req, res, routeOptions.actions);
+      return;
+    }
+    if (req.method === "POST" && pathname === "/api/dnd") {
+      await handleDnd(req, res, routeOptions.actions);
       return;
     }
     sendJson(res, 405, { error: "METHOD_NOT_ALLOWED" });
@@ -650,6 +654,42 @@ export function parseWindowBody(raw: unknown): ConsoleWindowRequest | undefined 
   if (!isSandboxMode(mode)) return undefined;
   if (typeof ttlSeconds !== "number" || !Number.isInteger(ttlSeconds) || ttlSeconds <= 0) return undefined;
   return { sessionId, toolName, mode, ttlSeconds };
+}
+async function handleDnd(req: IncomingMessage, res: ServerResponse, actions: ConsoleActions | undefined): Promise<void> {
+  // 作用：开始免打扰时间窗——只放行审批，**不修改沙箱档位**（避免 DSH 原生档位变成 Custom）。
+  // 与其它写接口共用同一套闸门（自定义头 + JSON content-type + loopback 来源）。
+  if (!actions || typeof actions.startDnd !== "function") {
+    sendJson(res, 503, { error: "ACTIONS_UNAVAILABLE" });
+    return;
+  }
+  if (req.headers[GUARD_WRITE_HEADER] === undefined) {
+    sendJson(res, 403, { error: "WRITE_HEADER_REQUIRED" });
+    return;
+  }
+  const contentType = String(req.headers["content-type"] ?? "");
+  if (!contentType.toLowerCase().startsWith("application/json")) {
+    sendJson(res, 415, { error: "JSON_CONTENT_TYPE_REQUIRED" });
+    return;
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse((await readBody(req)).toString("utf8"));
+  } catch {
+    sendJson(res, 400, { error: "INVALID_JSON" });
+    return;
+  }
+  const body = raw as { sessionId?: unknown; ttlSeconds?: unknown };
+  const sessionId = typeof body?.sessionId === "string" ? body.sessionId : "";
+  const ttlSeconds = Number(body?.ttlSeconds);
+  if (sessionId.length === 0 || !Number.isInteger(ttlSeconds) || ttlSeconds <= 0) {
+    sendJson(res, 400, { error: "INVALID_BODY" });
+    return;
+  }
+  try {
+    sendJson(res, 200, actions.startDnd(sessionId, ttlSeconds));
+  } catch (err) {
+    sendJson(res, 409, { error: "DND_REJECTED", message: err instanceof Error ? err.message : String(err) });
+  }
 }
 async function handleWindow(req: IncomingMessage, res: ServerResponse, actions: ConsoleActions | undefined): Promise<void> {
   // 作用：POST /api/window —— 用户显式开启有界「免打扰窗口」。与 revoke 共用三道闸门
