@@ -267,26 +267,26 @@ describe("DSH 客户端半边（adapter/client.js）", () => {
     plugin.apply(ctx);
     return { registrations };
   }
-  it("注册对话内提示条、会话内「能力授权」tab 与设置页（前两者直接拿到当前会话 id）", () => {
+  it("注册对话内提示条、输入框模式 chip 与会话内「能力授权」tab（不再注册设置页）", () => {
     const { registrations } = registerPlugin();
-    expect(registrations.map((item) => item.slot).sort()).toEqual(["conversation.input.dock", "conversation.view", "settings.section"]);
+    expect(registrations.map((item) => item.slot).sort()).toEqual(["conversation.input.dock", "conversation.input.left", "conversation.view"]);
     const dock = registrations.find((item) => item.slot === "conversation.input.dock");
+    const chip = registrations.find((item) => item.slot === "conversation.input.left");
     const view = registrations.find((item) => item.slot === "conversation.view");
-    const settings = registrations.find((item) => item.slot === "settings.section");
     // 提示条：list 槽的 id 形态 + 排序位，紧跟在待办之后
     expect(dock?.options.id).toBe("guard");
     expect(dock?.options.order).toBe(5);
     expect(typeof dock?.component).toBe("function");
+    // 模式 chip：紧挨原生档位控件（不抢占 conversation.input.permission，避免遮蔽 DSH 自带 UI）
+    expect(chip?.options.id).toBe("guard-mode");
+    expect(typeof chip?.component).toBe("function");
     // 会话视图：第三个 tab（对话 0 / 轨迹 10 / 能力授权 20），label 就是 tab 上的文字
     expect(view?.options.id).toBe("guard");
     expect(view?.options.order).toBe(20);
     expect(view?.options.label).toBe("能力授权");
     expect(typeof view?.component).toBe("function");
-    // 设置页：全局策略（范围挡位 / TTL）放这里，跟具体会话无关，排在 DSH 自带设置页之后
-    expect(settings?.options.id).toBe("guard");
-    expect(settings?.options.order).toBe(25);
-    expect(settings?.options.label).toBe("能力授权");
-    expect(typeof settings?.component).toBe("function");
+    // 设置页不再注册：配置已全部搬到会话内「能力授权」（2026-10-31 产品决定）
+    expect(registrations.some((item) => item.slot === "settings.section")).toBe(false);
     // 组件在「还没拿到快照」时渲染为空（不占位、不报错）——数据到达后才决定显示什么
     const rendered = (dock?.component as (props: Record<string, unknown>) => FakeElement | null)({ sessionId: "session-x" });
     expect(rendered).toBeNull();

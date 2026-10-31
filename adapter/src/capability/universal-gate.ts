@@ -28,6 +28,11 @@ export interface UniversalGateDeps {
    * Guard 不识别、不记录、不签发沙箱升级授权），这样"不配置就不改变任何 DSH 语义"由构造方式保证。
    */
   sandboxGrants?: SandboxGrantManager;
+  /**
+   * 用户可见的三档设置（开关 / 同操作 / 同族 / 免打扰）。**未注入等价于始终启用**；
+   * 注入后 `enabled === false` 时所有 hook 直接透传——不签发、不提升、不改写任何状态。
+   */
+  settings?: { readonly active: boolean; readonly mode: string };
   /** 可注入时钟（默认 Date.now），保证 TTL/GC 语义可模拟时间测试 */
   now?: () => number;
 }
@@ -48,6 +53,10 @@ export class UniversalGate {
   constructor(private readonly deps: UniversalGateDeps) {
     this.now = deps.now ?? Date.now;
   }
+  /** 作用：用户开关——关闭时所有 hook 直接透传（不签发、不提升、不改写状态）。 */
+  private get active(): boolean {
+    return this.deps.settings?.active !== false;
+  }
   async handleExecute(exec: ToolExecutionLike, next: () => Promise<unknown>): Promise<unknown> {
     // 作用：tools/execute 处理器（P0-2）——DSH 的 around-dispatch 包装层，在工具体之前运行且
     // exec.arguments 完整可用。职责（严格限定，不改变任何执行结果）：
@@ -56,6 +65,7 @@ export class UniversalGate {
     //      使工具体不再触发审批（这就是"批准一次、后续自动生效"的落地方式——在不合成 approval outcome
     //      的前提下复用授权，因为提升后那次审批根本不会发生）；
     //   3. 始终 await next() 并原样返回结果，绝不改写、绝不否决。
+    if (!this.active) return await next();
     await this.settleAll();
     const grants = this.deps.sandboxGrants;
     if (grants && typeof exec?.callId === "string" && exec.callId.length > 0 && typeof exec?.name === "string" && exec.name.length > 0) {
@@ -91,6 +101,7 @@ export class UniversalGate {
     // 作用：tools/pre-execute 处理器（规格 6.2 算法）——先调 next() 获得下游原生 DSH Policy 的最终
     // PreToolDecision：deny 永远透传（Lease 不得覆盖 DENY）；allow 不制造新 Approval；只有 ask 才进入
     // Guard：命中有效 Lease → allow（复用），否则保持 ask 并在 reason 中明确告知批准将签发 Lease。
+    if (!this.active) return await next();
     this.deps.pending.gc(this.now());
     if (typeof exec?.callId !== "string" || exec.callId.length === 0 || typeof exec?.name !== "string" || exec.name.length === 0) {
       return await next();
@@ -177,6 +188,8 @@ export class UniversalGate {
     //      其返回值只经过赋值给 result 后原样返回，不存在任何改写、包装或默认值兜底；
     //   3. 本方法体内禁止出现 "allowed-once" 字面量（它只允许用于【比较】下游结果，禁止用于返回值）；
     //   4. 该不变量由 universal-gate.test.ts 的 P0-3 用例守护（含 sentinel 全等断言，覆盖四种结果）。
+    // 用户开关关闭：完全不介入，也不签发授权（纯透传，等价于未安装）。
+    if (!this.active) return await next();
     if (typeof req?.callId !== "string" || req.callId.length === 0) {
       return await next();
     }

@@ -6,13 +6,14 @@ import { PendingRegistry } from "./capability/pending.js";
 import { DEFAULT_UNIVERSAL_POLICY, PolicyResolver, type UniversalPolicyConfig } from "./capability/policy.js";
 import { ScopeResolver } from "./capability/scope-resolver.js";
 import { SandboxGrantManager, type SandboxContext } from "./capability/sandbox-grant.js";
-import type { SandboxMode } from "./capability/escalation.js";
+import { isSandboxMode, type SandboxMode } from "./capability/escalation.js";
 import { DEFAULTABLE_SCOPE_MODES, SCOPE_MODES, isScopeMode, type ScopeMode } from "./capability/scope-modes.js";
 import { UniversalGate } from "./capability/universal-gate.js";
 import { GuardActions } from "./console/actions.js";
 import { GovernanceConsole } from "./console/console-service.js";
 import { GovernancePolicy } from "./console/policy.js";
 import { createHostSessionDirectory } from "./console/session-directory.js";
+import { DEFAULT_GUARD_SETTINGS, GuardSettings, isGuardMode, type GuardMode } from "./capability/settings.js";
 import { registerGuardWebRoutes, startConsoleServer, DEFAULT_CONSOLE_HOST, DEFAULT_CONSOLE_PORT, GUARD_WEB_PREFIX, ROUTE_RETRY_DELAYS_MS, guardRouteStatus, type GuardRouteStatus, type ConsoleHttpHandle } from "./console/http-server.js";
 import type { ConsoleHttpConfig } from "./console/types.js";
 export type CapsuleHostContext = Record<string, unknown>;
@@ -59,7 +60,11 @@ function getService(ctx: CapsuleHostContext, name: string): unknown {
   }
 }
 export { AuditService, GovernanceConsole, GovernancePolicy, GuardActions, LeaseManager, MemoryLeaseStore, PendingRegistry, PolicyResolver, SandboxGrantManager, ScopeResolver, UniversalGate, createHostSessionDirectory, registerGuardWebRoutes, startConsoleServer, DEFAULT_UNIVERSAL_POLICY, DEFAULT_CONSOLE_HOST, DEFAULT_CONSOLE_PORT, DEFAULTABLE_SCOPE_MODES, GUARD_WEB_PREFIX, ROUTE_RETRY_DELAYS_MS, SCOPE_MODES, guardRouteStatus, isScopeMode, sha256Scope };
-export type { UniversalPolicyConfig, ConsoleHttpConfig, ScopeMode, ConsoleHttpHandle, GuardRouteStatus };
+export type { UniversalPolicyConfig } from "./capability/policy.js";
+export type { ScopeMode } from "./capability/scope-modes.js";
+export type { ConsoleHttpConfig } from "./console/types.js";
+export type { ConsoleHttpHandle, GuardRouteStatus } from "./console/http-server.js";
+export type { GuardMode, GuardSettingsSnapshot } from "./capability/settings.js";
 // 作用：Guard 插件完整配置——策略项（Partial<UniversalPolicyConfig>）+ Phase 4 Governance Console
 // 查看器开关（默认开启；提供授权剩余时间、审计与范围挡位配置）+ 沙箱档位低频回滚节拍。
 export interface GuardPluginConfig extends Partial<UniversalPolicyConfig> {
@@ -67,6 +72,15 @@ export interface GuardPluginConfig extends Partial<UniversalPolicyConfig> {
   /** 低频结算节拍（毫秒）：默认 30000；0 表示关闭（关闭后档位只在下次工具调用 / 用户点按钮时回收）。
    * 【不是安全机制】授权是否有效始终在读写时实时判定，本定时器只负责让「到期后档位回收」更及时。 */
   sweepIntervalMs?: number;
+  /** 用户开关的初始值（默认 true）。运行期可在「能力授权」页切换，不落盘。 */
+  modeEnabled?: boolean;
+  /** 三档范围模式的初始值：same-operation（默认）/ same-family / do-not-disturb */
+  mode?: GuardMode;
+  /** ①② 复用时长（秒）；缺省沿用 defaultTtlSeconds */
+  reuseTtlSeconds?: number;
+  /** ③ 免打扰的目标档位与时长（秒） */
+  dndTargetMode?: SandboxMode;
+  dndDurationSeconds?: number;
 }
 /** 默认低频结算节拍——多快把「已失效授权的会话宽档位」收回去（治理台会显示「待回滚」直到收回）。 */
 export const DEFAULT_SWEEP_INTERVAL_MS = 30_000;
@@ -112,6 +126,18 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
     source: "plugin-config",
   });
   const policyConfig = (): UniversalPolicyConfig => ({ ...governance.config, defaultScopePaths: deployment.defaultScopePaths });
+  // 用户可见的三档设置（开关 / 同操作 / 同族 / 免打扰）。与部署策略相互独立：
+  // 部署 enabled=false 表示"不装配"，这里的 enabled=false 表示"装好了但用户关掉了"。
+  const settings = new GuardSettings({
+    initial: {
+      enabled: config?.modeEnabled ?? DEFAULT_GUARD_SETTINGS.enabled,
+      mode: isGuardMode(config?.mode) ? config.mode : DEFAULT_GUARD_SETTINGS.mode,
+      reuseTtlSeconds: config?.reuseTtlSeconds ?? governance.current.defaultTtlSeconds,
+      dndTargetMode: isSandboxMode(config?.dndTargetMode) ? config.dndTargetMode : DEFAULT_GUARD_SETTINGS.dndTargetMode,
+      dndDurationSeconds: config?.dndDurationSeconds ?? DEFAULT_GUARD_SETTINGS.dndDurationSeconds,
+    },
+    maxTtlSeconds: governance.current.maxTtlSeconds,
+  });
   const leases = new LeaseManager(new MemoryLeaseStore());
   const audit = new AuditService();
   // P0-2：沙箱模式有界授权。宿主服务缺失时该链路自动失效（Fail Closed：不提升 = 不越权），
@@ -125,6 +151,8 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
     pending: new PendingRegistry(),
     audit,
     sandboxGrants,
+    // 用户开关关闭时所有 hook 直接透传（不签发、不提升、不改写任何状态）
+    settings,
   });
   const govConsole = new GovernanceConsole({
     audit,
@@ -181,11 +209,11 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
   // 同源治理路由（优先）：挂到 DSH Web 服务器的 /guard/…，Web GUI 面板因此与页面同源，
   // 不需要跨源请求、也不依赖额外端口。宿主没有 webServer（headless 等组合）时自动跳过。
   // 注册结果记录在 guardRouteStatus 里（GET /api/config 的 routes 字段），失败可自证原因。
-  const disposeRoutes = registerGuardWebRoutes(ctx as { get?(name: string): unknown }, govConsole, governance, { actions, sweepIntervalMs }) ?? (() => undefined);
+  const disposeRoutes = registerGuardWebRoutes(ctx as { get?(name: string): unknown }, govConsole, governance, { actions, sweepIntervalMs, settings }) ?? (() => undefined);
   let consoleHandle: ConsoleHttpHandle | undefined;
   const consoleConfig = resolveConsoleConfig(config);
   if (consoleConfig.enabled) {
-    consoleHandle = await startConsoleServer({ console: govConsole, policy: governance, actions, sweepIntervalMs, host: consoleConfig.host, port: consoleConfig.port, fallbackPort: consoleConfig.fallbackPort });
+    consoleHandle = await startConsoleServer({ console: govConsole, policy: governance, actions, sweepIntervalMs, settings, host: consoleConfig.host, port: consoleConfig.port, fallbackPort: consoleConfig.fallbackPort });
     process.stderr.write(`[dsh-guard] governance console: ${consoleHandle.url} (同源入口 ${GUARD_WEB_PREFIX}/, sweep=${sweepIntervalMs}ms, routes=${JSON.stringify(guardRouteStatus)})\n`);
   }
   return async () => {

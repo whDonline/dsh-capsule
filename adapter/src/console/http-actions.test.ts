@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { AuditService } from "../audit/audit-service.js";
 import { LeaseManager } from "../capability/lease-manager.js";
 import { MemoryLeaseStore } from "../capability/lease-store.js";
+import { GuardSettings } from "../capability/settings.js";
 import { GovernanceConsole } from "./console-service.js";
 import { startConsoleServer, type ConsoleHttpHandle } from "./http-server.js";
 function makeConsole(): GovernanceConsole {
@@ -21,8 +22,8 @@ function makeActions() {
   }));
   return { revokeSession, restoreSandbox, openWindow };
 }
-async function withServer(actions: ReturnType<typeof makeActions> | undefined, run: (handle: ConsoleHttpHandle) => Promise<void>): Promise<void> {
-  const handle = await startConsoleServer({ console: makeConsole(), actions, port: 0 });
+async function withServer(actions: ReturnType<typeof makeActions> | undefined, run: (handle: ConsoleHttpHandle) => Promise<void>, settings?: GuardSettings): Promise<void> {
+  const handle = await startConsoleServer({ console: makeConsole(), actions, port: 0, settings });
   try {
     await run(handle);
   } finally {
@@ -30,6 +31,34 @@ async function withServer(actions: ReturnType<typeof makeActions> | undefined, r
   }
 }
 const JSON_HEADERS = { "content-type": "application/json", "x-dsh-guard": "1" };
+describe("用户可见的三档设置（GET/PATCH /api/config 的 settings）", () => {
+  it("GET 返回 settings 与模式目录（含中文名，前端不再自己映射）", async () => {
+    await withServer(undefined, async (handle) => {
+      const body = (await (await fetch(`${handle.url}api/config`)).json()) as { settings: { enabled: boolean; mode: string; modeLabel: string }; catalog: { guardModes: { id: string; label: string }[] } };
+      expect(body.settings).toMatchObject({ enabled: true, mode: "same-operation", modeLabel: "同操作模式" });
+      expect(body.catalog.guardModes.map((item) => item.id)).toEqual(["same-operation", "same-family", "do-not-disturb"]);
+    }, new GuardSettings({ maxTtlSeconds: 1800 }));
+  });
+  it("PATCH settings 生效；非法值 → 409 且不改动", async () => {
+    const settings = new GuardSettings({ maxTtlSeconds: 1800 });
+    await withServer(undefined, async (handle) => {
+      const ok = await fetch(`${handle.url}api/config`, { method: "PATCH", headers: JSON_HEADERS, body: JSON.stringify({ settings: { mode: "same-family", reuseTtlSeconds: 120 } }) });
+      expect(ok.status).toBe(200);
+      expect(settings.snapshot()).toMatchObject({ mode: "same-family", reuseTtlSeconds: 120 });
+      const bad = await fetch(`${handle.url}api/config`, { method: "PATCH", headers: JSON_HEADERS, body: JSON.stringify({ settings: { reuseTtlSeconds: 1801 } }) });
+      expect(bad.status).toBe(409);
+      expect(settings.snapshot().reuseTtlSeconds).toBe(120);
+      const unknown = await fetch(`${handle.url}api/config`, { method: "PATCH", headers: JSON_HEADERS, body: JSON.stringify({ settings: { rules: [] } }) });
+      expect(unknown.status).toBe(400);
+    }, settings);
+  });
+  it("没有注入 settings 时 PATCH 返回 503（Fail Closed）", async () => {
+    await withServer(undefined, async (handle) => {
+      const res = await fetch(`${handle.url}api/config`, { method: "PATCH", headers: JSON_HEADERS, body: JSON.stringify({ settings: { enabled: false } }) });
+      expect(res.status).toBe(503);
+    });
+  });
+});
 describe("治理台收缩型动作 HTTP 接口（POST /api/revoke）", () => {
   it("缺少自定义头 → 403（跨源预检闸门，防止 CSRF）", async () => {
     const actions = makeActions();

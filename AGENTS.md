@@ -36,7 +36,7 @@ DSH Capability Guard（TS 插件，横切）
    │     ├── approval/request：始终 next() 委派给人/机 answerer；allowed-once → 签发 Lease + setSandboxMode 提升会话模式 + 记回滚点
    │     └── tools/result：清理 pending + 记录结果（沙箱模式回滚与 Lease 回收在此协同）
    ├── LeaseManager（MemoryLeaseStore，接口抽象可换持久化）
-   └── Console（会话内提示条 / 能力授权 tab / 设置页 + 授权决策记录）
+   └── Console（提示条 / 输入框模式 chip / 能力授权 tab：配置 + 状态 + 审计 + 统计）
 ```
 
 - Legacy 层（旧 Python Runtime + Docker Capsule + UDS）：**已按项目决策整体移除**，禁止以任何理由恢复（无 `runtime.mode = isolated`，无 Phase 5）。
@@ -108,8 +108,8 @@ adapter/src/
 ├── audit/                   # types / audit-service
 └── console/                 # types / policy（运行期挡位与 TTL）/ console-service / decisions（授权决策记录）
                              #   / session-directory / actions（收缩 + 有界放宽）/ http-server / console-ui（独立页面）
-adapter/client.js            # DSH 客户端半边：对话内提示条（conversation.input.dock）+ 会话内「能力授权」tab（conversation.view）
-                             #   + 设置页（settings.section）
+adapter/client.js            # DSH 客户端半边：对话内提示条（conversation.input.dock）+ 输入框模式 chip
+                             #   （conversation.input.left）+ 会话内「能力授权」tab（conversation.view）
 scripts/smoke-console.mjs    # 本地手工冒烟（示例数据 + 独立治理页面）
 assets/                      # README 用示意图（结构示意，非截图）
 ```
@@ -165,11 +165,11 @@ assets/                      # README 用示意图（结构示意，非截图）
     独立 HTTP 页面保留，仅作排障与接口验证，不作为面向使用者的入口。
     提示条与 tab 都必须遵守同一条规则：**没有值得说的状态也要给一行**（无授权时显示"本会话没有临时放开的操作"，
     否则用户会认为功能不存在——2026-10-31 实测反馈）。
-11. **全局策略配置挂在 DSH 设置页 `settings.section`（2026-10-31）**：`id=guard, order=25, label=能力授权`，
-    该槽位是 list + `replaceRisk: none`，现有 general(0)/models(10)/plugins(15)/agent-presets(20)。
-    页面只写 `defaultScope` / `defaultTtlSeconds` / `maxTtlSeconds` 三项（与 `PATCH /api/config` 完全一致），
-    `enabled` / `rules` / `defaultScopePaths` / `sweepIntervalMs` 只读展示并注明"去 profile 改"。
-    **范围挡位与 TTL 绝不能放进会话 tab**：它们是全局策略，放进某个会话会误导成"只对这个会话生效"。
+11. **用户配置已搬到会话内「能力授权」tab（2026-10-31 改定）**：`settings.section` **不再注册**
+    （放在设置页会误导成"全局另有入口"，且与产品决定冲突）。配置项收敛为：`enabled`（用户开关）+
+    `mode`（三档）+ `reuseTtlSeconds` + `dndTargetMode` / `dndDurationSeconds`，全部经
+    `PATCH /api/config { settings: {...} }` 写入（与 `capability/settings.ts` 的 `GuardSettings` 一一对应，校验 Fail Closed）。
+    部署配置（`enabled` / `rules` / `defaultScopePaths` / `sweepIntervalMs`）仍然只能改 profile，页面只读。
 12. **授权决策记录才是面向人的审计面（2026-10-31）**：`console/decisions.ts` 是**纯函数**，把 Lease + 审计事件
     折叠成「一条授权一份记录」（批准了什么 → 复用几次 → 权限级别效果 → 怎么结束），由 `GET /api/decisions`
     与会话内 tab 共用；`PASSTHROUGH_*` / `TOOL_*` 属遥测，默认折叠在「原始事件（排障用）」里，
@@ -177,11 +177,18 @@ assets/                      # README 用示意图（结构示意，非截图）
     它是**价值指标**（用户少点了几次批准），不是安全指标，不得用于任何权限判定。
 13. **文案只有一份来源（2026-10-31，C 类收敛）**：审计决策的 id/类型/中文名在 `audit/catalog.ts`
     （`AUDIT_DECISIONS` / `AuditDecision` / `AUDIT_DECISION_LABELS`），沙箱档位中文名在
-    `capability/escalation.ts`（`SANDBOX_MODE_LABELS` / `sandboxModeLabel`）。
-    接口负责把**结果文本**下发：`/api/config.catalog`（决策目录 + 沙箱档位目录）、
-    `/api/audit` 的 `decisionLabel`、`/api/snapshot` 的 `currentModeText`/`baselineModeText`/`targetModeText`。
-    **前端（`client.js` / `console-ui.ts`）禁止再维护任何决策或档位映射表**——新增一个 decision 只应改
-    `catalog.ts` 一处；历史缺陷正是"加一个决策要改三个文件，漏一处就静默不显示"。
+    `capability/escalation.ts`（`SANDBOX_MODE_LABELS` / `sandboxModeLabel`），三档模式中文名与说明在
+    `capability/settings.ts`（`GUARD_MODE_LABELS` / `GUARD_MODE_SUMMARIES`）。
+    接口负责把**结果文本**下发：`/api/config.catalog`（决策目录 + 沙箱档位目录 + 三档目录）、
+    `/api/config.settings.modeLabel`、`/api/audit` 的 `decisionLabel`、
+    `/api/snapshot` 的 `currentModeText`/`baselineModeText`/`targetModeText`。
+    **前端（`client.js` / `console-ui.ts`）禁止再维护任何决策、档位或模式的映射表**——新增一项只应改对应 catalog；
+    历史缺陷正是"加一个决策要改三个文件，漏一处就静默不显示"。
+14. **三档范围模式（2026-10-31 产品定稿，P1 已落配置层）**：
+    `same-operation`（默认：工具 + 参数去掉 justification + 目标档位完全一致）/ `same-family`（命中操作族）/
+    `do-not-disturb`（整个会话提升到目标档位，到期自动回滚并回到 ①）。
+    **①② 只改变"问不问"，绝不改变沙箱档位**；只有 ③ 会写档位，且必须由用户点「开始免打扰」才生效（选中配置不算）。
+    `enabled=false`（用户开关关闭）时所有 hook 直接透传：不记 pending、不签发、不提升、不写审计。
 
 ## 7.2 当前验收基线
 

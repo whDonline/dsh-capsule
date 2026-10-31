@@ -13,6 +13,8 @@ import { SCOPE_MODES, DEFAULTABLE_SCOPE_MODES, isScopeMode, type ScopeMode } fro
 import { isSandboxMode, SANDBOX_MODE_LABELS, SANDBOX_MODES } from "../capability/escalation.js";
 import { CONSOLE_HTML, CONSOLE_CLIENT_JS } from "./console-ui.js";
 import { GovernancePolicy, type ConsolePolicySnapshot } from "./policy.js";
+import type { GuardSettings } from "../capability/settings.js";
+import { GUARD_MODE_LABELS, GUARD_MODES, GUARD_MODE_SUMMARIES } from "../capability/settings.js";
 import type { DecisionQuery, GovernanceConsole } from "./console-service.js";
 import type { ConsoleActions, ConsoleAuditQuery, ConsoleWindowRequest } from "./types.js";
 export interface ConsoleHttpOptions {
@@ -23,6 +25,8 @@ export interface ConsoleHttpOptions {
   actions?: ConsoleActions;
   /** 档位自动回滚节拍（毫秒，0 = 关闭）——只用于在页面上如实说明「多久内会自动回滚」 */
   sweepIntervalMs?: number;
+  /** 用户可见的三档设置（开关 / 模式 / 时长）；未注入时 /api/config 不返回 settings */
+  settings?: GuardSettings;
   host?: string;
   port?: number;
   /** 端口被占用时是否回退到系统分配的随机端口（默认 true；false 时启动失败直接抛错） */
@@ -73,7 +77,7 @@ export async function startConsoleServer(options: ConsoleHttpOptions): Promise<C
 function listen(govConsole: GovernanceConsole, options: ConsoleHttpOptions, host: string, port: number, allowedHosts: ReadonlySet<string>): Promise<ConsoleHttpHandle> {
   // 作用：真正监听端口——把请求交给 handleRequest，并在 listen 成功后把实际端口与访问地址一并返回
   const server: Server = createServer((req, res) => {
-    void handleRequest(req, res, govConsole, options.policy, allowedHosts, "", { actions: options.actions, sweepIntervalMs: options.sweepIntervalMs });
+    void handleRequest(req, res, govConsole, options.policy, allowedHosts, "", { actions: options.actions, sweepIntervalMs: options.sweepIntervalMs, settings: options.settings });
   });
   return new Promise<ConsoleHttpHandle>((resolve, reject) => {
     server.once("error", reject);
@@ -170,7 +174,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, govConso
       return;
     }
     if (req.method === "PATCH" && pathname === "/api/config") {
-      await handleConfigPatch(req, res, policy);
+      await handleConfigPatch(req, res, policy, routeOptions.settings);
       return;
     }
     if (req.method === "POST" && pathname === "/api/revoke") {
@@ -369,6 +373,8 @@ export interface CapsuleHostContextLike {
 export interface ConsoleRouteOptions {
   actions?: ConsoleActions;
   sweepIntervalMs?: number;
+  /** 用户可见的三档设置（开关 / 模式 / 时长）；未注入时 /api/config 不返回 settings 字段 */
+  settings?: GuardSettings;
 }
 function getHostService(hostCtx: CapsuleHostContextLike, name: string): unknown {
   // 作用：按 cordis 方式解析宿主服务（只走 ctx.get，缺失返回 undefined，绝不抛错）
@@ -380,10 +386,10 @@ function getHostService(hostCtx: CapsuleHostContextLike, name: string): unknown 
     return undefined;
   }
 }
-async function handleConfigPatch(req: IncomingMessage, res: ServerResponse, policy: GovernancePolicy | undefined): Promise<void> {
+async function handleConfigPatch(req: IncomingMessage, res: ServerResponse, policy: GovernancePolicy | undefined, settings: GuardSettings | undefined): Promise<void> {
   // 作用：运行期策略写接口——三重闸门：① 自定义头（强制跨源预检，CSRF 防护）；
   // ② content-type 必须是 application/json；③ 策略源必须注入。任一不满足即拒绝。
-  if (!policy) {
+  if (!policy && !settings) {
     sendJson(res, 503, { error: "POLICY_READONLY" });
     return;
   }
@@ -407,14 +413,50 @@ async function handleConfigPatch(req: IncomingMessage, res: ServerResponse, poli
     sendJson(res, 400, { error: "INVALID_BODY" });
     return;
   }
-  const patch = body as { defaultScope?: unknown; defaultTtlSeconds?: unknown; maxTtlSeconds?: unknown };
-  const allowedKeys = new Set(["defaultScope", "defaultTtlSeconds", "maxTtlSeconds"]);
+  const patch = body as { defaultScope?: unknown; defaultTtlSeconds?: unknown; maxTtlSeconds?: unknown; settings?: unknown };
+  const allowedKeys = new Set(["defaultScope", "defaultTtlSeconds", "maxTtlSeconds", "settings"]);
   for (const key of Object.keys(patch)) {
     if (!allowedKeys.has(key)) {
       // 明确拒绝 enabled / rules 等部署配置项：治理页面无权开关 Guard，也无权新增授权规则
       sendJson(res, 400, { error: "IMMUTABLE_FIELD", field: key });
       return;
     }
+  }
+  // 用户可见设置（开关 / 三档 / 时长）：独立于部署策略，校验依然 Fail Closed
+  if (patch.settings !== undefined) {
+    if (typeof patch.settings !== "object" || patch.settings === null || Array.isArray(patch.settings)) {
+      sendJson(res, 400, { error: "INVALID_BODY" });
+      return;
+    }
+    if (!settings) {
+      sendJson(res, 503, { error: "POLICY_READONLY" });
+      return;
+    }
+    const raw = patch.settings as Record<string, unknown>;
+    const settingsKeys = new Set(["enabled", "mode", "reuseTtlSeconds", "dndTargetMode", "dndDurationSeconds"]);
+    for (const key of Object.keys(raw)) {
+      if (!settingsKeys.has(key)) {
+        sendJson(res, 400, { error: "IMMUTABLE_FIELD", field: key });
+        return;
+      }
+    }
+    try {
+      const next = settings.update({
+        enabled: raw.enabled as boolean | undefined,
+        mode: raw.mode as never,
+        reuseTtlSeconds: raw.reuseTtlSeconds as number | undefined,
+        dndTargetMode: raw.dndTargetMode as never,
+        dndDurationSeconds: raw.dndDurationSeconds as number | undefined,
+      });
+      sendJson(res, 200, { settings: next });
+    } catch (err) {
+      sendJson(res, 409, { error: "SETTINGS_REJECTED", message: err instanceof Error ? err.message : String(err) });
+    }
+    return;
+  }
+  if (!policy) {
+    sendJson(res, 503, { error: "POLICY_READONLY" });
+    return;
   }
   if (patch.defaultScope !== undefined) {
     if (!isScopeMode(patch.defaultScope) || !DEFAULTABLE_SCOPE_MODES.includes(patch.defaultScope)) {
@@ -454,11 +496,17 @@ function policyDocument(policy: GovernancePolicy | undefined, routeOptions: Cons
   const sandboxModes = SANDBOX_MODES.map((mode) => ({ id: mode, label: SANDBOX_MODE_LABELS[mode] }));
   // 审计决策目录：前端不再自己维护决策 id + 中文名（唯一来源 audit/catalog.ts）
   const decisions = AUDIT_DECISIONS.map((id) => ({ id, label: AUDIT_DECISION_LABELS[id] }));
-  const catalog = { sandboxModes, decisions };
+  // 三档模式目录：前端不再自己维护模式中文名与说明（唯一来源 capability/settings.ts）
+  const guardModes = GUARD_MODES.map((id) => ({ id, label: GUARD_MODE_LABELS[id], summary: GUARD_MODE_SUMMARIES[id] }));
+  const catalog = { sandboxModes, decisions, guardModes };
+  const settingsSnapshot = routeOptions.settings?.snapshot();
+  const settings = settingsSnapshot
+    ? { ...settingsSnapshot, modeLabel: GUARD_MODE_LABELS[settingsSnapshot.mode], modeSummary: GUARD_MODE_SUMMARIES[settingsSnapshot.mode] }
+    : undefined;
   if (!policy) {
-    return { policy: undefined, modes: modeCatalog(), catalog, writable: [], immutable: ["enabled", "rules"], routes, actions, sweep };
+    return { policy: undefined, modes: modeCatalog(), catalog, settings, writable: [], immutable: ["enabled", "rules"], routes, actions, sweep };
   }
-  return { policy: policy.snapshot(), modes: modeCatalog(), catalog, writable: ["defaultScope", "defaultTtlSeconds", "maxTtlSeconds"], immutable: ["enabled", "rules"], routes, actions, sweep };
+  return { policy: policy.snapshot(), modes: modeCatalog(), catalog, settings, writable: ["defaultScope", "defaultTtlSeconds", "maxTtlSeconds"], immutable: ["enabled", "rules"], routes, actions, sweep };
 }
 function modeCatalog(): unknown {
   // 作用：挡位目录投影——供前端渲染下拉框；defaultable 标记哪些挡位允许作为默认值（tool 不允许）

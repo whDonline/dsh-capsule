@@ -30,7 +30,6 @@ window.__ModuleLoader__.load({
     const DOCK_POLL_MS = 2000;
     const DOCK_ORDER = 5;
     const VIEW_ORDER = 20;
-    const SETTINGS_ORDER = 25;
     const DONE_VISIBLE_MS = 15000;
     const AUDIT_LIMIT = 20;
     const probeCache = { host: null };
@@ -725,6 +724,162 @@ window.__ModuleLoader__.load({
         winMsg ? h('div', { style: S.note }, winMsg) : null,
       );
 
+      // ---- ① 配置区：开关 + 三档 + 时长/目标档位（唯一的用户入口；不再放设置页）----
+      const guardSettings = config && config.settings ? config.settings : null;
+      const guardModes = config && config.catalog && Array.isArray(config.catalog.guardModes) ? config.catalog.guardModes : [];
+      const saveSettings = async function (patch) {
+        if (!host || !guardSettings) {
+          setMessage('治理接口不可达，暂时无法保存');
+          return;
+        }
+        try {
+          await fetchJson(host, '/api/config', {
+            method: 'PATCH',
+            headers: { 'content-type': 'application/json', 'x-dsh-guard': '1' },
+            body: JSON.stringify({ settings: patch }),
+          });
+          const cfg = await fetchJson(host, '/api/config');
+          setConfig(cfg);
+          setMessage('设置已保存');
+        } catch (err) {
+          setMessage('保存失败：' + (err && err.message ? err.message : String(err)));
+        }
+      };
+      const startDnd = async function () {
+        if (!host || !guardSettings) return;
+        const tool = escalationTools[0];
+        if (!tool) {
+          setMessage('当前配置里没有可作为放宽入口的工具，免打扰无法开启');
+          return;
+        }
+        const text =
+          '接下来 ' + Math.round(guardSettings.dndDurationSeconds / 60) + ' 分钟，本会话的权限级别会提升到「' +
+          windowModeLabel(guardSettings.dndTargetMode) + '」，期间不再询问你。到期会自动回滚，也可以随时提前结束。确定开始？';
+        if (typeof window !== 'undefined' && typeof window.confirm === 'function' && !window.confirm(text)) return;
+        try {
+          await fetchJson(host, '/api/window', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'x-dsh-guard': '1' },
+            body: JSON.stringify({ sessionId: sessionId, toolName: tool, mode: guardSettings.dndTargetMode, ttlSeconds: guardSettings.dndDurationSeconds }),
+          });
+          setMessage('免打扰已开始');
+          const snap = await fetchJson(host, '/api/snapshot?session=' + encodeURIComponent(sessionId));
+          setSnapshot(snap);
+        } catch (err) {
+          setMessage('开启失败：' + (err && err.message ? err.message : String(err)));
+        }
+      };
+      const dndTargets = windowModes;
+      const modeCard = h(
+        'div',
+        { style: S.card },
+        h('div', { style: S.title }, '能力授权设置'),
+        h('div', { style: S.note }, '对所有会话生效。关闭后本插件完全不介入，审批恢复 DSH 原生行为。'),
+        guardSettings === null
+          ? h('div', { style: S.empty }, '设置暂不可用（治理接口未就绪）')
+          : h(
+              'div',
+              { style: { marginTop: '10px' } },
+              h(
+                'label',
+                { style: { display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' } },
+                h('input', { type: 'checkbox', checked: guardSettings.enabled !== false, onChange: function (e) { void saveSettings({ enabled: !!e.target.checked }); } }),
+                h('span', null, guardSettings.enabled !== false ? '已启用' : '已关闭（不介入任何审批）'),
+              ),
+              h(
+                'div',
+                { style: { marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '8px' } },
+                (guardModes.length > 0 ? guardModes : [{ id: guardSettings.mode, label: guardSettings.modeLabel || guardSettings.mode, summary: '' }]).map(function (item) {
+                  return h(
+                    'label',
+                    { key: item.id, style: { display: 'flex', alignItems: 'flex-start', gap: '8px', cursor: 'pointer' } },
+                    h('input', {
+                      type: 'radio',
+                      name: 'guard-mode',
+                      checked: guardSettings.mode === item.id,
+                      disabled: guardSettings.enabled === false,
+                      onChange: function () { void saveSettings({ mode: item.id }); },
+                    }),
+                    h(
+                      'span',
+                      null,
+                      h('span', { style: { fontWeight: '600' } }, item.label),
+                      item.summary ? h('span', { style: Object.assign({}, S.note, { display: 'block' }) }, item.summary) : null,
+                    ),
+                  );
+                }),
+              ),
+              guardSettings.mode === 'do-not-disturb'
+                ? h(
+                    'div',
+                    { style: { marginTop: '12px', display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' } },
+                    h('span', { style: S.key }, '目标档位'),
+                    h(
+                      'select',
+                      { value: guardSettings.dndTargetMode, style: S.select, onChange: function (e) { void saveSettings({ dndTargetMode: e.target.value }); } },
+                      dndTargets.map(function (item) {
+                        return h('option', { key: item.id, value: item.id }, item.label);
+                      }),
+                    ),
+                    h('span', { style: S.key }, '时长（秒）'),
+                    h('input', {
+                      type: 'number',
+                      min: '1',
+                      defaultValue: String(guardSettings.dndDurationSeconds),
+                      style: Object.assign({}, S.select, { width: '90px' }),
+                      onBlur: function (e) {
+                        const value = Number(e.target.value);
+                        if (Number.isInteger(value) && value > 0 && value !== guardSettings.dndDurationSeconds) void saveSettings({ dndDurationSeconds: value });
+                      },
+                    }),
+                    h('button', { type: 'button', style: S.btn, disabled: guardSettings.enabled === false, onClick: function () { void startDnd(); } }, '开始免打扰'),
+                  )
+                : h(
+                    'div',
+                    { style: { marginTop: '12px', display: 'flex', gap: '8px', alignItems: 'center' } },
+                    h('span', { style: S.key }, '复用时长（秒）'),
+                    h('input', {
+                      type: 'number',
+                      min: '1',
+                      defaultValue: String(guardSettings.reuseTtlSeconds),
+                      style: Object.assign({}, S.select, { width: '90px' }),
+                      onBlur: function (e) {
+                        const value = Number(e.target.value);
+                        if (Number.isInteger(value) && value > 0 && value !== guardSettings.reuseTtlSeconds) void saveSettings({ reuseTtlSeconds: value });
+                      },
+                    }),
+                  ),
+            ),
+      );
+
+      // ---- ④ 统计区：复用次数等价值指标 ----
+      const stats = view.stats || null;
+      const statsCard = stats
+        ? h(
+            'div',
+            { style: S.card },
+            h('div', { style: S.title }, '统计（本会话）'),
+            h(
+              'div',
+              { style: { display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: '10px', marginTop: '8px' } },
+              [
+                ['少点批准', stats.savedApprovals + ' 次'],
+                ['授权总数', String(stats.total)],
+                ['仍可复用', String(stats.active)],
+                ['待收回档位', String(stats.pendingRestore)],
+              ].map(function (pair) {
+                return h(
+                  'div',
+                  { key: pair[0], style: { padding: '10px', borderRadius: '8px', background: COLORS.surface2 || 'rgba(0,0,0,0.03)' } },
+                  h('div', { style: S.note }, pair[0]),
+                  h('div', { style: { fontSize: '18px', fontWeight: '600' } }, pair[1]),
+                );
+              }),
+            ),
+            stats.longestWindowMs > 0 ? h('div', { style: Object.assign({}, S.note, { marginTop: '8px' }) }, '最长一次放开：' + fmtCn(stats.longestWindowMs)) : null,
+          )
+        : null;
+
       // ---- 授权决策日志（一条授权一份记录）----
       const records = decisions && Array.isArray(decisions.records) ? decisions.records : [];
       const summary = decisions && decisions.summary ? decisions.summary : null;
@@ -838,200 +993,58 @@ window.__ModuleLoader__.load({
           : null,
       );
 
-      return h('div', { style: S.page }, h('div', { style: S.wrap }, header, granted, h('div', null, actions), windowCard, recordCard, details, rawCard));
+      return h('div', { style: S.page }, h('div', { style: S.wrap }, modeCard, header, statsCard, granted, h('div', null, actions), windowCard, recordCard, details, rawCard));
     }
 
-    // ---------------- 设置页：范围挡位与 TTL（全局策略） ----------------
-    /** 作用：DSH 设置 →「能力授权」页。这里放的是**全局**策略（默认范围挡位、TTL 上下限），
-     * 不放进会话 tab——同一个值影响所有会话，放进某个会话里会误导成"只对这个会话生效"。
-     * 只能改三项：defaultScope / defaultTtlSeconds / maxTtlSeconds（与 PATCH /api/config 完全一致）；
-     * enabled、rules、defaultScopePaths、sweepIntervalMs 属部署配置，页面只读展示并说明去哪改。 */
-    function GuardSettingsSection() {
-      const [config, setConfig] = React.useState(null);
-      const [host, setHost] = React.useState(null);
-      const [scope, setScope] = React.useState('');
-      const [ttlDefault, setTtlDefault] = React.useState('');
-      const [ttlMax, setTtlMax] = React.useState('');
-      const [saving, setSaving] = React.useState('');
-      const [message, setMessage] = React.useState('');
-
-      const apply = function (body) {
-        setConfig(body);
-        const policy = body && body.policy ? body.policy : null;
-        if (policy) {
-          setScope(policy.defaultScope);
-          setTtlDefault(String(policy.defaultTtlSeconds));
-          setTtlMax(String(policy.maxTtlSeconds));
-        }
-      };
-
-      React.useEffect(function () {
-        let alive = true;
-        const load = async function () {
-          try {
-            const base = await probeConsoleHost();
-            if (!alive || !base) return;
-            const body = await fetchJson(base, '/api/config');
-            if (!alive) return;
-            setHost(base);
-            apply(body);
-          } catch (err) {
-            if (alive) setMessage('治理接口暂时不可达');
-          }
-        };
-        void load();
-        return function () {
-          alive = false;
-        };
-      }, []);
-
-      const patch = async function (payload, key) {
-        if (saving || !host) return;
-        setSaving(key);
-        setMessage('');
-        try {
-          const body = await fetchJson(host, '/api/config', {
-            method: 'PATCH',
-            headers: { 'content-type': 'application/json', 'x-dsh-guard': '1' },
-            body: JSON.stringify(payload),
-          });
-          apply(body);
-          setMessage('已生效（修订号 ' + (body.policy ? body.policy.revision : '?') + '）');
-        } catch (err) {
-          setMessage('未应用：' + (err && err.message ? err.message : String(err)));
-        } finally {
-          setSaving('');
-        }
-      };
-
-      if (!config) {
-        return h('div', { style: S.page }, h('div', { style: S.wrap }, h('div', { style: S.empty }, message || '正在读取配置…')));
-      }
-      const policy = config.policy || null;
-      const modes = Array.isArray(config.modes) ? config.modes : [];
-      const rules = policy && Array.isArray(policy.rules) ? policy.rules : [];
-      const current = modes.find(function (mode) {
-        return mode.id === scope;
-      });
-      const ttlNumber = function (value) {
-        const parsed = Number(value);
-        return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
-      };
-
-      const scopeCard = h(
-        'div',
-        { style: S.card },
-        h('div', { style: S.title }, '默认范围挡位'),
-        h('div', { style: S.note }, '决定「你批准一次」之后，同一个工具在多大范围内可以不用再问。只影响之后新签发的授权，不会扩大已经存在的授权。'),
-        h(
-          'div',
-          { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap', marginTop: '10px' } },
-          h(
-            'select',
-            {
-              value: scope,
-              onChange: function (event) {
-                setScope(event.target.value);
-              },
-              style: { font: 'inherit', fontSize: '12.5px', padding: '5px 8px', borderRadius: '6px', border: '1px solid ' + COLORS.line2, background: 'transparent', color: COLORS.fg },
-            },
-            modes.map(function (mode) {
-              return h('option', { key: mode.id, value: mode.id, disabled: !mode.defaultable }, mode.label + (mode.defaultable ? '' : '（不能作为默认值）'));
-            }),
-          ),
-          h(
-            'button',
-            { type: 'button', style: S.btn, disabled: saving !== '', onClick: function () { void patch({ defaultScope: scope }, 'scope'); } },
-            saving === 'scope' ? '应用中…' : '应用挡位',
-          ),
-        ),
-        current
-          ? h(
-              'div',
-              { style: { marginTop: '8px', fontSize: '12px', color: COLORS.fg2 } },
-              current.summary + (current.risk === 'wide' || current.risk === 'escalation' ? '（范围较宽，请谨慎）' : ''),
-            )
-          : null,
+    /** 作用：输入框工具栏左侧的模式 chip（conversation.input.left）——只显示当前模式，不抢原生档位控件。
+     * ① 显示「同操作模式」、② 显示「同族模式」、③ 显示「免打扰模式」；关闭时显示「已关闭」。 */
+    function GuardModeChip(props) {
+      const sessionId = props && props.sessionId ? String(props.sessionId) : '';
+      const [settings, setSettings] = React.useState(null);
+      const [reachable, setReachable] = React.useState(true);
+      React.useEffect(
+        function () {
+          let alive = true;
+          const load = async function () {
+            try {
+              const base = await probeConsoleHost();
+              if (!alive) return;
+              if (!base) {
+                setReachable(false);
+                return;
+              }
+              const cfg = await fetchJson(base, '/api/config');
+              if (!alive) return;
+              setSettings(cfg && cfg.settings ? cfg.settings : null);
+              setReachable(true);
+            } catch (err) {
+              if (alive) setReachable(false);
+            }
+          };
+          void load();
+          const timer = setInterval(function () {
+            void load();
+          }, DOCK_POLL_MS);
+          return function () {
+            alive = false;
+            clearInterval(timer);
+          };
+        },
+        [sessionId],
       );
-
-      const ttlCard = h(
-        'div',
-        { style: S.card },
-        h('div', { style: S.title }, '授权有效期'),
-        h('div', { style: S.note }, '默认 TTL 用于新签发的授权；上限是任何规则都不得越过的硬边界。'),
-        h(
-          'div',
-          { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap', marginTop: '10px' } },
-          h('span', { style: S.note }, '默认（秒）'),
-          h('input', { value: ttlDefault, onChange: function (e) { setTtlDefault(e.target.value); }, type: 'number', min: '1', style: Object.assign({}, S.input) }),
-          h('span', { style: S.note }, '上限（秒）'),
-          h('input', { value: ttlMax, onChange: function (e) { setTtlMax(e.target.value); }, type: 'number', min: '1', style: Object.assign({}, S.input) }),
-          h(
-            'button',
-            {
-              type: 'button',
-              style: S.btn,
-              disabled: saving !== '',
-              onClick: function () {
-                const payload = {};
-                const d = ttlNumber(ttlDefault);
-                const m = ttlNumber(ttlMax);
-                if (d !== null) payload.defaultTtlSeconds = d;
-                if (m !== null) payload.maxTtlSeconds = m;
-                if (payload.defaultTtlSeconds === undefined && payload.maxTtlSeconds === undefined) {
-                  setMessage('请输入正整数秒数');
-                  return;
-                }
-                void patch(payload, 'ttl');
-              },
-            },
-            saving === 'ttl' ? '应用中…' : '应用有效期',
-          ),
-        ),
-      );
-
-      const readOnlyCard = h(
-        'div',
-        { style: S.card },
-        h('div', { style: S.title }, '部署配置（只读）'),
-        h('div', { style: S.note }, '这些项属于插件配置（profile 的 cordis.patch.yml），页面刻意不能改：页面不能关掉 Guard，也不能凭空给某个工具造一条授权规则。'),
-        h(
-          'div',
-          { style: { marginTop: '8px', fontSize: '12px' } },
-          h('div', null, '总开关：' + (policy && policy.enabled ? '已启用' : '已关闭（页面不可修改）')),
-          h('div', null, '档位自动回滚：' + (config.sweep && config.sweep.intervalMs > 0 ? '每 ' + Math.round(config.sweep.intervalMs / 1000) + ' 秒检查一次' : '已关闭（只在下次工具调用或手动收回时回滚）')),
-          h('div', null, '配置来源：' + (policy ? policy.source : '-') + ' · 修订号 ' + (policy ? policy.revision : '-')),
-        ),
-        rules.length === 0
-          ? h('div', { style: { marginTop: '8px', fontSize: '12px', color: COLORS.fg2 } }, '没有工具级规则：所有工具都使用上面的默认挡位与有效期。')
-          : h(
-              'div',
-              { style: { marginTop: '10px' } },
-              rules.map(function (rule) {
-                return h(
-                  'div',
-                  { key: rule.match + rule.scopeMode, style: { fontSize: '12px', padding: '3px 0', borderTop: '1px solid ' + COLORS.line } },
-                  rule.match + ' · ' + rule.scopeMode + ' · ' + rule.ttlSeconds + ' 秒' + (rule.enabled ? '' : '（已停用）'),
-                );
-              }),
-            ),
-      );
-
+      if (!reachable) return null;
+      if (!settings) return null;
+      const mode = settings.mode || 'same-operation';
+      const label = settings.enabled === false ? '能力授权已关闭' : settings.modeLabel || mode;
+      const tone = settings.enabled === false ? COLORS.idle : mode === 'do-not-disturb' ? COLORS.warn : COLORS.ok;
       return h(
-        'div',
-        { style: S.page },
-        h(
-          'div',
-          { style: S.wrap },
-          h('div', { style: { fontSize: '15px', fontWeight: 600 } }, '能力授权'),
-          h('div', { style: S.note }, '这里的改动立即生效，但不会写进配置文件（重启后回到插件配置的值）。'),
-          scopeCard,
-          ttlCard,
-          readOnlyCard,
-          message ? h('div', { style: S.note }, message) : null,
-        ),
+        'span',
+        { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: tone, whiteSpace: 'nowrap' } },
+        h('span', { style: { width: '6px', height: '6px', borderRadius: '3px', background: tone } }),
+        h('span', null, label),
       );
     }
+
 
     return {
       inject: ['slots'],
@@ -1040,14 +1053,15 @@ window.__ModuleLoader__.load({
         ctx.slots.inject('conversation.input.dock', () =>
           ctx.slots.register({ name: 'conversation.input.dock', id: GUARD_ID, order: DOCK_ORDER, label: '能力授权' }, GuardDock),
         );
-        // ② 会话内的「能力授权」tab（详情页，排在 对话 / 轨迹 之后）
+        // ② 输入框工具栏左侧的模式 chip（紧挨原生档位控件，不抢占它）
+        ctx.slots.inject('conversation.input.left', () =>
+          ctx.slots.register({ name: 'conversation.input.left', id: GUARD_ID + '-mode', order: 0, label: '能力授权模式' }, GuardModeChip),
+        );
+        // ③ 会话内的「能力授权」tab（配置 + 状态 + 审计 + 统计，唯一的用户入口）
         ctx.slots.inject('conversation.view', () =>
           ctx.slots.register({ name: 'conversation.view', id: GUARD_ID, order: VIEW_ORDER, label: '能力授权' }, GuardSessionView),
         );
-        // ③ 设置页：范围挡位与 TTL（全局策略，跟具体会话无关，所以放设置而不是会话 tab）
-        ctx.slots.inject('settings.section', () =>
-          ctx.slots.register({ name: 'settings.section', id: GUARD_ID, order: SETTINGS_ORDER, label: '能力授权' }, GuardSettingsSection),
-        );
+        // 设置页不再注册：配置已全部搬到会话内「能力授权」（2026-10-31 产品决定）
       },
     };
   },
