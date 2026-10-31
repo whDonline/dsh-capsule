@@ -97,18 +97,34 @@ const PREFIX_EXCLUDED_SUBCOMMANDS: ReadonlyMap<string, ReadonlySet<string>> = ne
   ["pnpm", new Set(["publish"])],
   ["yarn", new Set(["publish"])],
 ]);
+/** 合法的程序名/子命令名：只允许字母数字与 . _ -（排除 `$p`、`=`、`(` 这类脚本语法）。 */
+const NAME_RE = /^[a-z0-9][a-z0-9._-]*$/;
+/** 作用：取第一行——多行脚本没有"单一程序"，不参与前缀归一化。 */
+function firstLine(text: string): string {
+  return (text.split(/\r?\n/, 1)[0] ?? "").trim();
+}
+/** 作用：整条命令（含多行）里出现任何破坏性程序 → 一律不给前缀/目录/程序族。 */
+function containsDestructive(command: string): boolean {
+  const tokens = command.toLowerCase().split(/[^a-z0-9._-]+/);
+  return tokens.some((token) => NO_PREFIX_PROGRAMS.has(token));
+}
 /**
  * 作用：解析「命令前缀」——程序名 + 子命令，等价于 Claude Code 的 `Bash(npm run *)`。
  * 这是"命令每次都不同"时唯一稳定的归一化：`npm run build` / `npm run test` 同属 `npm run`。
  * 破坏性程序与高危子命令返回 undefined（只能精确匹配）。
  */
 export function parseCommandPrefix(command: string): { program: string; sub: string; text: string } | undefined {
-  const text = command.trim();
+  const text = firstLine(command);
   if (text.length === 0) return undefined;
+  // 多行脚本：不做前缀归一化（实测会把 `$p = Join-Path ...` 解析成 `$p =` 这种垃圾前缀）
+  if (command.trim() !== text) return undefined;
+  // 变量赋值 / 子表达式开头：不是命令
+  if (/^[$@(]/.test(text)) return undefined;
+  if (containsDestructive(command)) return undefined;
   const tokens = text.split(/\s+/);
   const program = tokens[0]?.split(/[\\/]/).pop()?.replace(/\.(exe|cmd|bat|ps1)$/i, "").toLowerCase() ?? "";
-  if (program.length === 0 || NO_PREFIX_PROGRAMS.has(program)) return undefined;
-  const sub = (tokens.slice(1).find((token) => !token.startsWith("-") && !token.startsWith("/") && !looksLikePath(token)) ?? "").toLowerCase();
+  if (!NAME_RE.test(program) || NO_PREFIX_PROGRAMS.has(program)) return undefined;
+  const sub = (tokens.slice(1).find((token) => !token.startsWith("-") && !token.startsWith("/") && !looksLikePath(token) && NAME_RE.test(token.toLowerCase())) ?? "").toLowerCase();
   const excluded = PREFIX_EXCLUDED_SUBCOMMANDS.get(program);
   if (sub !== "" && excluded?.has(sub)) return undefined;
   return { program, sub, text: sub === "" ? program : `${program} ${sub}` };
@@ -122,11 +138,12 @@ export function redactCommand(command: string, limit = 120): string {
 }
 /** 作用：从命令里取出「程序名 + 出现过的目录」——用于目录族 / 程序族。 */
 export function parseCommandShape(command: string): { program: string; dirs: string[] } | undefined {
-  const text = command.trim();
-  if (text.length === 0) return undefined;
+  const text = firstLine(command);
+  if (text.length === 0 || command.trim() !== text) return undefined;
+  if (/^[$@(]/.test(text) || containsDestructive(command)) return undefined;
   const tokens = text.split(/\s+/);
   const program = tokens[0]?.split(/[\\/]/).pop()?.replace(/\.(exe|cmd|bat|ps1)$/i, "").toLowerCase() ?? "";
-  if (program.length === 0) return undefined;
+  if (!NAME_RE.test(program)) return undefined;
   const dirs = new Set<string>();
   for (const token of tokens.slice(1)) {
     const cleaned = token.replace(/^['"]|['"]$/g, "");

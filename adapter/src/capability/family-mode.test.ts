@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { AuditService } from "../audit/audit-service.js";
-import { FamilyGrantStore, identifyFamilies, parseReadOnlyCommand } from "./families.js";
+import { FamilyGrantStore, identifyFamilies, parseCommandPrefix, parseReadOnlyCommand } from "./families.js";
 import { LeaseManager } from "./lease-manager.js";
 import { MemoryLeaseStore } from "./lease-store.js";
 import { PendingRegistry } from "./pending.js";
@@ -51,6 +51,18 @@ describe("操作族识别（② 同族模式的判据）", () => {
     const a = identifyFamilies("pwsh", { command: "git status" }).find((item) => item.kind === "command");
     const b = identifyFamilies("pwsh", { command: "git status --short" }).find((item) => item.kind === "command");
     expect(a?.key).toBe(b?.key);
+  });
+  it("【安全回归】多行脚本 / 变量赋值 / 脚本内含破坏性命令 → 一律不给前缀", () => {
+    // 实测缺陷：`$p = Join-Path ...` 曾被解析成前缀 `$p =`，导致所有脚本互相复用、Remove-Item 被放行
+    expect(parseCommandPrefix("$p = Join-Path $env:USERPROFILE 'Desktop\\a'")).toBeUndefined();
+    expect(parseCommandPrefix("New-Item -ItemType Directory -Path D:\\a\nRemove-Item D:\\b")).toBeUndefined();
+    expect(parseCommandPrefix("Get-Date\nRemove-Item D:\\x")).toBeUndefined();
+    // 正常单行命令仍然生成前缀
+    expect(parseCommandPrefix("New-Item -ItemType Directory -Path D:\\a")?.text).toBe("new-item directory");
+    // 高危子命令 / 破坏性程序不生成前缀
+    expect(parseCommandPrefix("git push origin main")).toBeUndefined();
+    expect(parseCommandPrefix("npm publish")).toBeUndefined();
+    expect(parseCommandPrefix("Remove-Item D:\\a")).toBeUndefined();
   });
   it("目录族 / 程序族：写操作也能复用，但破坏性程序永不参与", () => {
     const a = identifyFamilies("pwsh", { command: "New-Item -ItemType Directory -Path D:\\work\\a" });
