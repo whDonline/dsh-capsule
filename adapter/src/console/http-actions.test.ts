@@ -36,7 +36,7 @@ describe("用户可见的三档设置（GET/PATCH /api/config 的 settings）", 
     await withServer(undefined, async (handle) => {
       const body = (await (await fetch(`${handle.url}api/config`)).json()) as { settings: { enabled: boolean; mode: string; modeLabel: string }; catalog: { guardModes: { id: string; label: string }[] } };
       expect(body.settings).toMatchObject({ enabled: true, mode: "same-operation", modeLabel: "同类复用" });
-      expect(body.catalog.guardModes.map((item) => item.id)).toEqual(["same-operation", "do-not-disturb"]);
+      expect(body.catalog.guardModes.map((item) => item.id)).toEqual(["off", "same-operation", "do-not-disturb"]);
     }, new GuardSettings({ maxTtlSeconds: 1800 }));
   });
   it("PATCH settings 生效；非法值 → 409 且不改动", async () => {

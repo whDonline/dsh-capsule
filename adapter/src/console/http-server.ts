@@ -500,8 +500,12 @@ function policyDocument(policy: GovernancePolicy | undefined, routeOptions: Cons
   const sandboxModes = SANDBOX_MODES.map((mode) => ({ id: mode, label: SANDBOX_MODE_LABELS[mode] }));
   // 审计决策目录：前端不再自己维护决策 id + 中文名（唯一来源 audit/catalog.ts）
   const decisions = AUDIT_DECISIONS.map((id) => ({ id, label: AUDIT_DECISION_LABELS[id] }));
-  // 三档模式目录：前端不再自己维护模式中文名与说明（唯一来源 capability/settings.ts）
-  const guardModes = GUARD_MODES.map((id) => ({ id, label: GUARD_MODE_LABELS[id], summary: GUARD_MODE_SUMMARIES[id] }));
+  // 授权模式目录：前端不再自己维护中文名与说明（唯一来源 capability/settings.ts）。
+  // 第一项是「授权关闭」（enabled=false），让输入框下拉可以直接三选一。
+  const guardModes = [
+    { id: "off", label: "授权关闭", summary: "插件完全不介入，审批恢复 DSH 原生行为" },
+    ...GUARD_MODES.map((id) => ({ id, label: GUARD_MODE_LABELS[id], summary: GUARD_MODE_SUMMARIES[id] })),
+  ];
   const catalog = { sandboxModes, decisions, guardModes };
   const settingsSnapshot = routeOptions.settings?.snapshot();
   const settings = settingsSnapshot

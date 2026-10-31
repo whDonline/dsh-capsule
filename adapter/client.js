@@ -943,16 +943,21 @@ window.__ModuleLoader__.load({
           : null,
       );
 
-      return h('div', { style: S.page }, h('div', { style: S.wrap }, modeCard, header, statsCard, granted, h('div', null, actions), recordCard, details, rawCard));
+      return h('div', { style: S.page }, h('div', { style: S.wrap }, header, statsCard, granted, h('div', null, actions), recordCard, details, rawCard));
     }
 
-    /** 作用：输入框工具栏左侧的模式 chip（conversation.input.left）——只显示当前模式，不抢原生档位控件。
-     * ① 显示「同操作模式」、② 显示「同族模式」、③ 显示「免打扰模式」；关闭时显示「已关闭」。 */
+    /** 作用：输入框工具栏左侧的授权模式控件（conversation.input.left）——**可直接操作**：
+     * 下拉三选一（授权关闭 / 短期授权 / 免打扰）+ 时长输入；免打扰选中即开始，不需要额外的「开始」按钮。
+     * 不抢占原生沙箱档位控件（conversation.input.permission），避免遮蔽 DSH 自带 UI。 */
     function GuardModeChip(props) {
       const sessionId = props && props.sessionId ? String(props.sessionId) : '';
       const [settings, setSettings] = React.useState(null);
       const [reachable, setReachable] = React.useState(true);
-      // ③ 免打扰：从会话快照里取这条窗口授权还剩多久（到期后自动回落到 ① 同操作语义）
+      const [host, setHost] = React.useState(null);
+      const [guardModes, setGuardModes] = React.useState([]);
+      const [escalationTools, setEscalationTools] = React.useState([]);
+      const [busy, setBusy] = React.useState(false);
+      // 免打扰：从会话快照里取窗口授权还剩多久（到期后自动回落到短期授权语义）
       const [dndRemaining, setDndRemaining] = React.useState(0);
       React.useEffect(function () {
         const timer = setInterval(function () {
@@ -978,6 +983,10 @@ window.__ModuleLoader__.load({
               const cfg = await fetchJson(base, '/api/config');
               if (!alive) return;
               setSettings(cfg && cfg.settings ? cfg.settings : null);
+              setHost(base);
+              setGuardModes(cfg && cfg.catalog && Array.isArray(cfg.catalog.guardModes) ? cfg.catalog.guardModes : []);
+              const rules = cfg && cfg.policy && Array.isArray(cfg.policy.rules) ? cfg.policy.rules : [];
+              setEscalationTools(rules.filter(function (rule) { return rule.enabled !== false && rule.scopeMode === 'sandbox-escalation'; }).map(function (rule) { return rule.match; }));
               setReachable(true);
               const isDnd = cfg && cfg.settings && cfg.settings.mode === 'do-not-disturb';
               if (isDnd && sessionId) {
@@ -1007,19 +1016,81 @@ window.__ModuleLoader__.load({
       if (!reachable) return null;
       if (!settings) return null;
       const mode = settings.mode || 'same-operation';
-      const label = settings.enabled === false
-        ? '能力授权已关闭'
-        : mode === 'do-not-disturb'
-          ? dndRemaining > 0
-            ? '免打扰 · ' + clockText(dndRemaining)
-            : '免打扰已结束'
-          : settings.modeLabel || mode;
-      const tone = settings.enabled === false ? COLORS.idle : mode === 'do-not-disturb' ? COLORS.warn : COLORS.ok;
+      const off = settings.enabled === false;
+      const current = off ? 'off' : mode;
+      const tone = off ? COLORS.idle : mode === 'do-not-disturb' ? COLORS.warn : COLORS.ok;
+      const minutes = Math.max(1, Math.round((mode === 'do-not-disturb' ? settings.dndDurationSeconds : settings.reuseTtlSeconds) / 60));
+      const save = async function (patch) {
+        if (!host || busy) return;
+        setBusy(true);
+        try {
+          await fetchJson(host, '/api/config', {
+            method: 'PATCH',
+            headers: { 'content-type': 'application/json', 'x-dsh-guard': '1' },
+            body: JSON.stringify({ settings: patch }),
+          });
+          const cfg = await fetchJson(host, '/api/config');
+          setSettings(cfg && cfg.settings ? cfg.settings : null);
+        } catch (err) {
+          // 静默：下一次轮询会恢复真实状态
+        } finally {
+          setBusy(false);
+        }
+      };
+      const startWindow = async function () {
+        if (!host || busy) return;
+        const tool = Array.isArray(escalationTools) ? escalationTools[0] : '';
+        setBusy(true);
+        try {
+          if (tool) {
+            await fetchJson(host, '/api/window', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json', 'x-dsh-guard': '1' },
+              body: JSON.stringify({ sessionId: sessionId, toolName: tool, mode: settings.dndTargetMode, ttlSeconds: settings.dndDurationSeconds }),
+            });
+          }
+          const cfg = await fetchJson(host, '/api/config');
+          setSettings(cfg && cfg.settings ? cfg.settings : null);
+        } catch (err) {
+          // 静默：失败时保持原状态，下一次轮询会拉回真实值
+        } finally {
+          setBusy(false);
+        }
+      };
+      const onModeChange = function (event) {
+        const value = event.target.value;
+        if (value === 'off') return void save({ enabled: false });
+        if (value === 'do-not-disturb') {
+          void save({ enabled: true, mode: 'do-not-disturb' }).then(startWindow);
+          return;
+        }
+        void save({ enabled: true, mode: 'same-operation' });
+      };
+      const onMinutesChange = function (event) {
+        const value = Number(event.target.value);
+        if (!Number.isInteger(value) || value <= 0) return;
+        const seconds = value * 60;
+        void save(mode === 'do-not-disturb' ? { dndDurationSeconds: seconds } : { reuseTtlSeconds: seconds });
+      };
+      const selectStyle = { fontSize: '12px', padding: '2px 4px', borderRadius: '6px', border: '1px solid ' + COLORS.line, background: 'transparent', color: tone, cursor: 'pointer' };
+      const inputStyle = { width: '48px', fontSize: '12px', padding: '2px 4px', borderRadius: '6px', border: '1px solid ' + COLORS.line, background: 'transparent', color: COLORS.fg2 };
       return h(
         'span',
-        { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: tone, whiteSpace: 'nowrap' } },
+        { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' } },
         h('span', { style: { width: '6px', height: '6px', borderRadius: '3px', background: tone } }),
-        h('span', null, label),
+        h(
+          'select',
+          { value: current, onChange: onModeChange, disabled: busy, style: selectStyle, title: settings.modeSummary || '' },
+          (Array.isArray(guardModes) && guardModes.length > 0 ? guardModes : [{ id: 'same-operation', label: settings.modeLabel || '短期授权' }]).map(function (item) {
+            return h('option', { key: item.id, value: item.id }, item.label);
+          }),
+        ),
+        off
+          ? null
+          : h('input', { type: 'number', min: '1', defaultValue: String(minutes), onBlur: onMinutesChange, style: inputStyle, title: mode === 'do-not-disturb' ? '免打扰时长（分钟）' : '复用时长（分钟）' }),
+        !off && mode === 'do-not-disturb'
+          ? h('span', { style: { fontSize: '11px', color: dndRemaining > 0 ? COLORS.warn : COLORS.idle } }, dndRemaining > 0 ? clockText(dndRemaining) : '已结束')
+          : null,
       );
     }
 
