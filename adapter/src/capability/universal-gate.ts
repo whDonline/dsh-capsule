@@ -58,6 +58,31 @@ export class UniversalGate {
   private readonly operations = new OperationRegistry();
   /** ② 同族模式：最近一次人工批准后 TTL 内有效的族放行表 */
   private readonly familyGrants = new FamilyGrantStore();
+  /**
+   * 诊断计数：回答「为什么没有命中」——真实 DSH 里 callId / toolName 与 tools/execute 的对齐关系
+   * 只能靠实测确认，因此把每次未命中的原因计数并通过 /api/config.diagnostics 暴露出来。
+   */
+  private readonly opStats = {
+    approvals: 0,
+    noRecord: 0,
+    sessionMismatch: 0,
+    toolMismatch: 0,
+    noLease: 0,
+    reusedExact: 0,
+    reusedFamily: 0,
+    issued: 0,
+    lastMiss: undefined as { callId: string; toolName?: string; reason: string } | undefined,
+  };
+  private noteMiss(callId: string, toolName: string | undefined, reason: string): void {
+    if (reason === "no-record") this.opStats.noRecord += 1;
+    else if (reason === "session-mismatch") this.opStats.sessionMismatch += 1;
+    else this.opStats.toolMismatch += 1;
+    this.opStats.lastMiss = { callId, toolName, reason };
+  }
+  /** 作用：把「操作复用」的命中情况投影出来（只读诊断，不含参数原文）。 */
+  diagnostics(): Record<string, unknown> {
+    return { ...this.opStats, pendingRecords: this.operations.size, familyGrants: this.familyGrants.size };
+  }
   constructor(private readonly deps: UniversalGateDeps) {
     this.now = deps.now ?? Date.now;
   }
@@ -319,11 +344,21 @@ export class UniversalGate {
   private async handleOperationApproval(req: ApprovalRequestLike, next: () => Promise<ApprovalOutcome>): Promise<ApprovalOutcome> {
     const callId: unknown = req.callId;
     if (typeof callId !== "string" || callId.length === 0) return await next();
+    this.opStats.approvals += 1;
     const record = this.operations.get(callId);
-    if (!record) return await next();
+    if (!record) {
+      this.noteMiss(callId, req.toolName, "no-record");
+      return await next();
+    }
     const requesterId = approvalAgentId(req);
-    if (requesterId !== undefined && requesterId !== record.sessionId) return await next();
-    if (typeof req.toolName === "string" && req.toolName.length > 0 && req.toolName !== record.toolName) return await next();
+    if (requesterId !== undefined && requesterId !== record.sessionId) {
+      this.noteMiss(callId, req.toolName, "session-mismatch");
+      return await next();
+    }
+    if (typeof req.toolName === "string" && req.toolName.length > 0 && req.toolName !== record.toolName) {
+      this.noteMiss(callId, req.toolName, `tool-mismatch(${record.toolName})`);
+      return await next();
+    }
     // ① 命中已有授权 → 代答（不调用人类答话器，也不提升任何权限）
     const reusable = await this.deps.leases.findMatching(record.sessionId, record.toolName, record.key, "universal");
     if (reusable) {
@@ -337,10 +372,10 @@ export class UniversalGate {
         leaseId: reusable.id,
         decision: "LEASE_REUSED",
       });
+      this.opStats.reusedExact += 1;
       this.operations.delete(callId);
       return "allowed-once";
     }
-    // ② 同族模式：精确指纹没命中时，再看是否命中「最近一次人工批准建立的族放行」。
     // 族只由人工批准建立/续期，且只在 reuseTtlSeconds 内有效；写/删类工具没有 tool/command 族（见 families.ts）。
     if (this.deps.settings?.mode === "same-family" && record.families && record.families.length > 0) {
       const familyGrant = this.familyGrants.match(record.families, this.now());
@@ -354,11 +389,13 @@ export class UniversalGate {
           scopeDisplay: `${record.display} · 凭族放行：${familyGrant.label}`,
           decision: "LEASE_REUSED",
         });
+        this.opStats.reusedFamily += 1;
         this.operations.delete(callId);
         return "allowed-once";
       }
     }
     // ② 未命中 → 交给人类（next 只调用一次，结果原样返回）
+    this.opStats.noLease += 1;
     const result = await next();
     if (normalizeOutcome(result) === "allowed-once") {
       const ttlSeconds = this.deps.settings?.reuseTtlSeconds ?? 300;
@@ -385,6 +422,7 @@ export class UniversalGate {
           leaseId: lease.id,
           decision: "LEASE_ISSUED",
         });
+        this.opStats.issued += 1;
       } catch (err) {
         // 签发失败：Fail Closed——不签发、不放宽，只写不含 Secret 的诊断日志
         process.stderr.write(`[dsh-guard] operation lease issue failed for call ${callId}: ${String(err)}\n`);

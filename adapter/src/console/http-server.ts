@@ -27,6 +27,8 @@ export interface ConsoleHttpOptions {
   sweepIntervalMs?: number;
   /** 用户可见的三档设置（开关 / 模式 / 时长）；未注入时 /api/config 不返回 settings */
   settings?: GuardSettings;
+  /** 只读诊断（为什么没命中复用）——仅用于排障，不含参数原文 */
+  diagnostics?: () => Record<string, unknown>;
   host?: string;
   port?: number;
   /** 端口被占用时是否回退到系统分配的随机端口（默认 true；false 时启动失败直接抛错） */
@@ -77,7 +79,7 @@ export async function startConsoleServer(options: ConsoleHttpOptions): Promise<C
 function listen(govConsole: GovernanceConsole, options: ConsoleHttpOptions, host: string, port: number, allowedHosts: ReadonlySet<string>): Promise<ConsoleHttpHandle> {
   // 作用：真正监听端口——把请求交给 handleRequest，并在 listen 成功后把实际端口与访问地址一并返回
   const server: Server = createServer((req, res) => {
-    void handleRequest(req, res, govConsole, options.policy, allowedHosts, "", { actions: options.actions, sweepIntervalMs: options.sweepIntervalMs, settings: options.settings });
+    void handleRequest(req, res, govConsole, options.policy, allowedHosts, "", { actions: options.actions, sweepIntervalMs: options.sweepIntervalMs, settings: options.settings, diagnostics: options.diagnostics });
   });
   return new Promise<ConsoleHttpHandle>((resolve, reject) => {
     server.once("error", reject);
@@ -375,6 +377,8 @@ export interface ConsoleRouteOptions {
   sweepIntervalMs?: number;
   /** 用户可见的三档设置（开关 / 模式 / 时长）；未注入时 /api/config 不返回 settings 字段 */
   settings?: GuardSettings;
+  /** 只读诊断（为什么没命中复用）——仅用于排障 */
+  diagnostics?: () => Record<string, unknown>;
 }
 function getHostService(hostCtx: CapsuleHostContextLike, name: string): unknown {
   // 作用：按 cordis 方式解析宿主服务（只走 ctx.get，缺失返回 undefined，绝不抛错）
@@ -503,10 +507,11 @@ function policyDocument(policy: GovernancePolicy | undefined, routeOptions: Cons
   const settings = settingsSnapshot
     ? { ...settingsSnapshot, modeLabel: GUARD_MODE_LABELS[settingsSnapshot.mode], modeSummary: GUARD_MODE_SUMMARIES[settingsSnapshot.mode] }
     : undefined;
+  const diagnostics = routeOptions.diagnostics ? routeOptions.diagnostics() : undefined;
   if (!policy) {
-    return { policy: undefined, modes: modeCatalog(), catalog, settings, writable: [], immutable: ["enabled", "rules"], routes, actions, sweep };
+    return { policy: undefined, modes: modeCatalog(), catalog, settings, diagnostics, writable: [], immutable: ["enabled", "rules"], routes, actions, sweep };
   }
-  return { policy: policy.snapshot(), modes: modeCatalog(), catalog, settings, writable: ["defaultScope", "defaultTtlSeconds", "maxTtlSeconds"], immutable: ["enabled", "rules"], routes, actions, sweep };
+  return { policy: policy.snapshot(), modes: modeCatalog(), catalog, settings, diagnostics, writable: ["defaultScope", "defaultTtlSeconds", "maxTtlSeconds"], immutable: ["enabled", "rules"], routes, actions, sweep };
 }
 function modeCatalog(): unknown {
   // 作用：挡位目录投影——供前端渲染下拉框；defaultable 标记哪些挡位允许作为默认值（tool 不允许）

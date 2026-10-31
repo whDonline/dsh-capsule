@@ -243,11 +243,11 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
   // 同源治理路由（优先）：挂到 DSH Web 服务器的 /guard/…，Web GUI 面板因此与页面同源，
   // 不需要跨源请求、也不依赖额外端口。宿主没有 webServer（headless 等组合）时自动跳过。
   // 注册结果记录在 guardRouteStatus 里（GET /api/config 的 routes 字段），失败可自证原因。
-  const disposeRoutes = registerGuardWebRoutes(ctx as { get?(name: string): unknown }, govConsole, governance, { actions, sweepIntervalMs, settings }) ?? (() => undefined);
+  const disposeRoutes = registerGuardWebRoutes(ctx as { get?(name: string): unknown }, govConsole, governance, { actions, sweepIntervalMs, settings, diagnostics: () => gate.diagnostics() }) ?? (() => undefined);
   let consoleHandle: ConsoleHttpHandle | undefined;
   const consoleConfig = resolveConsoleConfig(config);
   if (consoleConfig.enabled) {
-    consoleHandle = await startConsoleServer({ console: govConsole, policy: governance, actions, sweepIntervalMs, settings, host: consoleConfig.host, port: consoleConfig.port, fallbackPort: consoleConfig.fallbackPort });
+    consoleHandle = await startConsoleServer({ console: govConsole, policy: governance, actions, sweepIntervalMs, settings, diagnostics: () => gate.diagnostics(), host: consoleConfig.host, port: consoleConfig.port, fallbackPort: consoleConfig.fallbackPort });
     process.stderr.write(`[dsh-guard] governance console: ${consoleHandle.url} (同源入口 ${GUARD_WEB_PREFIX}/, sweep=${sweepIntervalMs}ms, routes=${JSON.stringify(guardRouteStatus)})\n`);
   }
   return async () => {
