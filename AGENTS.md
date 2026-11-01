@@ -176,6 +176,9 @@ assets/                      # README 用示意图（结构示意，非截图）
 9. **提示条槽位（`conversation.input.dock`）保留但当前不渲染**：`client.js` 的 `GuardDock` 直接返回 `null`
    （2026-10-31 项目所有者要求移除；信息由输入框模式 chip 与能力授权 tab 承担）。该槽位是 list +
    `replaceRisk: none`，日后恢复时仍可直接用 `sessionId`；提示条上不得做审批、签发或放宽。
+   **输入框模式 chip（`conversation.input.left`）在完全访问档位隐藏**（2026-11-01 项目所有者要求）：
+   判定集中在 `GuardModeChip.hiddenFor(mode)`，只有 `danger-full-access` 为真；该档位没有可放行的审批，
+   隐藏**不修改**用户设置——切回其他档位后入口与原设置一起恢复；tab 里另显示一行「完全访问档位：无需授权」。
 10. **会话内详情页挂在 `conversation.view`（2026-10-31 Inspect 实测，详情层）**：
     该槽位是 list，现有占位者是 `chat`(order 0) 与 `trajectory`(order 10)，我们的
     `guard`(order 20, label 能力授权) 就是**第三个 tab**；`replaceRisk: none`，不会顶掉前两个，

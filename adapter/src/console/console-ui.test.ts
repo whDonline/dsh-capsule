@@ -303,6 +303,18 @@ describe("DSH 客户端半边（adapter/client.js）", () => {
     const rendered = (dock?.component as (props: Record<string, unknown>) => FakeElement | null)({ sessionId: "session-x" });
     expect(rendered).toBeNull();
   });
+  it("完全访问档位下隐藏输入框模式控件（没有可放行的审批），其他档位保持显示", () => {
+    const { registrations } = registerPlugin();
+    const chip = registrations.find((item) => item.slot === "conversation.input.left")?.component as unknown as {
+      hiddenFor(mode: string): boolean;
+    };
+    expect(typeof chip.hiddenFor).toBe("function");
+    expect(chip.hiddenFor("danger-full-access")).toBe(true);
+    expect(chip.hiddenFor("workspace-write")).toBe(false);
+    expect(chip.hiddenFor("read-only")).toBe(false);
+    // 读不到档位（空串）时保持显示：宁可多一个入口，也不暗中把功能藏掉
+    expect(chip.hiddenFor("")).toBe(false);
+  });
   it("面板模型（纯函数）：时间范围过滤 + 指标聚合，避免再有渲染期空白", () => {
     const { registrations } = registerPlugin();
     const view = registrations.find((item) => item.slot === "conversation.view")?.component as unknown as {
@@ -344,7 +356,7 @@ describe("DSH 客户端半边（adapter/client.js）", () => {
   /** 作用：用「会真正重渲染」的 React 替身 + 假 fetch，跑通会话视图的异步加载路径。
    * 背景：2026-11-01 实测把 setHost 状态删了却漏删调用，ReferenceError 被组件 catch 吃掉，
    * 页面永远停在「治理接口暂时不可达」；旧用例只渲染无快照分支，抓不到这类错。 */
-  async function renderSessionViewWithData(): Promise<string> {
+  async function renderSessionViewWithData(mode = "workspace-write"): Promise<string> {
     const source = readFileSync(fileURLToPath(new URL("../../client.js", import.meta.url)), "utf8");
     let factory: ((require: (name: string) => unknown) => { inject: string[]; apply(ctx: unknown): void }) | undefined;
     const window_ = { __ModuleLoader__: { load: (definition: { factory: typeof factory }) => { factory = definition.factory; } }, DshGuardConsole: undefined as unknown };
@@ -371,7 +383,7 @@ describe("DSH 客户端半边（adapter/client.js）", () => {
       sessions: [{
         sessionId: "session-test",
         auth: { state: "active", activeCount: 1, nextExpiresAt: now + 60_000, grants: [] },
-        sandbox: { currentMode: "workspace-write", currentModeText: "工作区可写", checkedAt: now },
+        sandbox: { currentMode: mode, currentModeText: mode === "danger-full-access" ? "完全访问" : "工作区可写", checkedAt: now },
         stats: { total: 1, active: 1, savedApprovals: 0, longestWindowMs: 0, reuseByKind: { exact: 0, family: 0 }, topFamilies: [] },
         actions: { canRevoke: true },
       }],
@@ -421,6 +433,11 @@ describe("DSH 客户端半边（adapter/client.js）", () => {
     expect(text).toContain("审计");
     expect(text).toContain("pwsh 测试命令 --flag");
     expect(text).not.toContain("治理接口暂时不可达");
+  });
+  it("会话视图：完全访问档位下说明「无需授权」（Guard 不介入）", async () => {
+    const text = await renderSessionViewWithData("danger-full-access");
+    expect(text).toContain("完全访问档位：无需授权");
+    expect(text).toContain("不会产生沙箱升级审批");
   });
   it("对话内提示条：有可行动授权时才出现（没有授权时整条隐藏）", () => {
     const { registrations } = registerPlugin();

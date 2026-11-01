@@ -527,6 +527,16 @@ window.__ModuleLoader__.load({
       }
       const nowMs = Date.now();
       const settings = config && config.settings ? config.settings : null;
+      // 完全访问档位：没有可放行的审批，Guard 不介入（输入框的模式控件也已隐藏）
+      const fullAccess = !!(view.sandbox && view.sandbox.currentMode === 'danger-full-access');
+      const applicabilityCard = fullAccess
+        ? h(
+            'div',
+            { style: S.card },
+            h('div', { style: S.title }, '完全访问档位：无需授权'),
+            h('div', { style: S.note }, 'DSH 的完全访问 preset 审批策略是 never，不会产生沙箱升级审批；Guard 没有可代答的请求，输入框的授权模式控件已隐藏。切回只读 / 工作区可写后会自动恢复。'),
+          )
+        : null;
 
       // ---- 授权决策日志（一条授权一份记录）----
       const records = decisions && Array.isArray(decisions.records) ? decisions.records : [];
@@ -785,7 +795,7 @@ window.__ModuleLoader__.load({
             ),
       );
 
-      return h('div', { style: S.page }, h('div', { style: S.wrap }, metricsCard, dndCard, settingsCard, auditCard));
+      return h('div', { style: S.page }, h('div', { style: S.wrap }, applicabilityCard, metricsCard, dndCard, settingsCard, auditCard));
     }
 
     // ---------------- 输入框工具栏的「能力授权」挡位控件 ----------------
@@ -876,6 +886,9 @@ window.__ModuleLoader__.load({
         [sessionId],
       );
       if (!reachable || !settings) return null;
+      // 完全访问档位：DSH 的该 preset 审批策略是 never，不会产生任何可放行的审批。
+      // 此时 Guard 无事可做，直接不渲染入口（切回其他档位后入口自动恢复，用户设置不变）。
+      if (GuardModeChip.hiddenFor(sandboxMode)) return null;
       // 宿主端尚未更新（旧 dist）：不要用新 UI 去调旧接口——显示为"重启后生效"，避免点击静默无效。
       if (!features || features.dndWindow !== true) {
         return h(
@@ -914,7 +927,6 @@ window.__ModuleLoader__.load({
           ? currentItem.summary
           : '';
       const minutes = Math.max(1, Math.round((settings.dndDurationSeconds || 900) / 60));
-      const fullAccess = sandboxMode === 'danger-full-access';
       const withIcon = function (item, iconId) {
         const glyph = guardModeGlyph(iconId);
         return glyph ? Object.assign({}, item, { icon: glyph }) : item;
@@ -927,8 +939,6 @@ window.__ModuleLoader__.load({
         items.push(withIcon({ id: 'do-not-disturb', label: '免打扰（进行中 · 限时完全访问）', disabled: true }, 'do-not-disturb'));
         items.push({ id: 'dnd-stop', label: '结束免打扰（还剩 ' + clockText(remaining) + '）' });
         items.push({ id: 'dnd-extend', label: '延长 ' + minutes + ' 分钟' });
-      } else if (fullAccess) {
-        items.push(withIcon({ id: 'dnd-start', label: '免打扰（当前完全访问，不适用）', disabled: true }, 'do-not-disturb'));
       } else {
         items.push(withIcon({ id: 'dnd-start', label: '免打扰 ' + minutes + ' 分钟（限时完全访问）' }, 'do-not-disturb'));
       }
@@ -1103,6 +1113,11 @@ window.__ModuleLoader__.load({
         : null;
       return h(React.Fragment, null, menu, confirmation);
     }
+    /** 作用：完全访问档位下无需授权（DSH 该 preset 的审批策略为 never，不会产生可放行的审批）。
+     *  入口隐藏的判定单独暴露，便于 Node 单测；切回其他档位后入口自动恢复，不修改用户设置。 */
+    GuardModeChip.hiddenFor = function (mode) {
+      return mode === 'danger-full-access';
+    };
 
     return {
       inject: ['slots'],
