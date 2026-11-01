@@ -16,6 +16,10 @@ export const AUDIT_DECISIONS = [
   "SANDBOX_MODE_RAISED",
   "SANDBOX_MODE_RESTORED",
   "SANDBOX_MODE_SKIPPED_USER_OVERRIDE",
+  "DND_OPENED",
+  "DND_ALLOWED",
+  "DND_EXTENDED",
+  "DND_CLOSED",
 ] as const;
 export type AuditDecision = (typeof AUDIT_DECISIONS)[number];
 /** 面向用户的中文说法——前端不再自己维护映射表，直接展示服务端下发的 label。 */
@@ -33,6 +37,10 @@ export const AUDIT_DECISION_LABELS: Record<AuditDecision, string> = {
   SANDBOX_MODE_RAISED: "权限级别提升",
   SANDBOX_MODE_RESTORED: "权限级别恢复",
   SANDBOX_MODE_SKIPPED_USER_OVERRIDE: "跳过恢复（你手动改过）",
+  DND_OPENED: "开启免打扰（限时完全访问）",
+  DND_ALLOWED: "免打扰自动放行",
+  DND_EXTENDED: "延长免打扰窗口",
+  DND_CLOSED: "结束免打扰窗口",
 };
 /** 作用：运行期合法性校验（查审计接口的 ?decision= 参数时用）。 */
 export function isAuditDecision(value: unknown): value is AuditDecision {

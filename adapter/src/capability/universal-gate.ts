@@ -4,6 +4,7 @@ import { parseEscalation, type SandboxMode } from "./escalation.js";
 import { operationFingerprint } from "./operation.js";
 import { OperationRegistry } from "./operation-registry.js";
 import { FamilyGrantStore, hasDestructiveCommand, identifyFamilies } from "./families.js";
+import type { DndManager } from "./dnd.js";
 import type { SandboxGrantManager, SandboxModeResult } from "./sandbox-grant.js";
 import { recordSandboxOutcome } from "./sandbox-audit.js";
 import type { ResolvedToolPolicy, PolicyResolver } from "./policy.js";
@@ -36,7 +37,12 @@ export interface UniversalGateDeps {
    * 注入后 `enabled === false` 时所有 hook 直接透传——不签发、不提升、不改写任何状态。
    * 注入同时意味着启用【按操作复用】的新语义（①② 不改变沙箱档位）；未注入则保持历史行为。
    */
-  settings?: { readonly active: boolean; readonly mode: string; readonly reuseTtlSeconds: number };
+  settings?: { readonly active: boolean; readonly reuseTtlSeconds: number };
+  /**
+   * 免打扰窗口（2026-11-01 定稿）。**未注入即不启用免打扰**：所有审批回到原有语义。
+   * 注入后，窗口内带 requestedMode 的已记录升级由它代答 allowed-once；其余仍然委派。
+   */
+  dnd?: Pick<DndManager, "evaluate">;
   /** 可注入时钟（默认 Date.now），保证 TTL/GC 语义可模拟时间测试 */
   now?: () => number;
 }
@@ -59,12 +65,6 @@ export class UniversalGate {
   /** ② 同族模式：最近一次人工批准后 TTL 内有效的族放行表 */
   private readonly familyGrants = new FamilyGrantStore();
   /**
-   * 免打扰时间窗：sessionId → 到期时间。
-   * 【关键】它**不修改沙箱档位**——只是在这段时间内把本会话的审批自动放行。
-   * 早期实现用 `setSandboxMode` 抬档位，会让 DSH 原生档位显示成 `Custom`（2026-10-31 实测反馈）。
-   */
-  private readonly dndWindows = new Map<string, number>();
-  /**
    * 诊断计数：回答「为什么没有命中」——真实 DSH 里 callId / toolName 与 tools/execute 的对齐关系
    * 只能靠实测确认，因此把每次未命中的原因计数并通过 /api/config.diagnostics 暴露出来。
    */
@@ -76,6 +76,7 @@ export class UniversalGate {
     noLease: 0,
     reusedExact: 0,
     reusedFamily: 0,
+    dndAllowed: 0,
     issued: 0,
     lastMiss: undefined as { callId: string; toolName?: string; reason: string } | undefined,
   };
@@ -84,42 +85,6 @@ export class UniversalGate {
     else if (reason === "session-mismatch") this.opStats.sessionMismatch += 1;
     else this.opStats.toolMismatch += 1;
     this.opStats.lastMiss = { callId, toolName, reason };
-  }
-  /** 作用：开始一段免打扰（只放行审批，绝不改沙箱档位）。 */
-  startDoNotDisturb(sessionId: string, ttlSeconds: number): number {
-    if (typeof sessionId !== "string" || sessionId.length === 0) throw new Error("GUARD_DND_INVALID: sessionId");
-    if (!Number.isInteger(ttlSeconds) || ttlSeconds <= 0) throw new Error("GUARD_DND_INVALID: ttlSeconds");
-    const expiresAt = this.now() + ttlSeconds * 1000;
-    this.dndWindows.set(sessionId, expiresAt);
-    // 记录载体：签发一条 sandbox-mode 授权**只用于记账**（不调用 setSandboxMode，档位不受影响），
-    // 这样审计表里会出现一行「免打扰」，也能被「收回」覆盖到。签发失败不影响时间窗本身。
-    void Promise.resolve(
-      this.deps.leases.issue({
-        sessionId,
-        toolName: "免打扰",
-        scope: { kind: "tool", key: `dnd:${sessionId}:${expiresAt}`, display: `免打扰窗口：${Math.round(ttlSeconds / 60)} 分钟内本会话审批自动放行（不改沙箱档位）` },
-        ttlSeconds,
-        kind: "sandbox-mode",
-      }),
-    ).catch((err: unknown) => {
-      process.stderr.write(`[dsh-guard] dnd record lease failed: ${String(err)}\n`);
-    });
-    return expiresAt;
-  }
-  /** 作用：结束免打扰（提前收回）。 */
-  stopDoNotDisturb(sessionId: string): void {
-    this.dndWindows.delete(sessionId);
-  }
-  /** 作用：本会话免打扰还剩多少毫秒（0 = 没有）。 */
-  doNotDisturbRemaining(sessionId: string): number {
-    const expiresAt = this.dndWindows.get(sessionId);
-    if (expiresAt === undefined) return 0;
-    const left = expiresAt - this.now();
-    if (left <= 0) {
-      this.dndWindows.delete(sessionId);
-      return 0;
-    }
-    return left;
   }
   /** 作用：把「操作复用」的命中情况投影出来（只读诊断，不含参数原文）。 */
   diagnostics(): Record<string, unknown> {
@@ -403,20 +368,21 @@ export class UniversalGate {
       this.noteMiss(callId, req.toolName, `tool-mismatch(${record.toolName})`);
       return await next();
     }
-    // 免打扰时间窗：本会话内自动放行审批，**不动沙箱档位**（原生档位保持用户设定值）。
-    if (this.doNotDisturbRemaining(record.sessionId) > 0) {
-      this.deps.audit.record({
+    // 免打扰窗口（2026-11-01 定稿）：窗口内只自动放行「带 requestedMode 的沙箱升级」；
+    // 没有 requestedMode 的审批（不是升级）继续交还人类，避免把免打扰扩散成"所有审批都放行"。
+    if (this.deps.dnd) {
+      const verdict = this.deps.dnd.evaluate({
         sessionId: record.sessionId,
         callId: record.callId,
-        rootCallId: record.callId,
         toolName: record.toolName,
-        scopeKey: record.key,
-        scopeDisplay: `${record.display} · 免打扰窗口内自动放行`,
-        decision: "LEASE_REUSED",
+        mode: record.mode,
+        display: record.display,
       });
-      this.opStats.reusedFamily += 1;
-      this.operations.delete(callId);
-      return "allowed-once";
+      if (verdict === "allow") {
+        this.opStats.dndAllowed += 1;
+        this.operations.delete(callId);
+        return "allowed-once";
+      }
     }
     // ① 命中已有授权 → 代答（不调用人类答话器，也不提升任何权限）
     const reusable = await this.deps.leases.findMatching(record.sessionId, record.toolName, record.key, "universal");

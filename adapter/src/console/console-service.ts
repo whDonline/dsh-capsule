@@ -115,8 +115,15 @@ export class GovernanceConsole {
     for (const [sessionId, sessionLeases] of bySession) {
       const state = sandboxStates.get(sessionId);
       const auth = this.projectAuth(sessionLeases, state, now);
-      const sandbox = withModeText(this.projectSandbox(sessionId, state, sessionLeases, auth, now));
+      const projectedSandbox = withModeText(this.projectSandbox(sessionId, state, sessionLeases, auth, now));
+      // 「当前档位」是宿主实时读数，与「Guard 那次放宽收回了没有」无关：
+      // 即使本会话没有沙箱授权，也要告诉 UI 现在是哪一档（免打扰据此判断完全访问不可用）。
+      const liveMode = this.deps.currentMode?.(sessionId);
+      const sandbox = liveMode !== undefined && projectedSandbox.currentMode === undefined
+        ? withModeText({ ...projectedSandbox, currentMode: liveMode })
+        : projectedSandbox;
       const descriptor = this.describeSession(sessionId);
+      const dnd = this.deps.dnd?.view(sessionId);
       const activityAt = Math.max(lastAuditAt.get(sessionId) ?? 0, ...sessionLeases.map((lease) => lease.issuedAt), state?.lastOutcome?.at ?? 0);
       views.push({
         activityAt,
@@ -127,6 +134,7 @@ export class GovernanceConsole {
           cwd: descriptor.cwd,
           auth,
           sandbox,
+          ...(dnd === undefined ? {} : { dnd }),
           stats: summarizeDecisions(decisionsBySession.get(sessionId) ?? []),
           actions: {
             canRevoke: auth.activeCount > 0,

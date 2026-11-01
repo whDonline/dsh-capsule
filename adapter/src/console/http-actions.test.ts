@@ -20,7 +20,10 @@ function makeActions() {
     outcome: "RAISED",
     expiresAt: Date.now() + request.ttlSeconds * 1000,
   }));
-  return { revokeSession, restoreSandbox, openWindow };
+  const startDnd = vi.fn((sessionId: string, ttlSeconds: number) => ({ sessionId, expiresAt: Date.now() + ttlSeconds * 1000 }));
+  const stopDnd = vi.fn(() => true);
+  const extendDnd = vi.fn((sessionId: string, addSeconds: number) => ({ sessionId, expiresAt: Date.now() + addSeconds * 1000 }));
+  return { revokeSession, restoreSandbox, openWindow, startDnd, stopDnd, extendDnd };
 }
 async function withServer(actions: ReturnType<typeof makeActions> | undefined, run: (handle: ConsoleHttpHandle) => Promise<void>, settings?: GuardSettings): Promise<void> {
   const handle = await startConsoleServer({ console: makeConsole(), actions, port: 0, settings });
@@ -32,20 +35,21 @@ async function withServer(actions: ReturnType<typeof makeActions> | undefined, r
 }
 const JSON_HEADERS = { "content-type": "application/json", "x-dsh-guard": "1" };
 describe("用户可见的三档设置（GET/PATCH /api/config 的 settings）", () => {
-  it("GET 返回 settings 与模式目录（含中文名，前端不再自己映射）", async () => {
+  it("GET 返回 settings 与挡位目录（含中文名，前端不再自己映射）", async () => {
     await withServer(undefined, async (handle) => {
-      const body = (await (await fetch(`${handle.url}api/config`)).json()) as { settings: { enabled: boolean; mode: string; modeLabel: string }; catalog: { guardModes: { id: string; label: string }[] } };
-      expect(body.settings).toMatchObject({ enabled: true, mode: "same-operation", modeLabel: "短期授权" });
+      const body = (await (await fetch(`${handle.url}api/config`)).json()) as { settings: { enabled: boolean; reuseTtlSeconds: number; dndDurationSeconds: number }; catalog: { guardModes: { id: string; label: string }[] } };
+      expect(body.settings).toMatchObject({ enabled: true, reuseTtlSeconds: 1800, dndDurationSeconds: 900 });
       expect(body.catalog.guardModes.map((item) => item.id)).toEqual(["off", "same-operation", "do-not-disturb"]);
     }, new GuardSettings({ maxTtlSeconds: 1800 }));
   });
-  it("PATCH settings 生效；非法值 → 409 且不改动", async () => {
+  it("PATCH settings 生效；非法值 → 409 且不改动；mode 已不再接受（免打扰是窗口不是设置）", async () => {
     const settings = new GuardSettings({ maxTtlSeconds: 1800 });
     await withServer(undefined, async (handle) => {
-      const ok = await fetch(`${handle.url}api/config`, { method: "PATCH", headers: JSON_HEADERS, body: JSON.stringify({ settings: { mode: "same-family", reuseTtlSeconds: 120 } }) });
+      const ok = await fetch(`${handle.url}api/config`, { method: "PATCH", headers: JSON_HEADERS, body: JSON.stringify({ settings: { reuseTtlSeconds: 120 } }) });
       expect(ok.status).toBe(200);
-      // 旧挡位名 same-family 会被归一成 same-operation（两档合并）
-      expect(settings.snapshot()).toMatchObject({ mode: "same-operation", reuseTtlSeconds: 120 });
+      expect(settings.snapshot()).toMatchObject({ reuseTtlSeconds: 120 });
+      const removedMode = await fetch(`${handle.url}api/config`, { method: "PATCH", headers: JSON_HEADERS, body: JSON.stringify({ settings: { mode: "same-operation" } }) });
+      expect(removedMode.status).toBe(400);
       const bad = await fetch(`${handle.url}api/config`, { method: "PATCH", headers: JSON_HEADERS, body: JSON.stringify({ settings: { reuseTtlSeconds: 1801 } }) });
       expect(bad.status).toBe(409);
       expect(settings.snapshot().reuseTtlSeconds).toBe(120);
@@ -175,6 +179,69 @@ describe("治理台快照查询参数", () => {
       const body = (await (await fetch(`${handle.url}api/config`)).json()) as { actions: { revoke: boolean }; sweep: { intervalMs: number } };
       expect(body.actions.revoke).toBe(true);
       expect(body.sweep.intervalMs).toBe(0);
+    });
+  });
+});
+describe("免打扰窗口接口（POST /api/dnd、/api/dnd/stop、/api/dnd/extend）", () => {
+  it("开启：合法请求交给动作层（sessionId + ttlSeconds），返回 expiresAt", async () => {
+    const actions = makeActions();
+    await withServer(actions, async (handle) => {
+      const res = await fetch(`${handle.url}api/dnd`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ sessionId: "s1", ttlSeconds: 900 }) });
+      expect(res.status).toBe(200);
+      expect(actions.startDnd).toHaveBeenCalledWith("s1", 900);
+      expect(await res.json()).toMatchObject({ ok: true, sessionId: "s1" });
+    });
+  });
+  it("开启：缺少自定义头 403、非 JSON 415、多余字段 400、非法 TTL 400", async () => {
+    const actions = makeActions();
+    await withServer(actions, async (handle) => {
+      expect((await fetch(`${handle.url}api/dnd`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sessionId: "s1", ttlSeconds: 900 }) })).status).toBe(403);
+      expect((await fetch(`${handle.url}api/dnd`, { method: "POST", headers: { "content-type": "text/plain", "x-dsh-guard": "1" }, body: "{}" })).status).toBe(415);
+      expect((await fetch(`${handle.url}api/dnd`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ sessionId: "s1", ttlSeconds: 900, ceiling: "full" }) })).status).toBe(400);
+      expect((await fetch(`${handle.url}api/dnd`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ sessionId: "s1", ttlSeconds: 0 }) })).status).toBe(400);
+      expect(actions.startDnd).not.toHaveBeenCalled();
+      expect((await fetch(`${handle.url}api/dnd`)).status).toBe(405);
+    });
+  });
+  it("开启：完全访问等不适用场景 → 409；参数/状态非法 → 400", async () => {
+    const actions = makeActions();
+    actions.startDnd.mockImplementationOnce(() => {
+      throw new Error("GUARD_DND_NOT_APPLICABLE: 当前已是完全访问挡位");
+    });
+    await withServer(actions, async (handle) => {
+      const res = await fetch(`${handle.url}api/dnd`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ sessionId: "s1", ttlSeconds: 900 }) });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ error: "DND_NOT_APPLICABLE" });
+    });
+    actions.startDnd.mockImplementationOnce(() => {
+      throw new Error("GUARD_DND_INVALID: ttlSeconds must be <= 1800");
+    });
+    await withServer(actions, async (handle) => {
+      const res = await fetch(`${handle.url}api/dnd`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ sessionId: "s1", ttlSeconds: 900 }) });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ error: "DND_INVALID" });
+    });
+  });
+  it("结束：调用 stopDnd 并回 stopped；未注入动作时 503", async () => {
+    const actions = makeActions();
+    await withServer(actions, async (handle) => {
+      const res = await fetch(`${handle.url}api/dnd/stop`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ sessionId: "s1" }) });
+      expect(res.status).toBe(200);
+      expect(actions.stopDnd).toHaveBeenCalledWith("s1");
+      expect(await res.json()).toMatchObject({ ok: true, stopped: true });
+    });
+    await withServer(undefined, async (handle) => {
+      const res = await fetch(`${handle.url}api/dnd/stop`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ sessionId: "s1" }) });
+      expect(res.status).toBe(503);
+    });
+  });
+  it("延长：调用 extendDnd(addSeconds)；非法 addSeconds 400", async () => {
+    const actions = makeActions();
+    await withServer(actions, async (handle) => {
+      const res = await fetch(`${handle.url}api/dnd/extend`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ sessionId: "s1", addSeconds: 600 }) });
+      expect(res.status).toBe(200);
+      expect(actions.extendDnd).toHaveBeenCalledWith("s1", 600);
+      expect((await fetch(`${handle.url}api/dnd/extend`, { method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ sessionId: "s1", addSeconds: 0 }) })).status).toBe(400);
     });
   });
 });

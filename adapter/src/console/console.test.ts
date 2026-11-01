@@ -525,3 +525,27 @@ describe("插件装配（index.ts apply + console 配置）", () => {
     await dispose();
   });
 });
+describe("免打扰窗口投影", () => {
+  it("活动窗口出现在 session.dnd；没有窗口的会话不带该字段", async () => {
+    const view = {
+      sessionId: "s1",
+      startedAt: 1,
+      expiresAt: 2,
+      baselineMode: "workspace-write" as const,
+      allowedCount: 2,
+      recent: [{ at: 1, callId: "c1", toolName: "pwsh", requestedMode: "danger-full-access" as const, requestedModeText: "完全访问", display: "pwsh: npm install" }],
+    };
+    const govConsole = new GovernanceConsole({
+      audit: new AuditService(),
+      leases: new LeaseManager(new MemoryLeaseStore()),
+      dnd: { view: (sessionId: string) => (sessionId === "s1" ? view : undefined) },
+      // 宿主实时档位：即使没有沙箱授权也要下发（客户端据此判断完全访问下不可开免打扰）
+      currentMode: () => "read-only",
+    });
+    const withDnd = await govConsole.snapshot({ sessionId: "s1" });
+    expect(withDnd.sessions[0]?.dnd).toMatchObject({ allowedCount: 2, recent: [{ requestedModeText: "完全访问" }] });
+    expect(withDnd.sessions[0]?.sandbox.currentMode).toBe("read-only");
+    const withoutDnd = await govConsole.snapshot({ sessionId: "s2" });
+    expect(withoutDnd.sessions[0]?.dnd).toBeUndefined();
+  });
+});

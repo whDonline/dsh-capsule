@@ -226,6 +226,20 @@ describe("DSH 客户端半边（adapter/client.js）", () => {
     props: Record<string, unknown>;
     type: unknown;
   }
+  function clientPrimitives(): Record<string, unknown> {
+    // 作用：client.js 现在 require 原生组件包（Menu / 图标 / 风险确认）；Node 里用空组件替身，
+    // 装载与注册不依赖真实 DOM。
+    const Null = (): null => null;
+    return {
+      Menu: Null,
+      RiskConfirmation: Null,
+      IconChevronDownOutlineRegular: Null,
+      IconPauseOutlineRegular: Null,
+      IconCheckCircleOutlineRegular: Null,
+      IconAlarmClockOutlineRegular: Null,
+      IconShieldOutlineRegular: Null,
+    };
+  }
   function loadClientModule(): { inject: string[]; apply(ctx: unknown): void } {
     // 作用：在最小浏览器替身里执行 adapter/client.js，取出它的 cordis 插件对象。
     // 这里刻意只做"装载 + 注册"层面的验证：client.js 是浏览器模块，Node 里没有真实 React 与 DOM，
@@ -244,6 +258,7 @@ describe("DSH 客户端半边（adapter/client.js）", () => {
     expect(factory).toBeTypeOf("function");
     const plugin = factory!((name: string) => {
       if (name === "react") return React;
+      if (name === "@deepseek-ai/dsh-client-ui-primitives") return clientPrimitives();
       throw new Error(`unexpected require: ${name}`);
     });
     expect(plugin.inject).toEqual(["slots"]);
@@ -315,7 +330,7 @@ describe("DSH 客户端半边（adapter/client.js）", () => {
     expect(pick("命中复用")).toBe("6");
     expect(pick("复用率")).toBe("60");
     expect(pick("生效中")).toBe("1");
-    expect(pick("精确 / 族 / 免打扰")).toBe("2 / 3 / 1");
+    expect(pick("精确 / 族 / 沙箱")).toBe("2 / 3 / 1");
     expect(model.topFamilies[0]).toEqual(["同前缀 tsc", 3]);
     // rangeDays=0 → 全部
     expect(view.buildModel(records, 0, now).rows).toHaveLength(5);
@@ -380,6 +395,7 @@ describe("DSH 客户端半边（adapter/client.js）", () => {
     runInNewContext(source, { window: window_, document: document_, setTimeout, setInterval: () => 0, clearInterval: () => undefined, fetch: fetch_, console });
     const plugin = factory!((name: string) => {
       if (name === "react") return React;
+      if (name === "@deepseek-ai/dsh-client-ui-primitives") return clientPrimitives();
       throw new Error(`unexpected require: ${name}`);
     });
     let View: ((props: Record<string, unknown>) => unknown) | undefined;

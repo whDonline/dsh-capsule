@@ -6,6 +6,7 @@ import { PendingRegistry } from "./capability/pending.js";
 import { DEFAULT_UNIVERSAL_POLICY, PolicyResolver, type UniversalPolicyConfig } from "./capability/policy.js";
 import { ScopeResolver } from "./capability/scope-resolver.js";
 import { SandboxGrantManager, type SandboxContext } from "./capability/sandbox-grant.js";
+import { DndManager } from "./capability/dnd.js";
 import { isSandboxMode, type SandboxMode } from "./capability/escalation.js";
 import { DEFAULTABLE_SCOPE_MODES, SCOPE_MODES, isScopeMode, type ScopeMode } from "./capability/scope-modes.js";
 import { UniversalGate } from "./capability/universal-gate.js";
@@ -13,7 +14,7 @@ import { GuardActions } from "./console/actions.js";
 import { GovernanceConsole } from "./console/console-service.js";
 import { GovernancePolicy } from "./console/policy.js";
 import { createHostSessionDirectory } from "./console/session-directory.js";
-import { DEFAULT_GUARD_SETTINGS, GuardSettings, isGuardMode, type GuardMode } from "./capability/settings.js";
+import { DEFAULT_GUARD_SETTINGS, GuardSettings } from "./capability/settings.js";
 import { AuditJournal } from "./audit/journal.js";
 import type { ToolAuditEvent } from "./audit/types.js";
 import type { CapabilityLease } from "./capability/types.js";
@@ -79,12 +80,9 @@ export interface GuardPluginConfig extends Partial<UniversalPolicyConfig> {
   sweepIntervalMs?: number;
   /** 用户开关的初始值（默认 true）。运行期可在「能力授权」页切换，不落盘。 */
   modeEnabled?: boolean;
-  /** 三档范围模式的初始值：same-operation（默认）/ same-family / do-not-disturb */
-  mode?: GuardMode;
   /** ①② 复用时长（秒）；缺省沿用 defaultTtlSeconds */
   reuseTtlSeconds?: number;
-  /** ③ 免打扰的目标档位与时长（秒） */
-  dndTargetMode?: SandboxMode;
+  /** 免打扰窗口的默认时长（秒） */
   dndDurationSeconds?: number;
   /** 审计持久化（默认开启）：事件与授权追加写入本地 NDJSON，重启后可重放 */
   persistAudit?: boolean;
@@ -144,11 +142,9 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
   const settings = new GuardSettings({
     initial: {
       enabled: config?.modeEnabled ?? DEFAULT_GUARD_SETTINGS.enabled,
-      mode: isGuardMode(config?.mode) ? config.mode : DEFAULT_GUARD_SETTINGS.mode,
       // 复用时长默认取「产品默认」（30 分钟 = 一次开发会话），而不是部署策略里的 defaultTtlSeconds；
       // 否则把默认值调大也没用（实测：默认仍是 300 秒）。
       reuseTtlSeconds: config?.reuseTtlSeconds ?? DEFAULT_GUARD_SETTINGS.reuseTtlSeconds,
-      dndTargetMode: isSandboxMode(config?.dndTargetMode) ? config.dndTargetMode : DEFAULT_GUARD_SETTINGS.dndTargetMode,
       dndDurationSeconds: config?.dndDurationSeconds ?? DEFAULT_GUARD_SETTINGS.dndDurationSeconds,
     },
     maxTtlSeconds: governance.current.maxTtlSeconds,
@@ -180,6 +176,40 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
   // 其余 Universal Mode 行为完全不受影响。实例在此保留引用：治理台要读它的档位状态，
   // 收缩型动作要经它回滚档位（此前只注入 Gate，导致治理台完全看不到沙箱状态）。
   const sandboxGrants = new SandboxGrantManager(buildSandboxContext(ctx), leases);
+  // 免打扰窗口（2026-11-01 定稿）：任务级"限时完全访问"的审批放行层。
+  // 只放行窗口内带 requestedMode 的已记录升级；不改沙箱档位、不改审批策略、不签发 Lease。
+  const resolveSession = (sessionId: string): unknown => {
+    const sessions = getService(ctx, "sessions") as { get?: (id: string) => unknown } | undefined;
+    if (!sessions || typeof sessions.get !== "function") return undefined;
+    try {
+      return sessions.get(sessionId);
+    } catch {
+      return undefined;
+    }
+  };
+  const resolveMode = (sessionId: string): SandboxMode | undefined => {
+    const session = resolveSession(sessionId);
+    if (session === undefined || session === null) return undefined;
+    const policy = getService(ctx, "sandboxPolicy") as { resolve?: (request: { session: unknown }) => { mode?: unknown } } | undefined;
+    if (policy && typeof policy.resolve === "function") {
+      try {
+        const resolved = policy.resolve({ session });
+        if (isSandboxMode(resolved?.mode)) return resolved.mode;
+      } catch {
+        // 读取失败时回落到投影读取
+      }
+    }
+    try {
+      return buildSandboxContext(ctx).sessionSandboxMode(session);
+    } catch {
+      return undefined;
+    }
+  };
+  const dnd = new DndManager({
+    audit,
+    modeOf: resolveMode,
+    maxWindowMs: () => governance.config.maxTtlSeconds * 1000,
+  });
   const gate = new UniversalGate({
     policy: new PolicyResolver(policyConfig),
     scopes: new ScopeResolver(),
@@ -187,6 +217,7 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
     pending: new PendingRegistry(),
     audit,
     sandboxGrants,
+    dnd,
     // 用户开关关闭时所有 hook 直接透传（不签发、不提升、不改写任何状态）
     settings,
   });
@@ -196,6 +227,10 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
     guardName: name,
     // 治理台的两个状态来源：授权来自 LeaseManager，档位来自 SandboxGrantManager 的实时投影
     sandbox: { states: () => sandboxGrants.grantStates(), lastOutcomeOf: (sessionId: string) => sandboxGrants.lastOutcomeOf(sessionId) },
+    // 免打扰窗口是独立于 Lease 的实时状态（不进授权列表、不伪装成授权）
+    dnd: { view: (sessionId: string) => dnd.view(sessionId) },
+    // 宿主实时档位：免打扰据此判断"完全访问下不可开启"，tab 也据此显示当前档位
+    currentMode: resolveMode,
     // 会话显示名（可选能力：读不到标题就降级为 cwd / 短 ID）
     sessions: createHostSessionDirectory(ctx),
   });
@@ -204,16 +239,8 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
     leases,
     sandbox: sandboxGrants,
     audit,
-    // 免打扰窗口要真正生效必须提升会话档位：这里按 cordis 的方式解析 Session（缺失时动作层拒绝开窗，Fail Closed）
-    resolveSession: (sessionId: string) => {
-      const sessions = getService(ctx, "sessions") as { get?: (id: string) => unknown } | undefined;
-      if (!sessions || typeof sessions.get !== "function") return undefined;
-      try {
-        return sessions.get(sessionId);
-      } catch {
-        return undefined;
-      }
-    },
+    // 免打扰窗口要真正生效必须能解析到会话（缺失时动作层拒绝开窗，Fail Closed）
+    resolveSession,
     maxTtlSeconds: () => governance.config.maxTtlSeconds,
     // 只允许给「配置里真的走沙箱升级链路」的工具开窗（防止把窗口变成任意工具的放宽通道）
     allowTool: (toolName: string) => {
@@ -229,14 +256,23 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
     throw new Error("GUARD_INSTALL_FAILED: ctx.on unavailable");
   }
   const dispose = gate.install(ctx as unknown as Parameters<UniversalGate["install"]>[0]);
-  // 免打扰时间窗：只让 gate 记一个到期时间，**不调用 setSandboxMode**
-  //（否则 DSH 原生档位会显示成 Custom——2026-10-31 实测反馈）。
+  // 免打扰时间窗：Gate 只负责在审批到达时问 manager；窗口状态由 DndManager 独占（不写档位、不签 Lease）。
   const consoleActions = {
     // 显式委托：GuardActions 是 class，方法在原型上，展开运算符拷不过来
     revokeSession: (sessionId: string) => actions.revokeSession(sessionId),
     restoreSandbox: (sessionId: string) => actions.restoreSandbox(sessionId),
     openWindow: (request: Parameters<typeof actions.openWindow>[0]) => actions.openWindow(request),
-    startDnd: (sessionId: string, ttlSeconds: number) => ({ sessionId, expiresAt: gate.startDoNotDisturb(sessionId, ttlSeconds) }),
+    startDnd: (sessionId: string, ttlSeconds: number) => {
+      if (!settings.active) throw new Error("GUARD_DND_INVALID: 能力授权已关闭，免打扰不会生效");
+      if (resolveSession(sessionId) === undefined) throw new Error("GUARD_DND_INVALID: session not resolvable");
+      const view = dnd.start(sessionId, ttlSeconds);
+      return { sessionId, expiresAt: view.expiresAt };
+    },
+    stopDnd: (sessionId: string) => dnd.stop(sessionId, "user"),
+    extendDnd: (sessionId: string, addSeconds: number) => {
+      const view = dnd.extend(sessionId, addSeconds);
+      return { sessionId, expiresAt: view.expiresAt };
+    },
   };
   // 低频结算：把「授权已失效但档位还没收回」的会话宽模式及时收回去。
   // 正确性不依赖它（安全性由 LeaseManager 实时判定），关闭它只会让回滚推迟到下次工具调用。
@@ -244,6 +280,8 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
   let sweepTimer: ReturnType<typeof setInterval> | undefined;
   if (sweepIntervalMs > 0) {
     sweepTimer = setInterval(() => {
+      // 免打扰窗口的过期/档位漂移不依赖定时器（读写时实时判定），这里只是让状态与审计更及时。
+      dnd.sweep();
       void gate.settleNow().catch((err: unknown) => {
         process.stderr.write(`[dsh-guard] sandbox sweep failed: ${String(err)}\n`);
       });
@@ -264,6 +302,8 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
   return async () => {
     if (sweepTimer) clearInterval(sweepTimer);
     sweepTimer = undefined;
+    // 插件卸载/重载时窗口立即失效（fail closed），并留下关闭记录
+    dnd.closeAll("plugin-dispose");
     if (consoleHandle) {
       await consoleHandle.close();
     }

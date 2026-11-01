@@ -76,13 +76,20 @@ DSH Capability Guard（TS 插件，横切）
 15. 错误统一使用规格第 18 节错误码（`LEASE_REQUIRED` / `CAPABILITY_MISMATCH` / `CREDENTIAL_NOT_CONFIGURED` 等），禁止杂乱字符串。
 16. 每完成一个 Phase，先补齐规格要求的测试并全部通过，再进入下一 Phase；禁止为通过测试删除安全断言。
 17. V1 禁止顺手实现 Dashboard/Web UI（Phase 4 才做）；禁止在同一 Phase 大规模 Rename 仓库（项目名暂保 dsh-capsule，新模块内部命名用 Capability Guard / LeaseManager）。
-18. **审批瀑布三条红线（2026-09-14 基线新增；2026-10-31 按产品定稿窄化 (a)）**：
+18. **审批瀑布三条红线（2026-09-14 基线；2026-10-31 窄化 (a)；2026-11-01 增加免打扰窗口例外 (a1)）**：
     (a) `approval/request` 处理器**默认只观察**：默认路径必须 `await next()` 并原样返回其结果。
-    **唯一例外（代答 `allowed-once`）必须同时满足 5 个条件**：① 本 `callId` 在 `tools/execute` 被 Guard 亲自记录过操作指纹；
+    **例外一（同操作复用，代答 `allowed-once`）必须同时满足 5 个条件**：① 本 `callId` 在 `tools/execute` 被 Guard 亲自记录过操作指纹；
     ② 审批请求的会话与工具名与记录一致；③ 存在 ACTIVE 且未过期的授权；④ 授权 scope key 与本次操作指纹完全一致；
     ⑤ 用户开关处于启用状态。任一不满足 → 必须 `await next()`；**未注入 `settings` 时永不代答**（保持历史行为，供回滚）。
     该例外只表示「同一条操作，人已经批准过一次」，不提升任何权限。由 `operation-reuse.test.ts` 九条用例守护
     （无记录 / 会话不符 / 参数不同 / 目标档位不同 / 过期 / 撤销 / 被拒绝 / 关闭开关 全部必须惊动人类答话器）。
+    (a1) **例外二（免打扰窗口，代答 `allowed-once`）**：仅当同时满足 ① 注入 `settings` 且 `enabled=true`；
+    ② 该会话存在由用户显式开启、未过期的免打扰窗口；③ 本 `callId` 在 `tools/execute` 被 Guard 记录过；
+    ④ 审批的会话/工具与记录一致；⑤ 记录里带 `requestedMode`（即这是一次沙箱升级，不是普通审批）。
+    满足时代答 `allowed-once` 并写 `DND_ALLOWED`，**不签发 Lease、不提升档位**；任一不满足（含窗口到期/被手动结束/
+    原生档位被改）必须 `await next()`。免打扰**绝不**接管没有 `requestedMode` 的审批，也不为子 session 开启
+    （子 agent approval policy 被钉死为 `never`，见 (c)）。由 `capability/dnd.test.ts` 与
+    `universal-gate.test.ts` 的免打扰用例守护。
     (a2) **`approval/request` 上只允许注册这一个 prepend 监听器**（2026-09-14 真 cordis 实测：prepend 监听器互相遮蔽——后注册的 prepend 排最前，认领后不再调用 `next()`，先注册者收不到事件）。任何额外的 prepend 监听器都会把 Guard 挤出观察位置，造成"审批通过却静默不签发 Lease"。同时必须校验审批发起者 session 与上下文一致，不一致一律不接管。
     (b) 提升授权**只能用 `setSandboxMode`**；**严禁** `permissionPresets.set` / `approval.setPolicy`（内置 `danger-full-access` preset 配 `approval: never`，调用即永久关闭审批）。回滚前必须做冲突检测：当前模式已非 Guard 写入值（用户手动改过）则**跳过回滚**并记审计，绝不冲掉用户选择。
     (c) **禁止为子 session 签发 Lease** —— 子 agent 的 approval policy 被 DSH 钉死为 `never`，其授权请求在瀑布派发前就 fail-closed；跨 session 继承授权在设计上不可能，也不允许尝试。
@@ -132,27 +139,35 @@ assets/                      # README 用示意图（结构示意，非截图）
 4. **策略写接口只能改 `defaultScope` / `defaultTtlSeconds` / `maxTtlSeconds`**：
    `enabled` 与 `rules` 是部署配置，接口层返回 400；`tool` 挡位禁止作为默认值（规格第 7 条）。
    运行期改动**不落盘**（Guard 不写 profile 的 `cordis.patch.yml`）。
-4.1. **治理台动作接口（2026-10-31 项目所有者批准）**：`POST /api/revoke` 与 `POST /api/window`。
+4.1. **治理台动作接口（2026-10-31 批准；2026-11-01 增加免打扰窗口）**：`POST /api/revoke`、`/api/window`、
+   `/api/dnd`、`/api/dnd/stop`、`/api/dnd/extend`。
    - `action=revoke`（默认）＝ 撤销该会话全部有效授权 + `releaseSession` 回滚档位（只收紧）；
    - `action=restore-sandbox` ＝ 只结算该会话中**已失效**的授权（`SandboxGrantManager.restoreSession`），
      仍有效的授权与用户手动设定的档位一律不动（红线 2）；
-   - **`/api/window` 是唯一由页面发起的放宽**：用户点击「免打扰窗口」＝一次显式 allowed-once，
-     为 (toolName, mode) 签发有界 `sandbox-mode` 授权并立即提升会话档位。约束：TTL 必须为正整数且
-     ≤ 运行期 `maxTtlSeconds`（不静默裁剪）；必须能解析到真实 Session（否则拒绝，避免"授权了却不生效"）；
-     工具必须被配置为 `sandbox-escalation`（`allowTool` 注入后才校验）；失败时回滚已签发授权。
-   三者共用同一套闸门（`x-dsh-guard` 头 + `application/json` + loopback 来源），非 POST 一律 405；
-   都写审计（`LEASE_REVOKED` / `WINDOW_OPENED` / `SANDBOX_MODE_RESTORED`）。
-   **安全提示（必须写进 README）**：治理接口是本机 loopback 上的无鉴权面，"能开窗"就等于"能放宽权限"；
-   不信任本机进程时请把 `console.enabled` 设为 `false`。
+   - **`/api/dnd` 是用户显式开启的免打扰窗口（限时完全访问的审批放行层）**：请求体
+     `{ sessionId, ttlSeconds }`；窗口状态由 `capability/dnd.ts` 的 `DndManager` 独占，**不写沙箱档位、
+     不写审批策略、不签发 Lease**。约束：TTL 为正整数且 ≤ 运行期 `maxTtlSeconds`；必须能解析到真实 Session；
+     `enabled=false` 或当前档位是 `danger-full-access` 时拒绝（后者没有可放行的审批）；
+   - `/api/dnd/stop`（`{sessionId}`）纯收缩；`/api/dnd/extend`（`{sessionId, addSeconds}`）延长，
+     但窗口总时长不得超过 `maxTtlSeconds`（不允许续成永久授权）；
+   - `/api/window` 仍是"签发 sandbox-mode Lease + 提升档位"的有界放宽（`openWindow`），保留给脚本/排障；
+     当前面向用户的 UI 不调用它，**不要把它和免打扰混为一谈**。
+   所有写接口共用同一套闸门（`x-dsh-guard` 头 + `application/json` + loopback 来源），非 POST 一律 405；
+   都写审计（`LEASE_REVOKED` / `WINDOW_OPENED` / `SANDBOX_MODE_RESTORED` / `DND_*`）。
+   **安全提示（必须写进 README）**：治理接口是本机 loopback 上的无鉴权面，"能开免打扰"就等于
+   "窗口内能自动批准沙箱升级（限时完全访问）"；不信任本机进程时请把 `console.enabled` 设为 `false`。
 5. **客户端半边的槽位（2026-10-31 更新）**：`conversation.input.dock`（一眼层）与
    `conversation.view`（详情层）都是 session 作用域，组件直接拿到 `sessionId`；
    **不再注册 `main` 面板与 `sidebar.panellist` 图标**（项目所有者要求"先不做全局中台"）。
    旧的 `main` 槽是 root-scoped、`ownerProps` 为空，拿不到会话绑定——这正是放弃全局面板、
    改为会话内嵌的原因，不要再用服务端「最近活动」推断去冒充当前会话。
-6. **改完插件代码必须重启 DSH**：profile 的 HMR 只重组配置，不会重新加载已装载模块的新一代 JavaScript。
-7. **治理台的两个状态必须分开（2026-10-31）**：「授权是否仍有效」（`LeaseManager`）与
-   「沙箱档位是否已恢复」（`SandboxGrantManager.grantStates()` 的实时读数）是两条独立状态。
-   **倒计时归零只表示授权到期，不得据此显示「已恢复」**；读不到宿主档位就是 `unknown`。
+6. **改完宿主端插件代码必须重启 DSH**：profile 的 HMR 只重组配置，不会重新加载已装载的宿主模块的新一代
+   JavaScript；只改 `client.js` 时 Web 客户端会通过客户端 HMR 重新加载，但**涉及接口/快照字段变化时必须重启**，
+   否则会出现"新 UI 接旧接口"（客户端已用 `/api/config.features.dndWindow` 做降级提示）。
+7. **治理台的三个状态必须分开（2026-11-01 更新）**：「授权是否仍有效」（`LeaseManager`）、
+   「沙箱档位是否已恢复」（`SandboxGrantManager.grantStates()` 的实时读数）与「免打扰窗口是否仍在」
+   （`DndManager.view()`）是三条独立状态。**倒计时归零只表示结束，不得据此推断另外两个状态**；
+   读不到宿主档位就是 `unknown`。
    `SandboxModeResult` 必须携带 `sessionId`/`leaseId`，否则回滚事件无法归属会话
    （历史缺陷：审计里的 `SANDBOX_MODE_RESTORED` 没有 sessionId）。
 8. **档位自动回滚节拍 `sweepIntervalMs`（默认 30000，0 = 关闭）不是安全机制**：
@@ -171,32 +186,37 @@ assets/                      # README 用示意图（结构示意，非截图）
     提示条与 tab 的显示规则（2026-10-31 改定）：**提示条只在有内容可行动时出现**（生效中的授权 / 待回滚档位）；
     没有授权或授权刚结束时**整条隐藏**——输入框左侧的模式 chip 已常驻显示"功能存在 + 当前档位"，
     再写"本会话没有临时放开的操作"纯属噪声（项目所有者实测后要求去掉）。
-11. **用户配置已搬到会话内「能力授权」tab（2026-10-31 改定）**：`settings.section` **不再注册**
+11. **用户配置已搬到会话内「能力授权」tab（2026-11-01 更新）**：`settings.section` **不再注册**
     （放在设置页会误导成"全局另有入口"，且与产品决定冲突）。配置项收敛为：`enabled`（用户开关）+
-    `mode`（三档）+ `reuseTtlSeconds` + `dndTargetMode` / `dndDurationSeconds`，全部经
-    `PATCH /api/config { settings: {...} }` 写入（与 `capability/settings.ts` 的 `GuardSettings` 一一对应，校验 Fail Closed）。
-    部署配置（`enabled` / `rules` / `defaultScopePaths` / `sweepIntervalMs`）仍然只能改 profile，页面只读。
+    `reuseTtlSeconds` + `dndDurationSeconds`，经 `PATCH /api/config { settings: {...} }` 写入
+    （与 `capability/settings.ts` 的 `GuardSettings` 一一对应，校验 Fail Closed）。
+    **免打扰不再是设置里的 `mode` / `dndTargetMode`**：它是一次 `POST /api/dnd` 的窗口，窗口的开关、
+    结束、延长各自是动作接口，不写设置。部署配置（`enabled` / `rules` / `defaultScopePaths` / `sweepIntervalMs`）
+    仍然只能改 profile，页面只读。
 12. **授权决策记录才是面向人的审计面（2026-10-31）**：`console/decisions.ts` 是**纯函数**，把 Lease + 审计事件
     折叠成「一条授权一份记录」（批准了什么 → 复用几次 → 权限级别效果 → 怎么结束），由 `GET /api/decisions`
     与会话内 tab 共用；`PASSTHROUGH_*` / `TOOL_*` 属遥测，默认折叠在「原始事件（排障用）」里，
     不得再当作"审计"摆给用户看。会话统计中的 `savedApprovals` = 该会话 `LEASE_REUSED` 次数，
     它是**价值指标**（用户少点了几次批准），不是安全指标，不得用于任何权限判定。
-13. **文案只有一份来源（2026-10-31，C 类收敛）**：审计决策的 id/类型/中文名在 `audit/catalog.ts`
-    （`AUDIT_DECISIONS` / `AuditDecision` / `AUDIT_DECISION_LABELS`），沙箱档位中文名在
-    `capability/escalation.ts`（`SANDBOX_MODE_LABELS` / `sandboxModeLabel`），三档模式中文名与说明在
-    `capability/settings.ts`（`GUARD_MODE_LABELS` / `GUARD_MODE_SUMMARIES`）。
-    接口负责把**结果文本**下发：`/api/config.catalog`（决策目录 + 沙箱档位目录 + 三档目录）、
-    `/api/config.settings.modeLabel`、`/api/audit` 的 `decisionLabel`、
-    `/api/snapshot` 的 `currentModeText`/`baselineModeText`/`targetModeText`。
+13. **文案只有一份来源（2026-10-31，C 类收敛；2026-11-01 更新）**：审计决策的 id/类型/中文名在
+    `audit/catalog.ts`（`AUDIT_DECISIONS` / `AuditDecision` / `AUDIT_DECISION_LABELS`），沙箱档位中文名在
+    `capability/escalation.ts`（`SANDBOX_MODE_LABELS` / `sandboxModeLabel`），挡位菜单的中文名与说明在
+    `capability/settings.ts`（`GUARD_MODE_LABELS` / `GUARD_MODE_SUMMARIES`，仅作 UI 目录，不再持久化）。
+    接口负责把**结果文本**下发：`/api/config.catalog`（决策目录 + 沙箱档位目录 + 挡位菜单目录）、
+    `/api/audit` 的 `decisionLabel`、`/api/snapshot` 的 `currentModeText` / `baselineModeText` / `targetModeText`
+    与 `sessions[].dnd.recent[].requestedModeText`。
     **前端（`client.js` / `console-ui.ts`）禁止再维护任何决策、档位或模式的映射表**——新增一项只应改对应 catalog；
     历史缺陷正是"加一个决策要改三个文件，漏一处就静默不显示"。
-14. **两档范围模式（2026-10-31 产品精简：原三档合并为两档）**：
-    `same-operation`（默认，UI 名「同类复用」）/ `do-not-disturb`（免打扰：整个会话提升到目标档位，到期自动回滚）。
-    「同类复用」= 命令前缀（程序 + 子命令；复合命令按 ALL 语义逐条都要有放行）+ 同一文件 / 同一目录（均带目标档位）+
-    只读工具族；破坏性程序（rm/del/Remove-Item/mv/format…）与高危子命令（git push 等）**不产生任何族**。
-    旧的 `same-family` 只作为**输入别名**保留，读入即归一成 `same-operation`（不再注册为独立挡位）。
-    **只有免打扰会写沙箱档位**，且必须由用户点「开始免打扰」才生效（选中配置不算）。
-    `enabled=false`（用户开关关闭）时所有 hook 直接透传：不记 pending、不签发、不提升、不写审计。
+14. **短期授权 + 免打扰窗口（2026-11-01 定稿，取代旧的"两档模式/提升档位"语义）**：
+    - **短期授权**：`same-operation` 语义的 Lease 复用——命令前缀（程序 + 子命令；复合命令按 ALL 语义逐条都要有放行）+
+      同一文件 / 同一目录（均带目标档位）+ 只读工具族；破坏性程序（rm/del/Remove-Item/mv/format…）与高危子命令
+      （git push 等）**不产生任何族**。旧的 `same-family` 只作为**输入别名**保留，读入即归一成 `same-operation`。
+    - **免打扰窗口**：用户显式开启的「限时完全访问」审批放行层（`capability/dnd.ts`）。窗口内只自动批准本会话
+      带 `requestedMode` 的已记录沙箱升级（`allowed-once`，记 `DND_ALLOWED`）；**不改沙箱档位、不改审批策略、
+      不签发 Lease**；`danger-full-access` 挡位下不可开启；到期 / 用户手动结束 / 原生挡位被改 / 插件卸载立即失效；
+      窗口状态由 `DndManager` 单独投影为 `sessions[].dnd`，**不得伪装成 Lease 或混进授权列表**。
+    - **不再有持久化 `mode` / `dndTargetMode`**；配置只有 `enabled` / `reuseTtlSeconds` / `dndDurationSeconds`。
+    - `enabled=false`（用户开关关闭）时所有 hook 直接透传：不记 pending、不签发、不提升、不写审计；免打扰窗口也不会被创建。
 15. **审计持久化（2026-10-31）**：`audit/journal.ts` 把「审计事件」与「授权记录」以 **NDJSON 追加**写入
     `<用户目录>/.dsh/capability-guard/audit.ndjson`（可用 `auditFile` 覆盖，`persistAudit: false` 关闭），
     启动时重放回 `AuditService` 与 `MemoryLeaseStore`（同一 Lease 只保留最后状态）。
@@ -209,6 +229,10 @@ assets/                      # README 用示意图（结构示意，非截图）
   ask → allowed-once → 签发 → 复用 → TTL 过期 / 撤销 → 重新询问，以及沙箱升级的
   「提升档位 → 复用 → 到期回滚 → 用户手动改动则跳过回滚」，并覆盖「无工具调用时靠 sweeper 收回档位」
   以及治理视图在 `pending-restore` → `restored` 之间的状态迁移。
+- **免打扰窗口已跑通（2026-11-01）**：`capability/dnd.test.ts`（窗口开启/到期/停止/延长/档位漂移/审计）+
+  `universal-gate.test.ts` 的 5 条接线用例（窗口内只放行带 requestedMode 的升级、无窗口/无 requestedMode/
+  到期/跨会话全部委派）+ `http-actions.test.ts` 的三组接口用例 + `console.test.ts` 的 `sessions[].dnd` 投影。
+  语义见 7.1 第 14 条：免打扰是窗口，不是持久化模式，也不写沙箱档位。
 - **权限代理（Managed Broker 链路）已按项目决策整体移除（2026-10-30）**：`broker/`、`service/`、
   `sdk/typescript/`、`extensions/github-demo/` 均已删除（2026-10-31 清理空目录与残留文件）。
   当前交付面只有：通用短期授权、沙箱提升与回滚、授权决策记录、治理界面。不要以"历史保留"为由恢复它们。

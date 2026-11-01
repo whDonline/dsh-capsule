@@ -45,7 +45,7 @@ export const GUARD_WRITE_HEADER = "x-dsh-guard";
 /** Guard 治理接口挂到 DSH Web 服务器上的同源前缀（面板优先走这条路径，避免跨源与额外端口）。 */
 export const GUARD_WEB_PREFIX = "/guard";
 /** 同源路径与路径映射表——同一份路由同时服务独立端口与 DSH 同源前缀，避免两套实现漂移。 */
-const ROUTES: readonly string[] = ["/", "/index.html", "/console.js", "/api/snapshot", "/api/audit", "/api/decisions", "/api/config", "/api/revoke", "/api/window", "/api/dnd"];
+const ROUTES: readonly string[] = ["/", "/index.html", "/console.js", "/api/snapshot", "/api/audit", "/api/decisions", "/api/config", "/api/revoke", "/api/window", "/api/dnd", "/api/dnd/stop", "/api/dnd/extend"];
 const LOOPBACK_HOSTNAMES: readonly string[] = ["127.0.0.1", "localhost", "[::1]", "::1"];
 /** 允许被跨源读取的来源——只放行本机页面（http://127.0.0.1:任意端口 / http://localhost:任意端口）。
  * 为什么需要：DSH Web GUI 运行在 http://127.0.0.1:<DSH 端口>，与独立 Console 端口不同源；
@@ -127,7 +127,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, govConso
       return;
     }
     // 写接口只接受 POST：其他方法一律 405（不要让 GET 落到「未知路径」的 404 上，误导排障）
-    if ((pathname === "/api/revoke" || pathname === "/api/window" || pathname === "/api/dnd") && req.method !== "POST") {
+    if ((pathname === "/api/revoke" || pathname === "/api/window" || pathname === "/api/dnd" || pathname === "/api/dnd/stop" || pathname === "/api/dnd/extend") && req.method !== "POST") {
       sendJson(res, 405, { error: "METHOD_NOT_ALLOWED" });
       return;
     }
@@ -189,6 +189,14 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, govConso
     }
     if (req.method === "POST" && pathname === "/api/dnd") {
       await handleDnd(req, res, routeOptions.actions);
+      return;
+    }
+    if (req.method === "POST" && pathname === "/api/dnd/stop") {
+      await handleDndStop(req, res, routeOptions.actions);
+      return;
+    }
+    if (req.method === "POST" && pathname === "/api/dnd/extend") {
+      await handleDndExtend(req, res, routeOptions.actions);
       return;
     }
     sendJson(res, 405, { error: "METHOD_NOT_ALLOWED" });
@@ -441,7 +449,7 @@ async function handleConfigPatch(req: IncomingMessage, res: ServerResponse, poli
       return;
     }
     const raw = patch.settings as Record<string, unknown>;
-    const settingsKeys = new Set(["enabled", "mode", "reuseTtlSeconds", "dndTargetMode", "dndDurationSeconds"]);
+    const settingsKeys = new Set(["enabled", "reuseTtlSeconds", "dndDurationSeconds"]);
     for (const key of Object.keys(raw)) {
       if (!settingsKeys.has(key)) {
         sendJson(res, 400, { error: "IMMUTABLE_FIELD", field: key });
@@ -451,9 +459,7 @@ async function handleConfigPatch(req: IncomingMessage, res: ServerResponse, poli
     try {
       const next = settings.update({
         enabled: raw.enabled as boolean | undefined,
-        mode: raw.mode as never,
         reuseTtlSeconds: raw.reuseTtlSeconds as number | undefined,
-        dndTargetMode: raw.dndTargetMode as never,
         dndDurationSeconds: raw.dndDurationSeconds as number | undefined,
       });
       sendJson(res, 200, { settings: next });
@@ -511,15 +517,16 @@ function policyDocument(policy: GovernancePolicy | undefined, routeOptions: Cons
     ...GUARD_MODES.map((id) => ({ id, label: GUARD_MODE_LABELS[id], summary: GUARD_MODE_SUMMARIES[id] })),
   ];
   const catalog = { sandboxModes, decisions, guardModes };
+  // 能力标记：客户端据此判断宿主端是否已具备新的免打扰窗口（旧宿主没有这个字段时，
+  // 客户端会显示"重启后生效"，避免把新 UI 接到旧接口上产生静默无效的点击）。
+  const features = { dndWindow: true };
   const settingsSnapshot = routeOptions.settings?.snapshot();
-  const settings = settingsSnapshot
-    ? { ...settingsSnapshot, modeLabel: GUARD_MODE_LABELS[settingsSnapshot.mode], modeSummary: GUARD_MODE_SUMMARIES[settingsSnapshot.mode] }
-    : undefined;
+  const settings = settingsSnapshot ? { ...settingsSnapshot } : undefined;
   const diagnostics = routeOptions.diagnostics ? routeOptions.diagnostics() : undefined;
   if (!policy) {
-    return { policy: undefined, modes: modeCatalog(), catalog, settings, diagnostics, writable: [], immutable: ["enabled", "rules"], routes, actions, sweep };
+    return { policy: undefined, modes: modeCatalog(), catalog, settings, features, diagnostics, writable: [], immutable: ["enabled", "rules"], routes, actions, sweep };
   }
-  return { policy: policy.snapshot(), modes: modeCatalog(), catalog, settings, diagnostics, writable: ["defaultScope", "defaultTtlSeconds", "maxTtlSeconds"], immutable: ["enabled", "rules"], routes, actions, sweep };
+  return { policy: policy.snapshot(), modes: modeCatalog(), catalog, settings, features, diagnostics, writable: ["defaultScope", "defaultTtlSeconds", "maxTtlSeconds"], immutable: ["enabled", "rules"], routes, actions, sweep };
 }
 function modeCatalog(): unknown {
   // 作用：挡位目录投影——供前端渲染下拉框；defaultable 标记哪些挡位允许作为默认值（tool 不允许）
@@ -655,8 +662,34 @@ export function parseWindowBody(raw: unknown): ConsoleWindowRequest | undefined 
   if (typeof ttlSeconds !== "number" || !Number.isInteger(ttlSeconds) || ttlSeconds <= 0) return undefined;
   return { sessionId, toolName, mode, ttlSeconds };
 }
+function parseDndSession(raw: unknown, extraKeys: readonly string[]): Record<string, unknown> | undefined {
+  // 作用：免打扰三个写接口的公共请求体校验——只接受 sessionId 与各自声明的额外字段，多一个都拒绝。
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const record = raw as Record<string, unknown>;
+  const allowed = new Set(["sessionId", ...extraKeys]);
+  for (const key of Object.keys(record)) {
+    if (!allowed.has(key)) return undefined;
+  }
+  const sessionId = record.sessionId;
+  if (typeof sessionId !== "string" || sessionId.length === 0 || sessionId.length > 200) return undefined;
+  return record;
+}
+function dndError(res: ServerResponse, err: unknown): void {
+  // 作用：把动作层错误映射成明确的 HTTP 状态——参数/状态非法 400，完全访问等不适用场景 409。
+  const message = err instanceof Error ? err.message : String(err);
+  if (message.startsWith("GUARD_DND_NOT_APPLICABLE")) {
+    sendJson(res, 409, { error: "DND_NOT_APPLICABLE", message });
+    return;
+  }
+  if (message.startsWith("GUARD_DND_INVALID")) {
+    sendJson(res, 400, { error: "DND_INVALID", message });
+    return;
+  }
+  process.stderr.write(`[dsh-guard] dnd action failed: ${message}\n`);
+  sendJson(res, 500, { error: "ACTION_FAILED" });
+}
 async function handleDnd(req: IncomingMessage, res: ServerResponse, actions: ConsoleActions | undefined): Promise<void> {
-  // 作用：开始免打扰时间窗——只放行审批，**不修改沙箱档位**（避免 DSH 原生档位变成 Custom）。
+  // 作用：开始免打扰窗口（用户显式点击）——窗口内自动批准本会话的沙箱升级；不改沙箱档位、不签 Lease。
   // 与其它写接口共用同一套闸门（自定义头 + JSON content-type + loopback 来源）。
   if (!actions || typeof actions.startDnd !== "function") {
     sendJson(res, 503, { error: "ACTIONS_UNAVAILABLE" });
@@ -678,17 +711,84 @@ async function handleDnd(req: IncomingMessage, res: ServerResponse, actions: Con
     sendJson(res, 400, { error: "INVALID_JSON" });
     return;
   }
-  const body = raw as { sessionId?: unknown; ttlSeconds?: unknown };
-  const sessionId = typeof body?.sessionId === "string" ? body.sessionId : "";
+  const body = parseDndSession(raw, ["ttlSeconds"]);
   const ttlSeconds = Number(body?.ttlSeconds);
-  if (sessionId.length === 0 || !Number.isInteger(ttlSeconds) || ttlSeconds <= 0) {
+  if (!body || !Number.isInteger(ttlSeconds) || ttlSeconds <= 0) {
     sendJson(res, 400, { error: "INVALID_BODY" });
     return;
   }
   try {
-    sendJson(res, 200, actions.startDnd(sessionId, ttlSeconds));
+    sendJson(res, 200, { ok: true, ...actions.startDnd(body.sessionId as string, ttlSeconds) });
   } catch (err) {
-    sendJson(res, 409, { error: "DND_REJECTED", message: err instanceof Error ? err.message : String(err) });
+    dndError(res, err);
+  }
+}
+async function handleDndStop(req: IncomingMessage, res: ServerResponse, actions: ConsoleActions | undefined): Promise<void> {
+  // 作用：提前结束免打扰窗口（纯收缩动作）——用户点「结束免打扰」时调用。
+  if (!actions || typeof actions.stopDnd !== "function") {
+    sendJson(res, 503, { error: "ACTIONS_UNAVAILABLE" });
+    return;
+  }
+  if (req.headers[GUARD_WRITE_HEADER] === undefined) {
+    sendJson(res, 403, { error: "WRITE_HEADER_REQUIRED" });
+    return;
+  }
+  const contentType = String(req.headers["content-type"] ?? "");
+  if (!contentType.toLowerCase().startsWith("application/json")) {
+    sendJson(res, 415, { error: "JSON_CONTENT_TYPE_REQUIRED" });
+    return;
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse((await readBody(req)).toString("utf8"));
+  } catch {
+    sendJson(res, 400, { error: "INVALID_JSON" });
+    return;
+  }
+  const body = parseDndSession(raw, []);
+  if (!body) {
+    sendJson(res, 400, { error: "INVALID_BODY" });
+    return;
+  }
+  try {
+    const stopped = actions.stopDnd(body.sessionId as string);
+    sendJson(res, 200, { ok: true, sessionId: body.sessionId, stopped });
+  } catch (err) {
+    dndError(res, err);
+  }
+}
+async function handleDndExtend(req: IncomingMessage, res: ServerResponse, actions: ConsoleActions | undefined): Promise<void> {
+  // 作用：延长免打扰窗口——仍受 maxTtlSeconds 约束（不能续成永久授权）。
+  if (!actions || typeof actions.extendDnd !== "function") {
+    sendJson(res, 503, { error: "ACTIONS_UNAVAILABLE" });
+    return;
+  }
+  if (req.headers[GUARD_WRITE_HEADER] === undefined) {
+    sendJson(res, 403, { error: "WRITE_HEADER_REQUIRED" });
+    return;
+  }
+  const contentType = String(req.headers["content-type"] ?? "");
+  if (!contentType.toLowerCase().startsWith("application/json")) {
+    sendJson(res, 415, { error: "JSON_CONTENT_TYPE_REQUIRED" });
+    return;
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse((await readBody(req)).toString("utf8"));
+  } catch {
+    sendJson(res, 400, { error: "INVALID_JSON" });
+    return;
+  }
+  const body = parseDndSession(raw, ["addSeconds"]);
+  const addSeconds = Number(body?.addSeconds);
+  if (!body || !Number.isInteger(addSeconds) || addSeconds <= 0) {
+    sendJson(res, 400, { error: "INVALID_BODY" });
+    return;
+  }
+  try {
+    sendJson(res, 200, { ok: true, ...actions.extendDnd(body.sessionId as string, addSeconds) });
+  } catch (err) {
+    dndError(res, err);
   }
 }
 async function handleWindow(req: IncomingMessage, res: ServerResponse, actions: ConsoleActions | undefined): Promise<void> {

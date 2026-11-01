@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuditService } from "../audit/audit-service.js";
+import { DndManager } from "./dnd.js";
 import { LeaseManager } from "./lease-manager.js";
 import { MemoryLeaseStore } from "./lease-store.js";
 import { PendingRegistry } from "./pending.js";
@@ -277,5 +278,81 @@ describe("UniversalGate tools/pre-execute（规格 22 清单）", () => {
     expect(disposers).toHaveLength(4);
     expect(() => dispose()).not.toThrow();
     expect(pending.size()).toBe(0);
+  });
+});
+// 作用：免打扰窗口（2026-11-01 定稿）的 Gate 接线——窗口内只自动放行带 requestedMode 的升级。
+describe("UniversalGate 免打扰窗口（限时完全访问的审批放行层）", () => {
+  function makeDndGate() {
+    const audit = new AuditService();
+    const pending = new PendingRegistry();
+    const leases = new LeaseManager(new MemoryLeaseStore(clock), clock);
+    const dnd = new DndManager({
+      audit,
+      modeOf: () => "workspace-write",
+      maxWindowMs: () => 1_800_000,
+      now: clock,
+    });
+    const gate = new UniversalGate({
+      policy: new PolicyResolver(DEFAULT_UNIVERSAL_POLICY),
+      scopes: new ScopeResolver(),
+      leases,
+      pending,
+      audit,
+      // 注入 settings 才走「按操作记录 + 免打扰」的新语义
+      settings: { active: true, mode: "same-operation", reuseTtlSeconds: 1800 },
+      dnd,
+      now: clock,
+    });
+    return { gate, dnd, audit, leases };
+  }
+  const escalationArgs = { command: "npm install -g foo", sandbox_permissions: "danger-full-access", justification: "需要写工作区外的全局目录" };
+  it("窗口内：带 requestedMode 的升级自动 allowed-once，不调用人类答话器、不签发 Lease", async () => {
+    const { gate, dnd, audit, leases } = makeDndGate();
+    await gate.handleExecute(execOf("c1", escalationArgs, "s1", "pwsh"), async () => ({}));
+    dnd.start("s1", 900);
+    const next = vi.fn(async () => "rejected" as const);
+    const out = await gate.handleApprovalRequest({ callId: "c1", toolName: "pwsh", agent: { id: "s1" } }, next);
+    expect(out).toBe("allowed-once");
+    expect(next).not.toHaveBeenCalled();
+    expect(await leases.list()).toHaveLength(0);
+    expect(audit.list().some((event) => event.decision === "DND_ALLOWED" && event.sessionId === "s1")).toBe(true);
+  });
+  it("没有窗口时：照旧交还人类，allowed-once 后签发短期授权", async () => {
+    const { gate, leases } = makeDndGate();
+    await gate.handleExecute(execOf("c1", escalationArgs, "s1", "pwsh"), async () => ({}));
+    const next = vi.fn(async () => "allowed-once" as const);
+    const out = await gate.handleApprovalRequest({ callId: "c1", toolName: "pwsh", agent: { id: "s1" } }, next);
+    expect(out).toBe("allowed-once");
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(await leases.list()).toHaveLength(1);
+  });
+  it("窗口内：没有 requestedMode 的审批不被接管（免打扰只放行沙箱升级）", async () => {
+    const { gate, dnd, audit } = makeDndGate();
+    await gate.handleExecute(execOf("c1", { command: "dir" }, "s1", "pwsh"), async () => ({}));
+    dnd.start("s1", 900);
+    const next = vi.fn(async () => "rejected" as const);
+    const out = await gate.handleApprovalRequest({ callId: "c1", toolName: "pwsh", agent: { id: "s1" } }, next);
+    expect(out).toBe("rejected");
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(audit.list().some((event) => event.decision === "DND_ALLOWED")).toBe(false);
+  });
+  it("窗口到期后：恢复委派", async () => {
+    const { gate, dnd } = makeDndGate();
+    await gate.handleExecute(execOf("c1", escalationArgs, "s1", "pwsh"), async () => ({}));
+    dnd.start("s1", 60);
+    now += 60_000;
+    const next = vi.fn(async () => "rejected" as const);
+    const out = await gate.handleApprovalRequest({ callId: "c1", toolName: "pwsh", agent: { id: "s1" } }, next);
+    expect(out).toBe("rejected");
+    expect(next).toHaveBeenCalledTimes(1);
+  });
+  it("窗口只作用于本会话：别的会话仍然委派", async () => {
+    const { gate, dnd } = makeDndGate();
+    await gate.handleExecute(execOf("c1", escalationArgs, "s1", "pwsh"), async () => ({}));
+    dnd.start("s2", 900);
+    const next = vi.fn(async () => "rejected" as const);
+    const out = await gate.handleApprovalRequest({ callId: "c1", toolName: "pwsh", agent: { id: "s1" } }, next);
+    expect(out).toBe("rejected");
+    expect(next).toHaveBeenCalledTimes(1);
   });
 });

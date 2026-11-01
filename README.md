@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <b>批准一次，换一段有期限的免打扰——到期自动收回，随时能提前收回，全程有记录。</b>
+  <b>批准一次，换一段有期限的授权；或者开一个「限时完全访问」窗口——到期自动收回，随时能提前收回，全程有记录。</b>
 </p>
 
 <p align="center">
@@ -210,32 +210,38 @@ SHA-256(toolName + 目标沙箱模式)
 治理界面按「先会话、后全局」组织；前两个入口都挂在**会话作用域**上，组件直接拿到宿主传入的 `sessionId`，
 因此显示的一定是当前会话：
 
-1. **【一眼】对话内常驻提示条**：输入框上方（`conversation.input.dock`），打开会话就能看到
-   「放开了什么 / 还剩多久 / 到期会怎样 / 提前收回」，**不需要点开任何东西**；
+1. **【挡位】输入框工具栏的授权挡位控件**：`conversation.input.left`，紧挨 DSH 原生沙箱挡位（28px 按钮 + 原生 Menu）。
+   三选一：**授权关闭 / 短期授权 / 免打扰（限时完全访问）**。免打扰开启前有风险确认，窗口内显示倒计时，
+   可一键结束或延长；
 2. **【详情】会话内「能力授权」标签页**：排在 对话 / 轨迹 之后的第三个 tab（`conversation.view`，order 20），
-   整页展示本会话的每条授权、权限级别状态、到期后果、技术详情与本会话最近记录；
-3. **【配置】设置 →「能力授权」页**（`settings.section`，order 25）：默认范围挡位、TTL 上下限三项运行期配置，
-   外加只读的部署配置（总开关 / 规则 / 自动回滚节拍 / 配置来源）；
-4. **【排障】独立只读页面**：`http://127.0.0.1:8787/`，用于没有 Web GUI 的组合或接口排障，
-   不再是面向使用者的入口。
+   包含指标、免打扰卡片（剩余时间 / 已自动放行记录 / 结束 / 延长）、两档时长设置与本会话审计；
+3. **【排障】独立只读页面**：`http://127.0.0.1:8787/`，用于没有 Web GUI 的组合或接口排障，
+   不再是面向使用者的入口；
+4. **提示条**（`conversation.input.dock`）：代码与文案判定保留，当前不渲染（输入框 chip 已承担常驻提示）。
 
-> 2026-10-31 按项目所有者要求调整：**先不做全局中台**。原先挂在左侧栏的「能力授权」面板与图标已移除；
-> 全局策略（范围挡位 / TTL）改挂 DSH 设置页，全局视图（全部会话 / 审计）暂时只在独立页面提供。
-> 为什么设置不放进会话 tab：范围挡位与 TTL 是**全局**策略，同一个值影响所有会话，放进某个会话会误导成"只对这个会话生效"。
+> 2026-11-01 更新：**免打扰不再是持久化"模式"，也不是设置项**——它是用户点击后才存在的一段窗口；
+> `settings.section` 不再注册，用户配置只在会话内 tab 里。
 
-对话内提示条长这样（**没有授权时也保留一行**，否则用户会以为功能不存在）：
+### 免打扰窗口（限时完全访问）
 
-```text
-● 本会话临时放开：pwsh 可以免审批升到「完全访问」
-  还剩 4 分 12 秒 · 到期后会自动收回，之后同类操作会再问你一次。        [ 提前收回 ]
+一句话：**窗口内自动批准本会话的沙箱升级，不改沙箱挡位、不改审批策略、不签发 Lease。**
 
-⚠ 临时授权已经到期，但权限还停在「完全访问」，没有收回。
-  点「现在收回」可以立刻恢复；不点的话，下次执行命令时也会自动收回。    [ 现在收回 ]
+- 只接管"由 Guard 在 `tools/execute` 记录过、且带 `requestedMode`"的沙箱升级审批；普通审批仍然交回人类；
+- 开启前必须确认（它等价于限时完全访问）；窗口显示倒计时，可**结束**、可**延长**（总时长不超过 `maxTtlSeconds`）；
+- **完全访问挡位下不可开启**：该 preset 的审批策略是 `never`，没有可放行的审批；
+- 到期 / 手动结束 / 用户切换原生挡位 / 插件卸载，窗口立即失效（切回原挡位也不会复活）；
+- 每一次自动放行都记 `DND_ALLOWED`（工具、目标挡位、脱敏展示），关闭记 `DND_CLOSED`；不再用"记账 Lease"伪装。
 
-✓ 已收回：本会话的临时授权结束了，权限已回到「工作区可写」。
-```
+不同当前挡位下的实际效果：
 
-该槽位是 **session 作用域**，组件直接拿宿主传入的 `sessionId`，所以提示条显示的**一定是当前会话**（不是「最近有授权的会话」那种推断）。提示条上唯一的写操作是「提前收回」（纯收缩），审批与签发仍然只走 DSH 原生流程。
+| 当前挡位 | 开启免打扰后的实际效果 |
+|---|---|
+| 仅可查看 | 写/改仍先被沙箱拒绝；模型带 `sandbox_permissions` 重试时不再弹窗，**这一次调用**按目标挡位执行（可以是工作区内，也可以是完全访问） |
+| 工作区内修改 | 工作区内写本来就不问；越界操作走"拒绝 → 重试 → 单次升级"，升级审批被静默放行（目标只能是完全访问） |
+| 完全访问 | **不可用**（没有审批可放行） |
+
+> 免打扰是"限时信任窗口"，不是沙箱：窗口内 AI 仍受 DSH 沙箱与审批策略约束，但**每一次它主动申请的升级都会被批准**。
+> 它不是路径级保护；需要"某些目录永远不放行"的能力尚未实现。
 
 独立页面（与上面的会话内 tab 共用同一份数据源）的视图：
 
@@ -281,21 +287,15 @@ SHA-256(toolName + 目标沙箱模式)
 
 `少点了 N 次批准` = 该会话里授权被复用的次数（每一次复用，都是你不用再点一次「允许一次」）。
 
-### 免打扰窗口（唯一由页面发起的放宽）
+### 旧的有界放宽接口（`/api/window`，当前 UI 不调用）
 
-在会话 tab 里选「工具 + 目标档位 + 时长」，点一下就把「允许一次」提前批量给自己：
+`POST /api/window` 仍保留"签发 sandbox-mode Lease + 提升会话档位"的能力，供脚本/排障使用；
+它**不是**免打扰窗口（免打扰见上文「免打扰窗口（限时完全访问）」）。约束：TTL 必须是正整数且不得超过
+`maxTtlSeconds`（不静默裁剪）；只对配置为 `sandbox-escalation` 的工具生效；必须能解析到真实 Session；
+开窗失败会撤销刚签发的授权；审计记 `WINDOW_OPENED`。
 
-```text
-[ pwsh ▾ ]  [ 升到「完全访问」▾ ]  [ 30 分钟 ▾ ]   [ 开启窗口 ]
-```
-
-- 点击即同意（等价一次 `allowed-once`），但**有界**：TTL 必须是正整数且不得超过 `maxTtlSeconds`，不静默裁剪；
-- 只对配置为 `sandbox-escalation` 的工具生效（`allowTool` 校验），不能拿它当任意工具的放宽通道；
-- 开窗失败（拿不到会话对象 / 提升失败）会撤销刚签发的授权，不留"授权了却没生效"的半成品；
-- 到期自动收回，随时可「提前收回」；审计记 `WINDOW_OPENED`，决策记录里能看到是谁在什么时候开的多长窗口。
-
-> **安全提示**：治理接口是本机 loopback 上的**无鉴权面**——"能开窗"就等于"本机进程也能放宽权限"
-> （上限受 `maxTtlSeconds` 约束）。不信任本机进程时，请把 `console.enabled` 设为 `false`。
+> **安全提示**：治理接口是本机 loopback 上的**无鉴权面**——"能开窗 / 能开免打扰"就等于
+> "本机进程也能放宽权限"（上限受 `maxTtlSeconds` 约束）。不信任本机进程时，请把 `console.enabled` 设为 `false`。
 
 档位自动回滚（`sweepIntervalMs`，默认 **30000**，`0` 表示关闭）：
 
@@ -325,13 +325,16 @@ SHA-256(toolName + 目标沙箱模式)
 ```text
 GET   /                 前端页面（独立入口；支持 ?session=<id> 聚焦会话）
 GET   /console.js       共享前端脚本（面板与独立页面复用）
-GET   /api/snapshot     治理快照（会话视图 + 每条授权的剩余毫秒；可带 ?session=<id>）
-GET   /api/audit        审计过滤查询（原始事件流，含遥测）
+GET   /api/snapshot     治理快照（会话视图 + 免打扰窗口 sessions[].dnd；可带 ?session=<id>）
+GET   /api/audit        审计过滤查询（原始事件流，含 DND_ALLOWED / DND_OPENED 等决策）
 GET   /api/decisions    授权决策记录（一条授权一份：批准/复用/权限级别/结束方式；可带 sessionId/toolName/limit）
-GET   /api/config       运行期策略 + 挡位目录 + 收缩动作可用性 + 自动回滚节拍
-PATCH /api/config       写接口：defaultScope / defaultTtlSeconds / maxTtlSeconds
+GET   /api/config       运行期策略 + 挡位目录 + 收缩动作可用性 + 自动回滚节拍 + features.dndWindow
+PATCH /api/config       写接口：defaultScope / defaultTtlSeconds / maxTtlSeconds / settings(enabled·reuseTtlSeconds·dndDurationSeconds)
 POST  /api/revoke       收缩型动作：action=revoke（撤销本会话全部授权）| restore-sandbox（只回滚档位）
-POST  /api/window       免打扰窗口：{sessionId, toolName, mode, ttlSeconds}（唯一由页面发起的放宽，有界且可收回）
+POST  /api/dnd          开启免打扰窗口：{sessionId, ttlSeconds}（限时完全访问；窗口内自动批准沙箱升级）
+POST  /api/dnd/stop     结束免打扰：{sessionId}（纯收缩）
+POST  /api/dnd/extend   延长免打扰：{sessionId, addSeconds}（总窗口不超过 maxTtlSeconds）
+POST  /api/window       旧的有界放宽：{sessionId, toolName, mode, ttlSeconds}（签发 sandbox-mode Lease 并提升档位，保留给脚本/排障）
 ```
 
 此外，插件会尝试把同一组接口挂到 DSH Web 服务器上的**同源**前缀 `/guard/…`（`registerGuardWebRoutes`）。
@@ -365,10 +368,17 @@ POST  /api/window       免打扰窗口：{sessionId, toolName, mode, ttlSeconds
   - `action=revoke`：撤销该会话仍有效的全部授权，并回滚会话沙箱档位；
   - `action=restore-sandbox`：只结算该会话中**已经失效**的授权并回写档位，仍有效的授权原样不动。
   - 两者都写审计（`LEASE_REVOKED` / `SANDBOX_MODE_RESTORED`），都遵守「用户手动改过档位则跳过回滚」的红线。
-- **唯一由页面发起的放宽**（`POST /api/window`，即「免打扰窗口」）：用户显式点击＝一次 `allowed-once`，
-  签发有界 `sandbox-mode` 授权并立即提升会话档位。约束：TTL ≤ `maxTtlSeconds`（不静默裁剪）、
-  工具必须已配置为 `sandbox-escalation`、必须能解析到真实 Session（否则拒绝）、失败会撤销刚签发的授权。
-- 页面**不做审批**：审批永远走 DSH 原生流程；开窗只是把"你已经同意的这件事"提前落地成有界授权。
+- **用户显式发起的放宽是 `POST /api/dnd`（免打扰窗口，限时完全访问）**：窗口内只自动批准
+  本会话带 `requestedMode` 的已记录沙箱升级；**不改沙箱挡位、不改审批策略、不签发 Lease**。
+  约束：TTL ≤ `maxTtlSeconds`（不静默裁剪）、必须能解析到真实 Session、完全访问挡位下拒绝；
+  到期 / 手动结束 / 原生挡位变化 / 插件卸载立即失效；`/api/dnd/stop` 纯收缩，`/api/dnd/extend`
+  延长但总窗口不超过上限。每次放行写 `DND_ALLOWED`，不伪装成授权。
+- **`POST /api/window` 是旧的"签发 sandbox-mode Lease + 提升档位"有界放宽**，保留给脚本/排障；
+  当前 UI 不调用它，不要和免打扰混为一谈。
+- 页面**不做审批**：免打扰只是在用户显式开启的窗口内代答 `allowed-once`；普通审批永远走 DSH 原生流程。
+
+> **安全提示**：治理接口是本机 loopback 上的无鉴权面。"能开免打扰"就等于"窗口内能自动批准沙箱升级
+> （限时完全访问）"。不信任本机进程时请把 `console.enabled` 设为 `false`。
 
 安全属性：
 
@@ -390,7 +400,7 @@ POST  /api/window       免打扰窗口：{sessionId, toolName, mode, ttlSeconds
 
 > [!NOTE]
 > `@dsh-capsule/adapter` 已声明 `dsh.bundle.patch`（见 `adapter/cordis.patch.yml`），可作为一个 profile bundle 层被 DSH 装载；
-> 本机 desktop profile 已安装并实跑（hook 挂载、会话内提示条 / 能力授权 tab / 设置页均可用）。尚未发布到 npm registry，
+> 本机 desktop profile 已安装并实跑（hook 挂载、输入框挡位 chip / 能力授权 tab 均可用）。尚未发布到 npm registry，
 > 也**没有**做过多平台真机验证——CI 只跑三平台构建与测试。
 
 ```bash

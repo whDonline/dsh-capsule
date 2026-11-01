@@ -61,6 +61,28 @@ export interface ConsoleSandboxView {
   /** 人话补充说明（例如「你已把档位调回 workspace-write，Guard 不会覆盖」） */
   note?: string;
 }
+/** 免打扰窗口内一次自动放行的记录（脱敏展示；不含参数原文）。 */
+export interface ConsoleDndRecord {
+  at: number;
+  callId: string;
+  toolName: string;
+  requestedMode: SandboxMode;
+  /** 目标档位中文名（服务端下发） */
+  requestedModeText: string;
+  display: string;
+}
+/** 免打扰窗口视图——与 Lease 完全分开：它不是一条授权，而是"限时完全访问"的审批放行窗口。 */
+export interface ConsoleDndView {
+  sessionId: string;
+  startedAt: number;
+  expiresAt: number;
+  /** 开启窗口时的档位；用于解释"档位被改后窗口结束" */
+  baselineMode?: SandboxMode;
+  /** 窗口内已自动放行的次数 */
+  allowedCount: number;
+  /** 最近几条放行记录（最新在前，最多 20 条） */
+  recent: readonly ConsoleDndRecord[];
+}
 export interface ConsoleSessionView {
   sessionId: string;
   label: string;
@@ -68,6 +90,8 @@ export interface ConsoleSessionView {
   cwd?: string;
   auth: ConsoleSessionAuth;
   sandbox: ConsoleSandboxView;
+  /** 免打扰窗口（仅当存在活动窗口时下发；没有窗口就没有这个字段） */
+  dnd?: ConsoleDndView;
   /** 价值指标（少点了几次批准 / 最长放开多久 / 有没有待收回的权限级别） */
   stats: ConsoleSessionStats;
   actions: {
@@ -146,6 +170,10 @@ export interface ConsoleActions {
   openWindow(request: ConsoleWindowRequest): Promise<ConsoleWindowResult>;
   /** 免打扰时间窗：只放行审批，**不改沙箱档位**（原生档位保持用户设定值） */
   startDnd?(sessionId: string, ttlSeconds: number): { sessionId: string; expiresAt: number };
+  /** 提前结束免打扰窗口（纯收缩） */
+  stopDnd?(sessionId: string): boolean;
+  /** 延长免打扰窗口（仍受 maxTtlSeconds 约束，不能续成永久授权） */
+  extendDnd?(sessionId: string, addSeconds: number): { sessionId: string; expiresAt: number };
 }
 export interface GovernanceSummary {
   leasesTotal: number;
@@ -190,6 +218,10 @@ export interface GovernanceConsoleDeps {
   now?: () => number;
   /** 沙箱授权状态源（可选：未注入时所有会话的沙箱状态为 not-involved） */
   sandbox?: ConsoleSandboxSource;
+  /** 免打扰窗口状态源（可选：未注入时会话视图不带 dnd 字段） */
+  dnd?: { view(sessionId: string): ConsoleDndView | undefined };
+  /** 当前会话沙箱档位（可选：未注入时只有 Guard 自己改过档位的会话才带 currentMode） */
+  currentMode?: (sessionId: string) => SandboxMode | undefined;
   /** 会话名称解析（可选：未注入时降级为「会话 短ID」） */
   sessions?: ConsoleSessionDirectory;
 }

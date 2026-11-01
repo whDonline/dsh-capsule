@@ -8,13 +8,14 @@ import { DEFAULT_UNIVERSAL_POLICY, PolicyResolver } from "./policy.js";
 import { GuardSettings, type GuardMode } from "./settings.js";
 import { ScopeResolver } from "./scope-resolver.js";
 import { UniversalGate } from "./universal-gate.js";
-function makeStack(mode: GuardMode, active = true) {
+function makeStack(_mode: GuardMode, active = true) {
   let now = 1_000;
   const clock = () => now;
   const leases = new LeaseManager(new MemoryLeaseStore(clock), clock);
   const audit = new AuditService();
   const settings = new GuardSettings({ maxTtlSeconds: 1800 });
-  settings.update({ mode, enabled: active });
+  // 免打扰已改为独立窗口；这里只需要用户开关（族放行与挡位无关）
+  settings.update({ enabled: active });
   const gate = new UniversalGate({
     policy: new PolicyResolver(DEFAULT_UNIVERSAL_POLICY),
     scopes: new ScopeResolver(),
