@@ -45,7 +45,7 @@ export const GUARD_WRITE_HEADER = "x-dsh-guard";
 /** Guard 治理接口挂到 DSH Web 服务器上的同源前缀（面板优先走这条路径，避免跨源与额外端口）。 */
 export const GUARD_WEB_PREFIX = "/guard";
 /** 同源路径与路径映射表——同一份路由同时服务独立端口与 DSH 同源前缀，避免两套实现漂移。 */
-const ROUTES: readonly string[] = ["/", "/index.html", "/console.js", "/api/snapshot", "/api/audit", "/api/decisions", "/api/config", "/api/revoke", "/api/dnd", "/api/dnd/stop", "/api/dnd/extend"];
+const ROUTES: readonly string[] = ["/", "/index.html", "/console.js", "/api/snapshot", "/api/audit", "/api/audit/export", "/api/decisions", "/api/config", "/api/revoke", "/api/dnd", "/api/dnd/stop", "/api/dnd/extend"];
 const LOOPBACK_HOSTNAMES: readonly string[] = ["127.0.0.1", "localhost", "[::1]", "::1"];
 /** 允许被跨源读取的来源——只放行本机页面（http://127.0.0.1:任意端口 / http://localhost:任意端口）。
  * 为什么需要：DSH Web GUI 运行在 http://127.0.0.1:<DSH 端口>，与独立 Console 端口不同源；
@@ -157,6 +157,13 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, govConso
         }
         // 事件随响应附带中文决策名：前端不再维护自己的映射表（唯一来源 audit/catalog.ts）
         sendJson(res, 200, govConsole.queryAudit(query).map((event) => ({ ...event, decisionLabel: AUDIT_DECISION_LABELS[event.decision] })));
+        return;
+      }
+      if (pathname === "/api/audit/export") {
+        // 作用：导出完整审计为可下载 JSON（排障/留档用）。只读、loopback、no-store；
+        // 文件名带时间戳，避免浏览器缓存或覆盖。
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        sendDownloadJson(res, `dsh-guard-audit-${stamp}.json`, govConsole.queryAudit({}).map((event) => ({ ...event, decisionLabel: AUDIT_DECISION_LABELS[event.decision] })));
         return;
       }
       if (pathname === "/api/decisions") {
@@ -824,8 +831,20 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   });
   res.end(payload);
 }
-function sendHtml(res: ServerResponse): void {
-  // 作用：发送 Console 页面外壳——CSP 允许同源脚本/样式与同源 fetch，禁其余一切外部资源
+function sendDownloadJson(res: ServerResponse, filename: string, body: unknown): void {
+  // 作用：以附件形式下载 JSON（审计导出）——同样的 no-store/nosniff/CSP，额外带 content-disposition。
+  // 文件名只由服务端生成（不含用户输入），避免 header 注入。
+  const safeName = filename.replace(/[^A-Za-z0-9._-]/g, "-");
+  res.writeHead(200, {
+    "content-type": "application/json; charset=utf-8",
+    "content-disposition": `attachment; filename="${safeName}"`,
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+    "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
+  });
+  res.end(JSON.stringify(body, null, 2));
+}
+function sendHtml(res: ServerResponse): void {  // 作用：发送 Console 页面外壳——CSP 允许同源脚本/样式与同源 fetch，禁其余一切外部资源
   res.writeHead(200, {
     "content-type": "text/html; charset=utf-8",
     "cache-control": "no-store",

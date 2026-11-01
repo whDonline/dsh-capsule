@@ -307,6 +307,7 @@ describe("DSH 客户端半边（adapter/client.js）", () => {
     const { registrations } = registerPlugin();
     const chip = registrations.find((item) => item.slot === "conversation.input.left")?.component as unknown as {
       hiddenFor(mode: string): boolean;
+      endingSoon(ms: number): boolean;
     };
     expect(typeof chip.hiddenFor).toBe("function");
     expect(chip.hiddenFor("danger-full-access")).toBe(true);
@@ -314,6 +315,12 @@ describe("DSH 客户端半边（adapter/client.js）", () => {
     expect(chip.hiddenFor("read-only")).toBe(false);
     // 读不到档位（空串）时保持显示：宁可多一个入口，也不暗中把功能藏掉
     expect(chip.hiddenFor("")).toBe(false);
+    // 免打扰到期提醒：只剩 ≤2 分钟时才高亮（0/负数表示已结束，不提醒）
+    expect(chip.endingSoon(120_000)).toBe(true);
+    expect(chip.endingSoon(119_999)).toBe(true);
+    expect(chip.endingSoon(120_001)).toBe(false);
+    expect(chip.endingSoon(0)).toBe(false);
+    expect(chip.endingSoon(-1)).toBe(false);
   });
   it("面板模型（纯函数）：时间范围过滤 + 指标聚合，避免再有渲染期空白", () => {
     const { registrations } = registerPlugin();
@@ -432,6 +439,7 @@ describe("DSH 客户端半边（adapter/client.js）", () => {
     expect(text).toContain("指标");
     expect(text).toContain("审计");
     expect(text).toContain("pwsh 测试命令 --flag");
+    expect(text).toContain("导出 JSON");
     expect(text).not.toContain("治理接口暂时不可达");
   });
   it("会话视图：完全访问档位下说明「无需授权」（Guard 不介入）", async () => {

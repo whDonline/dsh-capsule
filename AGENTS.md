@@ -39,6 +39,7 @@ DSH Capability Guard（TS 插件，横切）
    │     ├── approval/request：默认 `next()` 委派给人/机 answerer；命中【同一条操作】的有效授权或免打扰窗口时代答 allowed-once（见红线 (a)/(a1)）；人批准后签发操作授权，**不提升档位**
    │     └── tools/result：清理 pending + 记录结果
    ├── DndManager（免打扰窗口：独立状态，不写档位、不签 Lease）
+   ├── SensitivePaths（2026-11-01：静态敏感路径保护，注册到 DSH 原生 `ctx.tools.guard()`；只许拒绝）
    ├── LeaseManager（MemoryLeaseStore，接口抽象可换持久化）
    └── Console（输入框模式 chip / 能力授权 tab：配置 + 状态 + 审计 + 统计）
 ```
@@ -52,6 +53,7 @@ DSH Capability Guard（TS 插件，横切）
 
 - **不替代 Approval**：只增强——用户 `allowed-once` 后签发明确 Scope + TTL 的短期 Lease；`approval policy=never` 不得绕过。
 - **不重定义权限体系**：只处理下游已返回 `kind === 'ask'` 的调用；原 `deny` 永远保持 deny，Lease 不得覆盖；Guard ALLOW 后 monotonic guard（`ctx.tools.guard()`）仍可 Deny，不得绕过。
+- **允许“只收紧”的拒绝**（2026-11-01）：敏感路径保护通过原生 `tools.guard()` 注册，命中即拒绝；它只收紧、不放开，且 guard 内部异常必须返回 `undefined`（交回原生流程）。不得把任何原生 `deny` 翻回允许。
 - **不自存 Secret**：当前没有凭证层（Broker 已移除）。任何未来的凭证相关能力必须走 DSH 原生 `ctx.credentials`，Guard 不得自建明文存储。
 
 ## 4. 技术栈与依赖
@@ -118,8 +120,8 @@ Phase 0/1/4 有效，Phase 2/3/5 已作废。当前验收基线见第 7.2 节：
 adapter/src/
 ├── index.ts                 # Guard Plugin 入口（纯 TypeScript）+ buildSandboxModeReader 宿主只读适配器
 ├── capability/              # types / canonical / scope-resolver / escalation / policy / settings
-│                            #   / dnd / lease-store / lease-manager / pending / operation / operation-registry
-│                            #   / families / universal-gate
+│                            #   / dnd / sensitive-paths / lease-store / lease-manager / pending / operation
+│                            #   / operation-registry / families / universal-gate
 ├── integration/             # 真 @deepseek-ai/cordis 集成测试：cordis-pipeline（hook 接线与瀑布认领语义）
 │                            #   / plugin-activation（Context.plugin 装载）/ cordis-get-semantics（ctx.get 降级契约）
 ├── audit/                   # types / catalog / audit-service / journal
@@ -158,8 +160,14 @@ assets/                      # README 用示意图（结构示意，非截图）
      禁止以任何理由恢复。
    所有写接口共用同一套闸门（`x-dsh-guard` 头 + `application/json` + loopback 来源），非 POST 一律 405；
    都写审计（`LEASE_REVOKED` / `DND_*`）。
+   **`GET /api/audit/export`** 是只读导出（附件 JSON，含 `decisionLabel`），仅 loopback。
    **安全提示（必须写进 README）**：治理接口是本机 loopback 上的无鉴权面，"能开免打扰"就等于
    "窗口内能自动批准沙箱升级（限时完全访问）"；不信任本机进程时请把 `console.enabled` 设为 `false`。
+4.2. **敏感路径保护（2026-11-01 新增）**：`capability/sensitive-paths.ts` 提供内置规则（SSH / 云凭据 /
+   浏览器配置读写全拦，`~/.dsh` 只禁写），通过 DSH 原生 `ctx.tools.guard()` 注册（服务缺失时跳过并写 stderr，
+   即「不保护」而不是拒绝一切）。命中写 `STATIC_DENY` 审计；配置 `sensitivePaths` 可关闭或追加 `extra` 规则，
+   非法形状在装配期直接失败（Fail Closed）。文件工具按参数路径判定；命令类工具只扫命令文本，**必须标注启发式**，
+   不得宣称是安全边界。
 5. **客户端半边的槽位（2026-10-31 更新）**：`conversation.input.dock`（一眼层）与
    `conversation.view`（详情层）都是 session 作用域，组件直接拿到 `sessionId`；
    **不再注册 `main` 面板与 `sidebar.panellist` 图标**（项目所有者要求"先不做全局中台"）。
@@ -242,10 +250,16 @@ assets/                      # README 用示意图（结构示意，非截图）
   当前交付面只有：通用短期授权、免打扰窗口、授权决策记录、治理界面。
 - 治理界面的入口：输入框模式 chip（`conversation.input.left`）＋会话内「能力授权」tab
   （`conversation.view`），见 7.1 第 9、10 条；独立页面仅作排障，不注册全局面板。
+- **敏感路径保护已接入（2026-11-01）**：`capability/sensitive-paths.test.ts` 覆盖路径规范化、前缀边界
+  （`.ssh-backup` 不误伤）、`deny` / `deny-write` 语义、命令文本启发式、guard 异常回退；
+  `index.test.ts` 覆盖默认注册、`sensitivePaths:false` 不注册、配置解析 Fail Closed；
+  `console.test.ts` 覆盖 `/api/audit/export`。装配时写 `GUARD_APPLY` 自检事件。
+- **免打扰到期提醒**：`client.js` 的 `GuardModeChip.endingSoon` 在剩余 ≤2 分钟时高亮（仅展示）。
 
 ## 8. 安全声明边界（README / 注释不得混淆）
 
 - Universal Mode 可声明：短期授权、Session/Scope 绑定、TTL、撤销、授权决策记录、零改造集成；**不得**声明"第三方插件看不到 Credential / 网络被隔离"。
+- **敏感路径保护不得被描述为安全边界或沙箱**：命令类工具只是文本扫描，可被刻意规避；它只防明显误操作。
 - ~~Managed Broker Mode~~：该模式已随 2026-10-30 决策移除，不得再出现在 README / 文档 / 对外口径里。
 - 本项目不再提供任何 OS 级强隔离后端（Legacy Container Runtime 已移除）；需要强隔离的场景由 DSH 原生 Sandbox 或外部机制负责。
 

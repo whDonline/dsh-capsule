@@ -6,6 +6,7 @@ import { MemoryLeaseStore } from "./capability/lease-store.js";
 import { PendingRegistry } from "./capability/pending.js";
 import { DEFAULT_UNIVERSAL_POLICY, PolicyResolver, type UniversalPolicyConfig } from "./capability/policy.js";
 import { ScopeResolver } from "./capability/scope-resolver.js";
+import { createSensitivePathGuard, defaultSensitiveRules, parseExtraRules, type SensitivePathRule } from "./capability/sensitive-paths.js";
 import { DndManager } from "./capability/dnd.js";
 import { isSandboxMode, type SandboxMode } from "./capability/escalation.js";
 import { DEFAULTABLE_SCOPE_MODES, SCOPE_MODES, isScopeMode, type ScopeMode } from "./capability/scope-modes.js";
@@ -86,6 +87,13 @@ export interface GuardPluginConfig extends Partial<UniversalPolicyConfig> {
   persistAudit?: boolean;
   /** 审计日志路径（默认 <用户目录>/.dsh/capability-guard/audit.ndjson） */
   auditFile?: string;
+  /** 敏感路径静态保护（默认开启）：true/false 或 { enabled, extra: [{ path, scope }] }。
+   * 只经由 DSH 原生 `ctx.tools.guard()` 拒绝，不修改任何权限；命令类工具只做文本扫描（启发式）。 */
+  sensitivePaths?: boolean | SensitivePathsConfig;
+}
+export interface SensitivePathsConfig {
+  enabled?: boolean;
+  extra?: readonly { path: string; scope?: "deny" | "deny-write" }[];
 }
 /** 作用：默认审计日志路径——放用户目录而不是 workspace，避免被误提交进仓库。 */
 export function defaultAuditFile(): string {
@@ -112,6 +120,16 @@ export function resolveConsoleConfig(config: GuardPluginConfig | undefined): Req
   const port = raw?.port ?? DEFAULT_CONSOLE_PORT;
   return { enabled: raw?.enabled !== false, host, port, fallbackPort: true };
 }
+// 作用：解析敏感路径配置——缺省开启；非法形状直接拒绝装配（Fail Closed），不静默忽略。
+export function resolveSensitivePathsConfig(config: GuardPluginConfig | undefined): { enabled: boolean; extra: readonly SensitivePathRule[] } {
+  const raw = config?.sensitivePaths;
+  if (raw === undefined || raw === true) return { enabled: true, extra: [] };
+  if (raw === false) return { enabled: false, extra: [] };
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error("GUARD_INSTALL_FAILED: sensitivePaths must be a boolean or an object");
+  }
+  return { enabled: raw.enabled !== false, extra: parseExtraRules(raw.extra) };
+}
 // 作用：DSH Guard 插件入口（重构规格第 16 节）——纯 TypeScript 挂载 Universal Gate 四个 hook；
 // 不 spawn Python、不依赖 Docker / Unix Domain Socket（Legacy Isolated Runtime 已按项目决策移除）。
 export const name = "dsh-capability-guard";
@@ -125,6 +143,8 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
     rules: config?.rules ?? DEFAULT_UNIVERSAL_POLICY.rules,
     defaultScopePaths: config?.defaultScopePaths ?? DEFAULT_UNIVERSAL_POLICY.defaultScopePaths,
   };
+  // 先在装配早期校验敏感路径配置（Fail Closed）：非法配置不应在装了一半 hook 之后才报错。
+  const sensitiveConfig = resolveSensitivePathsConfig(config);
   const governance = new GovernancePolicy({
     initial: {
       defaultScope: isScopeMode(config?.defaultScope) ? config.defaultScope : DEFAULT_UNIVERSAL_POLICY.defaultScope,
@@ -209,6 +229,20 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
     modeOf: resolveMode,
     maxWindowMs: () => governance.config.maxTtlSeconds * 1000,
   });
+  // 作用：读会话工作区根——敏感路径的「相对路径」按它解析；读不到就交给 normalizePath 用 cwd 兜底。
+  const resolveWorkspaceRoot = (session: unknown): string | undefined => {
+    if (session === undefined || session === null) return undefined;
+    const policy = getService(ctx, "sandboxPolicy") as { resolve?: (request: { session: unknown }) => { workspaceRoot?: unknown } } | undefined;
+    if (policy && typeof policy.resolve === "function") {
+      try {
+        const resolved = policy.resolve({ session });
+        if (typeof resolved?.workspaceRoot === "string" && resolved.workspaceRoot.length > 0) return resolved.workspaceRoot;
+      } catch {
+        // 读取失败：返回 undefined（调用方用 cwd 兜底）
+      }
+    }
+    return undefined;
+  };
   const gate = new UniversalGate({
     policy: new PolicyResolver(policyConfig),
     scopes: new ScopeResolver(),
@@ -236,6 +270,41 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
     throw new Error("GUARD_INSTALL_FAILED: ctx.on unavailable");
   }
   const dispose = gate.install(ctx as unknown as Parameters<UniversalGate["install"]>[0]);
+  // 敏感路径静态保护：注册到 DSH 原生单调 guard（只许拒、不许放），不是我们自己发明的拦截器。
+  // 服务缺失时退化为「不保护」，并写 stderr；绝不因为缺服务而拒绝一切调用。
+  const sensitiveRules = [...defaultSensitiveRules({ home: homedir(), platform: process.platform }), ...sensitiveConfig.extra];
+  const toolsService = getService(ctx, "tools") as { guard?: unknown } | undefined;
+  let disposeSensitiveGuard: (() => void) | undefined;
+  if (sensitiveConfig.enabled && toolsService && typeof toolsService.guard === "function") {
+    const guardFn = createSensitivePathGuard({
+      rules: sensitiveRules,
+      context: (exec) => ({
+        home: homedir(),
+        platform: process.platform,
+        workspaceRoot: resolveWorkspaceRoot((exec as { agent?: { session?: unknown } }).agent?.session),
+      }),
+      onDeny: (exec, hit) => {
+        audit.record({
+          sessionId: typeof exec.agent?.id === "string" ? exec.agent.id : undefined,
+          callId: typeof exec.callId === "string" ? exec.callId : "",
+          rootCallId: typeof exec.rootCallId === "string" ? exec.rootCallId : "",
+          toolName: typeof exec.name === "string" ? exec.name : "",
+          scopeKey: `sensitive:${hit.rule.id}`,
+          scopeDisplay: `命中敏感路径保护「${hit.rule.id}」：${hit.target}（${hit.rule.scope === "deny" ? "读写都禁止" : "只禁止写入"}）${hit.heuristic ? "（命令文本启发式）" : ""}`,
+          decision: "STATIC_DENY",
+        });
+      },
+    });
+    try {
+      // 用户关掉 Guard 时，敏感路径保护也必须一起停（保持「关闭 = 完全不介入」的语义）。
+      const rawGuard = guardFn;
+      const guarded = (exec: Parameters<typeof rawGuard>[0]) => (settings.active ? rawGuard(exec) : undefined);
+      const disposer = (toolsService.guard as (fn: typeof guarded) => unknown).call(toolsService, guarded);
+      if (typeof disposer === "function") disposeSensitiveGuard = disposer as () => void;
+    } catch (err) {
+      process.stderr.write(`[dsh-guard] sensitive paths guard unavailable: ${String(err)}\n`);
+    }
+  }
   // 免打扰时间窗：Gate 只负责在审批到达时问 manager；窗口状态由 DndManager 独占（不写档位、不签 Lease）。
   const consoleActions = {
     // 显式委托：GuardActions 是 class，方法在原型上，展开运算符拷不过来
@@ -273,11 +342,21 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
     consoleHandle = await startConsoleServer({ console: govConsole, policy: governance, actions: consoleActions, sweepIntervalMs, settings, diagnostics: () => gate.diagnostics(), host: consoleConfig.host, port: consoleConfig.port, fallbackPort: consoleConfig.fallbackPort });
     process.stderr.write(`[dsh-guard] governance console: ${consoleHandle.url} (同源入口 ${GUARD_WEB_PREFIX}/, sweep=${sweepIntervalMs}ms, routes=${JSON.stringify(guardRouteStatus)})\n`);
   }
+  // 启动自检：把「接线是否真的挂上」写成一条审计，排障时先看它。
+  audit.record({
+    callId: "",
+    rootCallId: "",
+    toolName: name,
+    scopeKey: "guard:apply",
+    scopeDisplay: `已装载：sensitivePaths=${sensitiveConfig.enabled ? (disposeSensitiveGuard ? `on(${sensitiveRules.length} 条规则)` : "unavailable") : "off"}，console=${consoleConfig.enabled ? "on" : "off"}，sweep=${sweepIntervalMs}ms`,
+    decision: "GUARD_APPLY",
+  });
   return async () => {
     if (sweepTimer) clearInterval(sweepTimer);
     sweepTimer = undefined;
     // 插件卸载/重载时窗口立即失效（fail closed），并留下关闭记录
     dnd.closeAll("plugin-dispose");
+    if (disposeSensitiveGuard) disposeSensitiveGuard();
     if (consoleHandle) {
       await consoleHandle.close();
     }

@@ -1,6 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { Context } from "@deepseek-ai/cordis";
-import { apply, buildSandboxModeReader, type CapsuleHostContext } from "./index.js";
+import { apply, buildSandboxModeReader, resolveSensitivePathsConfig, type CapsuleHostContext } from "./index.js";
 function makeBus(host: CapsuleHostContext) {
   // 作用：为任意宿主 ctx 挂上事件总线（Guard 的 install 需要 on）；宿主本身可以是真实 cordis Context
   (host as { on?: unknown }).on = () => () => {};
@@ -67,5 +69,59 @@ describe("buildSandboxModeReader（宿主只读适配器）", () => {
       },
     };
     expect(buildSandboxModeReader(ctx).sessionSandboxMode({ id: "s1" })).toBe("workspace-write");
+  });
+});
+describe("敏感路径保护装配", () => {
+  it("默认开启：注册到原生 tools.guard，命中 SSH 私钥时返回拒绝理由，卸载时注销", async () => {
+    const registered: ((exec: unknown) => string | undefined)[] = [];
+    const disposeGuard = vi.fn();
+    const ctx = {
+      on: () => () => {},
+      get: (name: string) =>
+        name === "tools"
+          ? {
+              guard: (fn: (exec: unknown) => string | undefined) => {
+                registered.push(fn);
+                return disposeGuard;
+              },
+            }
+          : undefined,
+    } as unknown as CapsuleHostContext;
+    const dispose = await apply(ctx, { console: { enabled: false }, persistAudit: false });
+    expect(registered).toHaveLength(1);
+    const reason = registered[0]!({
+      callId: "c1",
+      rootCallId: "c1",
+      name: "read",
+      arguments: { path: join(homedir(), ".ssh", "id_rsa") },
+      agent: { id: "s1" },
+    });
+    expect(reason).toContain("ssh-private-keys");
+    expect(reason).toContain("不是沙箱");
+    await dispose();
+    expect(disposeGuard).toHaveBeenCalledTimes(1);
+  });
+  it("sensitivePaths:false 时不注册 guard（用户显式关闭）", async () => {
+    const guard = vi.fn(() => () => {});
+    const ctx = {
+      on: () => () => {},
+      get: (name: string) => (name === "tools" ? { guard } : undefined),
+    } as unknown as CapsuleHostContext;
+    const dispose = await apply(ctx, { console: { enabled: false }, persistAudit: false, sensitivePaths: false });
+    expect(guard).not.toHaveBeenCalled();
+    await dispose();
+  });
+});
+describe("sensitivePaths 配置解析", () => {
+  it("缺省/true 为开启；false 为关闭；对象可关且能带额外规则", () => {
+    expect(resolveSensitivePathsConfig(undefined)).toEqual({ enabled: true, extra: [] });
+    expect(resolveSensitivePathsConfig({ sensitivePaths: true })).toEqual({ enabled: true, extra: [] });
+    expect(resolveSensitivePathsConfig({ sensitivePaths: false }).enabled).toBe(false);
+    const parsed = resolveSensitivePathsConfig({ sensitivePaths: { enabled: false, extra: [{ path: "D:\\secrets", scope: "deny" }, { path: "" }] } });
+    expect(parsed.enabled).toBe(false);
+    expect(parsed.extra).toEqual([{ id: "custom-1", path: "D:\\secrets", scope: "deny" }]);
+  });
+  it("非法形状直接拒绝装配（Fail Closed）", () => {
+    expect(() => resolveSensitivePathsConfig({ sensitivePaths: "yes" as never })).toThrow(/GUARD_INSTALL_FAILED/);
   });
 });

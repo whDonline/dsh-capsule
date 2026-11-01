@@ -31,8 +31,9 @@ Agent 在“修改 → 测试 → 检查”的循环中，往往会重复申请�
 
 - **短期授权**：人工批准后签发 Lease，记录范围与有效期；命中有效授权时减少重复询问。
 - **免打扰窗口**：由你主动开启，窗口内自动批准本会话已记录的沙箱升级请求，可随时结束。
+- **敏感路径保护**：内置 SSH 私钥、云凭据、浏览器配置等规则，命中即拒绝；可关闭或追加自己的规则。
 - **会话内治理**：输入框模式 chip 和「能力授权」tab 显示授权、倒计时、设置和决策记录。
-- **本地可追溯**：记录批准、复用、到期与撤销；审计与授权记录默认追加保存在本机。
+- **本地可追溯**：记录批准、复用、到期与撤销；审计与授权记录默认追加保存在本机，可导出 JSON。
 
 ## 快速开始
 
@@ -113,10 +114,20 @@ Lease 的过期在查询与校验时实时判断，不依赖后台定时器。�
 
 免打扰是用户显式开启的**限时完全访问审批放行层**。它只接管 Guard 在 `tools/execute` 记录过、会话与工具匹配、且带 `requestedMode` 的沙箱升级审批，返回 `allowed-once` 并记录 `DND_ALLOWED`。
 
-窗口**不签发 Lease、不改沙箱档位、不改审批策略**。普通审批仍走原生流程；窗口外也恢复原生审批。到期、手动结束、检测到原生档位变化或插件卸载时窗口失效。延长后的总窗口时长不能超过 `maxTtlSeconds`，完全访问档位下不能开启。
+窗口**不签发 Lease、不改沙箱档位、不改审批策略**。普通审批仍走原生流程；窗口外也恢复原生审批。到期、手动结束、检测到原生档位变化或插件卸载时窗口失效。延长后的总窗口时长不能超过 `maxTtlSeconds`，完全访问档位下不能开启。剩余不足 2 分钟时，chip 与 tab 的倒计时会高亮提醒。
 
 > [!WARNING]
-> 窗口内，符合条件的沙箱升级请求会自动获批，目标可能是完全访问。它不提供“某些路径永不放行”的保护。请只在信任当前会话工作内容时开启。
+> 窗口内，符合条件的沙箱升级请求会自动获批，目标可能是完全访问。默认开启的**敏感路径保护**是唯一例外（命中即拒绝）；它只防明显误操作，命令类工具仅做文本扫描，不能当作安全边界。请只在信任当前会话工作内容时开启。
+
+### 敏感路径保护
+
+默认开启。它通过 DSH 原生的 `tools.guard()` 注册（单调 guard：只能拒绝，任何监听器都无法把拒绝翻回允许），命中后返回中文理由并写 `STATIC_DENY` 审计。
+
+- 内置规则：`~/.ssh`、`~/.gnupg`、`~/.aws`、`~/.kube`、`~/.config/gcloud`、`~/.config/gh`、`~/.npmrc`（读写全拦），以及各平台浏览器配置目录；`~/.dsh` 只禁写（排障可读）。
+- 文件工具按参数里的 `path` / `file_path` 做前缀匹配；`pwsh` / `bash` 等命令类工具只能扫命令文本，属**启发式**，可被变量拼接、编码等方式绕过。
+- 完全访问档位下仍然生效：它是“任何授权都压不住”的静态拒绝，优先级高于短期授权与免打扰。
+- 可用 `sensitivePaths: false` 关闭，或在配置里追加 `extra` 规则。相对路径按会话工作区根解析；路径按字面值判定，不跟随符号链接。
+- 它受用户开关约束：在 chip 里选择「授权关闭」时一并停止（关闭 = 完全不介入）。
 
 ## 架构与 DSH 集成
 
@@ -149,6 +160,7 @@ Guard 作为独立 Cordis 插件横切 DSH 管线，不修改 DSH Core：
     dndDurationSeconds: 900
     persistAudit: true
     sweepIntervalMs: 30000
+    sensitivePaths: true
     console:
       enabled: true
       host: 127.0.0.1
@@ -161,6 +173,8 @@ Guard 作为独立 Cordis 插件横切 DSH 管线，不修改 DSH Core：
 - `modeEnabled`：用户开关的启动值；运行期对应 `settings.enabled`，关闭后四个 hook 直接透传。
 - `sweepIntervalMs`：默认 **30000 毫秒**，`0` 关闭；只改善免打扰状态与审计结算的及时性，不决定授权是否有效。
 - `persistAudit` / `auditFile`：控制本地日志写入与路径，默认开启。
+- `sensitivePaths`：默认 **true**；`false` 关闭，或写成 `{ enabled, extra: [{ path, scope }] }` 追加规则。
+  `scope` 只接受 `deny`（读写全拦）与 `deny-write`（只拦写）。非法配置会让装配直接失败（Fail Closed）。
 - `console`：默认开启并监听 `127.0.0.1:8787`，端口冲突时回退到随机端口，实际地址写入 stderr。
 
 `exact-arguments` 是唯一允许的默认 Scope。`fields` 与 `tool` 只能按工具显式配置在 `rules` 中；`fields` 需要明确 `paths`，`tool` 的范围更宽。规则以精确工具名匹配，示例中的工具名必须替换为实际已装工具：
@@ -187,6 +201,8 @@ Guard 作为独立 Cordis 插件横切 DSH 管线，不修改 DSH Core：
 - 不保存完整工具参数；保存工具名、Scope 哈希和脱敏展示串，展示串仍可能包含路径等本机信息。
 - 坏行跳过，写入失败不阻断审批，首次失败在 stderr 提示。`persistAudit: false` 可关闭持久化。
 - 重放的授权仍需通过实时有效性校验；免打扰窗口与操作族内存索引不会重放。
+- 每次装配会写一条 `GUARD_APPLY` 自检事件（敏感路径保护是否注册、console 与结算节拍），排障时先看它。
+- 「能力授权」tab 的审计卡片提供「导出 JSON」；也可直接访问 `/api/audit/export` 下载完整审计。
 
 独立排障入口默认为 `http://127.0.0.1:8787/`；Web GUI 优先使用同源 `/guard/` 路由。下面路径相对于这两个入口：
 
@@ -194,6 +210,7 @@ Guard 作为独立 Cordis 插件横切 DSH 管线，不修改 DSH Core：
 GET   /api/snapshot      会话、授权与免打扰快照
 GET   /api/decisions     汇总后的授权决策记录
 GET   /api/audit         原始审计事件
+GET   /api/audit/export  导出完整审计 JSON（附件下载）
 GET   /api/config        策略、用户设置与展示目录
 PATCH /api/config        运行期策略与 settings 更新
 POST  /api/revoke        { sessionId }：撤销会话全部有效授权
@@ -213,6 +230,8 @@ POST  /api/dnd/extend    { sessionId, addSeconds }：延长窗口
 - 无可信 Session 身份不签发匿名或全局 Lease；不为子 session 签发 Lease，也不提供跨 session 授权继承。
 - Scope、TTL 或上下文无法验证时，不签发或不复用，保留原生审批语义。
 - Guard 不调用 `setSandboxMode`、`permissionPresets.set` 或 `approval.setPolicy`。
+- Guard 只在**收紧**方向拒绝调用：敏感路径保护通过原生 `tools.guard()` 生效，不能把原生拒绝翻回允许；guard 内部异常时返回 `undefined`，交回原生流程。
+- 敏感路径保护**不是安全边界**：对命令类工具只是命令文本扫描，可被刻意规避；它防的是明显误操作，不防恶意代码。
 - 这是一层审批增强，**不是恶意插件隔离边界**。其他可信进程内插件可以认领审批瀑布或修改原生权限状态。
 - Guard 不提供 OS / 容器 / 网络隔离，也不保证第三方插件看不到凭证。凭证与隔离应由 DSH 原生能力或外部机制负责。
 
@@ -239,7 +258,7 @@ adapter/
 ├── cordis.patch.yml         # DSH bundle 默认配置
 └── src/
     ├── index.ts             # 插件装配、宿主只读适配器
-    ├── capability/          # 四个 hook、Scope、Lease、操作族、免打扰
+    ├── capability/          # 四个 hook、Scope、Lease、操作族、免打扰、敏感路径
     ├── audit/               # 决策目录、审计服务、本地日志
     ├── console/             # 决策投影、会话视图与 HTTP 接口
     └── integration/         # 真实 Cordis 接线与生命周期测试
@@ -250,6 +269,12 @@ docs/                        # 技术规格与 DSH 集成基线
 欢迎通过 [Issues](https://github.com/whDonline/dsh-capsule/issues) 提交可复现问题，或通过 Pull Request 改进实现与文档。涉及审批或授权的改动，请先阅读 [AGENTS.md](AGENTS.md)、[技术规格](docs/DSH_Capability_Guard_基于现有版本重构技术规格.md)与[集成基线](docs/集成基线-真实DSH行为.md)，以最新项目决策为准。
 
 安全相关改动需要负向测试；修改 hook、事件顺序或宿主服务访问方式，必须同时覆盖真实 Cordis 集成测试。重点关注拒绝不被覆盖、会话隔离、并发 `callId`、过期撤销、取消清理与审计脱敏。
+
+## 参考与致谢
+
+- 短期授权里的命令前缀（`Bash(npm run *)` 语义）、复合命令“每个子命令都要有放行”、破坏性命令排除等规则，参考了 **Claude Code** 的权限设计；本项目只借语义，不复制实现。
+- **免打扰（限时完全访问审批放行层）** 的产品模型参考了 [Lineer/dsh-permission-control](https://gitee.com/Lineer/dsh-permission-control)（MIT）。我们保留了“用户显式开启、限时、只代答审批、不改档位、只存内存”的核心，改动是：用 `tools/execute` 的 `callId` 记录 + 参数解析识别升级（而不是匹配审批理由文本），并移除了路径级授权与多授权并存。
+- **敏感路径保护** 的“内置敏感目录 + deny 规则”思路同样来自该项目；实现改为 DSH 原生 `tools.guard()`，只做静态拒绝。
 
 ## 许可证
 

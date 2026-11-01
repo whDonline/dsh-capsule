@@ -148,6 +148,20 @@ describe("HTTP 只读查看器（规格 Phase 4）", () => {
       await handle.close();
     }
   });
+  it("GET /api/audit/export 以附件导出完整审计（带中文决策名、no-store）", async () => {
+    const handle = await startConsoleServer({ console: await makeGov(), port: 0 });
+    try {
+      const res = await fetch(`${handle.url}api/audit/export`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-disposition")).toMatch(/attachment; filename="dsh-guard-audit-.+\.json"/);
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      const body = (await res.json()) as { decision: string; decisionLabel?: string }[];
+      expect(body).toHaveLength(5);
+      expect(body[0]?.decisionLabel).toBeTruthy();
+    } finally {
+      await handle.close();
+    }
+  });
   it("非 GET 一律 405，未知路径 404（只读 Fail Closed）", async () => {
     const handle = await startConsoleServer({ console: await makeGov(), port: 0 });
     try {

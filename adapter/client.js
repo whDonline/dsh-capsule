@@ -138,6 +138,7 @@ window.__ModuleLoader__.load({
         '.dsh-guard-mode-icon svg{width:14px;height:14px}',
         '.dsh-guard-mode-label{text-overflow:ellipsis;white-space:nowrap;min-width:0;overflow:hidden}',
         '.dsh-guard-mode-time{flex:none;margin-left:2px;font-size:12px;color:var(--dsw-alias-label-tertiary,#8b949e);font-variant-numeric:tabular-nums}',
+        '.dsh-guard-mode-time[data-ending=true]{color:var(--dsw-alias-state-warn-primary,#9a6700);font-weight:600}',
         '.dsh-guard-mode-chevron{flex:none;display:inline-flex;color:var(--dsw-alias-label-caption,#8b949e);transition:transform .12s}',
         '.dsh-guard-mode-chevron svg{width:14px;height:14px}',
         '.dsh-guard-mode-chevron[data-open=true]{transform:rotate(180deg)}',
@@ -595,7 +596,7 @@ window.__ModuleLoader__.load({
               h(
                 'div',
                 { style: { marginLeft: 'auto', fontSize: '12px', color: dndRemaining > 0 ? COLORS.warn : COLORS.fg2, fontVariantNumeric: 'tabular-nums' } },
-                dndRemaining > 0 ? '还剩 ' + fmtCn(dndRemaining) : '已到期，等待结算',
+                dndRemaining > 0 ? '还剩 ' + fmtCn(dndRemaining) + (GuardModeChip.endingSoon(dndRemaining) ? ' · 即将结束' : '') : '已到期，等待结算',
               ),
             ),
             h('div', { style: Object.assign({}, S.rowDesc, { marginTop: '4px' }) }, '窗口内自动批准沙箱升级；不改原生挡位，结束、到期或你手动切换挡位后立即恢复逐次询问。'),
@@ -756,6 +757,16 @@ window.__ModuleLoader__.load({
             h('option', { value: '30' }, '近 30 天'),
             h('option', { value: '90' }, '近 90 天'),
             h('option', { value: '0' }, '全部'),
+          ),
+          h(
+            'a',
+            {
+              href: (host || '') + '/api/audit/export',
+              download: 'dsh-guard-audit.json',
+              style: Object.assign({}, S.btn, { textDecoration: 'none', lineHeight: '1.5' }),
+              title: '导出完整审计 JSON（本机数据，分享前请自行脱敏）',
+            },
+            '导出 JSON',
           ),
         ),
         rows.length === 0
@@ -1075,7 +1086,7 @@ window.__ModuleLoader__.load({
           },
           glyph ? h('span', { key: 'icon', className: 'dsh-guard-mode-icon', 'aria-hidden': true }, glyph) : null,
           h('span', { key: 'label', className: 'dsh-guard-mode-label' }, label),
-          remaining > 0 ? h('span', { key: 'time', className: 'dsh-guard-mode-time' }, clockText(remaining)) : null,
+          remaining > 0 ? h('span', { key: 'time', className: 'dsh-guard-mode-time', 'data-ending': GuardModeChip.endingSoon(remaining) ? 'true' : 'false', title: GuardModeChip.endingSoon(remaining) ? '免打扰即将结束' : undefined }, clockText(remaining)) : null,
           Chevron
             ? h(
                 'span',
@@ -1117,6 +1128,10 @@ window.__ModuleLoader__.load({
      *  入口隐藏的判定单独暴露，便于 Node 单测；切回其他档位后入口自动恢复，不修改用户设置。 */
     GuardModeChip.hiddenFor = function (mode) {
       return mode === 'danger-full-access';
+    };
+    /** 作用：免打扰「即将结束」提醒——剩余 2 分钟内高亮（只影响展示，不参与任何权限判定）。 */
+    GuardModeChip.endingSoon = function (remainingMs) {
+      return typeof remainingMs === 'number' && remainingMs > 0 && remainingMs <= 120_000;
     };
 
     return {
