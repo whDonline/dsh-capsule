@@ -320,6 +320,96 @@ describe("DSH 客户端半边（adapter/client.js）", () => {
     // rangeDays=0 → 全部
     expect(view.buildModel(records, 0, now).rows).toHaveLength(5);
   });
+  /** 作用：把 React 元素树里的文本全取出来（替身 React 没有真实 DOM）。 */
+  function elementTexts(node: unknown): string[] {
+    if (node === null || node === undefined || typeof node === "boolean") return [];
+    if (typeof node === "string" || typeof node === "number") return [String(node)];
+    if (Array.isArray(node)) return node.flatMap(elementTexts);
+    if (typeof node === "object" && "props" in node) {
+      return elementTexts((node as { props?: { children?: unknown } }).props?.children);
+    }
+    return [];
+  }
+  /** 作用：用「会真正重渲染」的 React 替身 + 假 fetch，跑通会话视图的异步加载路径。
+   * 背景：2026-11-01 实测把 setHost 状态删了却漏删调用，ReferenceError 被组件 catch 吃掉，
+   * 页面永远停在「治理接口暂时不可达」；旧用例只渲染无快照分支，抓不到这类错。 */
+  async function renderSessionViewWithData(): Promise<string> {
+    const source = readFileSync(fileURLToPath(new URL("../../client.js", import.meta.url)), "utf8");
+    let factory: ((require: (name: string) => unknown) => { inject: string[]; apply(ctx: unknown): void }) | undefined;
+    const window_ = { __ModuleLoader__: { load: (definition: { factory: typeof factory }) => { factory = definition.factory; } }, DshGuardConsole: undefined as unknown };
+    const document_ = makeDocument();
+    const state: unknown[] = [];
+    let hookIndex = 0;
+    let pendingEffects: Array<() => void> = [];
+    const React = {
+      createElement: (type: unknown, props: Record<string, unknown> | null, ...children: unknown[]) => ({ type, props: { ...(props ?? {}), children: children.length <= 1 ? children[0] : children } }),
+      useState: (initial: unknown) => {
+        const index = hookIndex++;
+        if (!(index in state)) state[index] = typeof initial === "function" ? (initial as () => unknown)() : initial;
+        const set = (next: unknown): void => {
+          state[index] = typeof next === "function" ? (next as (value: unknown) => unknown)(state[index]) : next;
+        };
+        return [state[index], set];
+      },
+      useEffect: (fn: () => void) => { pendingEffects.push(fn); },
+      useRef: () => ({ current: null }),
+    };
+    const now = Date.now();
+    const snapshotBody = {
+      schemaVersion: 3,
+      sessions: [{
+        sessionId: "session-test",
+        auth: { state: "active", activeCount: 1, nextExpiresAt: now + 60_000, grants: [] },
+        sandbox: { state: "not-involved", checkedAt: now },
+        stats: { total: 1, active: 1, savedApprovals: 0, longestWindowMs: 0, raised: 0, pendingRestore: 0, reuseByKind: { exact: 0, family: 0, window: 0 }, topFamilies: [] },
+        actions: { canRevoke: true, canRestoreSandbox: false },
+      }],
+    };
+    const decisionsBody = {
+      summary: { total: 1, active: 1, savedApprovals: 0, longestWindowMs: 0, raised: 0, pendingRestore: 0, reuseByKind: { exact: 0, family: 0, window: 0 }, topFamilies: [] },
+      records: [{
+        leaseId: "lease-1", grantedAt: now - 1_000, expiresAt: now + 60_000, outcome: "active", kind: "universal",
+        uses: 1, familyLabel: "前缀 pwsh", ttlSeconds: 60, capability: "pwsh 测试命令", reason: "pwsh 测试命令 --flag",
+      }],
+    };
+    const fetch_ = async (input: unknown): Promise<Response> => {
+      const url = String(input);
+      const body = url.includes("/api/snapshot") ? snapshotBody : url.includes("/api/decisions") ? decisionsBody : { policy: {}, catalog: {}, settings: {} };
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    runInNewContext(source, { window: window_, document: document_, setTimeout, setInterval: () => 0, clearInterval: () => undefined, fetch: fetch_, console });
+    const plugin = factory!((name: string) => {
+      if (name === "react") return React;
+      throw new Error(`unexpected require: ${name}`);
+    });
+    let View: ((props: Record<string, unknown>) => unknown) | undefined;
+    plugin.apply({
+      slots: {
+        inject: (_slot: string, callback: () => unknown) => { callback(); return () => undefined; },
+        register: (options: Record<string, unknown>, component: unknown) => {
+          if (options.name === "conversation.view") View = component as typeof View;
+          return () => undefined;
+        },
+      },
+    });
+    const render = (): unknown => {
+      hookIndex = 0;
+      return View!({ sessionId: "session-test" });
+    };
+    render();
+    const effects = pendingEffects;
+    pendingEffects = [];
+    for (const effect of effects) effect();
+    for (let i = 0; i < 100 && state[0] === null; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+    return elementTexts(render()).join("|");
+  }
+  it("会话视图：异步加载成功后渲染指标与审计（未声明变量不再把整页变成错误提示）", async () => {
+    const text = await renderSessionViewWithData();
+    expect(text).toContain("指标");
+    expect(text).toContain("审计");
+    expect(text).toContain("pwsh 测试命令 --flag");
+    expect(text).not.toContain("治理接口暂时不可达");
+  });
   it("对话内提示条：四种状态的文案（没有授权时也必须显示一行，否则用户以为功能不存在）", () => {
     const { registrations } = registerPlugin();
     const dock = registrations.find((item) => item.slot === "conversation.input.dock")?.component as unknown as {

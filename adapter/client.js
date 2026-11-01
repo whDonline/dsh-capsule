@@ -475,9 +475,9 @@ window.__ModuleLoader__.load({
                 fetchJson(base, '/api/decisions?sessionId=' + encodeURIComponent(sessionId) + '&limit=' + AUDIT_LIMIT),
               ]);
               if (!alive) return;
-              setHost(base);
               setSnapshot(snap);
               setDecisions(decisionBody);
+              setMessage('');
             } catch (err) {
               if (alive) setMessage('治理接口暂时不可达，稍后自动重试');
             }
