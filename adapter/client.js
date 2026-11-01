@@ -636,6 +636,29 @@ window.__ModuleLoader__.load({
           )
         : null;
 
+      // ---- 工作区外访问（只记目录，不记文件名）----
+      const accessView = view.access;
+      const accessCard = h(
+        'div',
+        { style: S.card },
+        h('div', { style: S.title }, '工作区外访问'),
+        h('div', { style: S.note }, '只记目录、不记文件名；可在配置里用 accessLog: false 关闭。'),
+        accessView && accessView.dirs && accessView.dirs.length > 0
+          ? h(
+              'div',
+              { style: { marginTop: '8px', display: 'flex', flexDirection: 'column', gap: '4px' } },
+              accessView.dirs.map(function (item) {
+                return h(
+                  'div',
+                  { key: item.dir, style: { display: 'flex', gap: '10px', fontSize: '12px', color: COLORS.fg2 } },
+                  h('span', { style: { fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace', wordBreak: 'break-all' } }, item.dir),
+                  h('span', { style: { marginLeft: 'auto', whiteSpace: 'nowrap' } }, item.count + ' 次 · ' + fmtTime(item.lastAt)),
+                );
+              }),
+            )
+          : h('div', { style: S.empty }, '还没有记录。'),
+      );
+
       // ---- 设置区：只放两档时长（挡位本身在输入框左侧的控件里切换，见 GuardModeChip）----
       const maxTtlSeconds = config && config.policy && Number.isInteger(config.policy.maxTtlSeconds) ? config.policy.maxTtlSeconds : 0;
       const patchSettings = async function (patch) {
@@ -806,7 +829,7 @@ window.__ModuleLoader__.load({
             ),
       );
 
-      return h('div', { style: S.page }, h('div', { style: S.wrap }, applicabilityCard, metricsCard, dndCard, settingsCard, auditCard));
+      return h('div', { style: S.page }, h('div', { style: S.wrap }, applicabilityCard, metricsCard, dndCard, accessCard, settingsCard, auditCard));
     }
 
     // ---------------- 输入框工具栏的「能力授权」挡位控件 ----------------

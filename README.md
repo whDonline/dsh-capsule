@@ -32,6 +32,7 @@ Agent 在“修改 → 测试 → 检查”的循环中，往往会重复申请�
 - **短期授权**：人工批准后签发 Lease，记录范围与有效期；命中有效授权时减少重复询问。
 - **免打扰窗口**：由你主动开启，窗口内自动批准本会话已记录的沙箱升级请求，可随时结束。
 - **敏感路径保护**：内置 SSH 私钥、云凭据、浏览器配置等规则，命中即拒绝；可关闭或追加自己的规则。
+- **工作区外访问记录**：按目录汇总 AI 碰过工作区外的哪些地方（只记目录，不记文件名），可关闭。
 - **会话内治理**：输入框模式 chip 和「能力授权」tab 显示授权、倒计时、设置和决策记录。
 - **本地可追溯**：记录批准、复用、到期与撤销；审计与授权记录默认追加保存在本机，可导出 JSON。
 
@@ -129,6 +130,16 @@ Lease 的过期在查询与校验时实时判断，不依赖后台定时器。�
 - 可用 `sensitivePaths: false` 关闭，或在配置里追加 `extra` 规则。相对路径按会话工作区根解析；路径按字面值判定，不跟随符号链接。
 - 它受用户开关约束：在 chip 里选择「授权关闭」时一并停止（关闭 = 完全不介入）。
 
+### 工作区外访问记录
+
+默认开启。Guard 在 `tools/execute` 记录调用时顺手判断：文件类工具的目标路径是否在当前会话工作区之外；
+只对**工作区外**的读/写记录一条 `ACCESS_OUTSIDE` 审计，并在会话 tab 的「工作区外访问」卡片里按目录汇总（次数 + 最近时间）。
+
+- **只记目录，不记文件名**，也不记录命令文本；目的是回答"开了权限之后它碰过哪"，不是复刻操作日志。
+- 内存态：进程重启后清空；审计事件按原有策略落 NDJSON。
+- 工作区根读不到时**不记录**（不猜）；命令类工具无法可靠取目标路径，不记录。
+- 可用 `accessLog: false` 关闭；它只做展示，不参与任何允许/拒绝判定。
+
 ## 架构与 DSH 集成
 
 ![四个 hook、授权与免打扰管理、审计与界面的架构图](assets/readme/architecture-zh.svg)
@@ -161,6 +172,7 @@ Guard 作为独立 Cordis 插件横切 DSH 管线，不修改 DSH Core：
     persistAudit: true
     sweepIntervalMs: 30000
     sensitivePaths: true
+    accessLog: true
     console:
       enabled: true
       host: 127.0.0.1
@@ -175,6 +187,7 @@ Guard 作为独立 Cordis 插件横切 DSH 管线，不修改 DSH Core：
 - `persistAudit` / `auditFile`：控制本地日志写入与路径，默认开启。
 - `sensitivePaths`：默认 **true**；`false` 关闭，或写成 `{ enabled, extra: [{ path, scope }] }` 追加规则。
   `scope` 只接受 `deny`（读写全拦）与 `deny-write`（只拦写）。非法配置会让装配直接失败（Fail Closed）。
+- `accessLog`：默认 **true**；只记录工作区外访问的**目录**，`false` 关闭。非法类型同样装配失败。
 - `console`：默认开启并监听 `127.0.0.1:8787`，端口冲突时回退到随机端口，实际地址写入 stderr。
 
 `exact-arguments` 是唯一允许的默认 Scope。`fields` 与 `tool` 只能按工具显式配置在 `rules` 中；`fields` 需要明确 `paths`，`tool` 的范围更宽。规则以精确工具名匹配，示例中的工具名必须替换为实际已装工具：
@@ -258,7 +271,7 @@ adapter/
 ├── cordis.patch.yml         # DSH bundle 默认配置
 └── src/
     ├── index.ts             # 插件装配、宿主只读适配器
-    ├── capability/          # 四个 hook、Scope、Lease、操作族、免打扰、敏感路径
+    ├── capability/          # 四个 hook、Scope、Lease、操作族、免打扰、敏感路径、访问记录
     ├── audit/               # 决策目录、审计服务、本地日志
     ├── console/             # 决策投影、会话视图与 HTTP 接口
     └── integration/         # 真实 Cordis 接线与生命周期测试

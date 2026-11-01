@@ -391,6 +391,7 @@ describe("DSH 客户端半边（adapter/client.js）", () => {
         sessionId: "session-test",
         auth: { state: "active", activeCount: 1, nextExpiresAt: now + 60_000, grants: [] },
         sandbox: { currentMode: mode, currentModeText: mode === "danger-full-access" ? "完全访问" : "工作区可写", checkedAt: now },
+        access: { total: 2, dirs: [{ dir: "D:\\outside", count: 2, lastAt: now }] },
         stats: { total: 1, active: 1, savedApprovals: 0, longestWindowMs: 0, reuseByKind: { exact: 0, family: 0 }, topFamilies: [] },
         actions: { canRevoke: true },
       }],
@@ -439,6 +440,8 @@ describe("DSH 客户端半边（adapter/client.js）", () => {
     expect(text).toContain("指标");
     expect(text).toContain("审计");
     expect(text).toContain("pwsh 测试命令 --flag");
+    expect(text).toContain("工作区外访问");
+    expect(text).toContain("D:\\outside");
     expect(text).toContain("导出 JSON");
     expect(text).not.toContain("治理接口暂时不可达");
   });

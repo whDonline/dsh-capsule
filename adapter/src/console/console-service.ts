@@ -109,7 +109,9 @@ export class GovernanceConsole {
       const sandbox = withModeText({ currentMode: this.deps.currentMode?.(sessionId), checkedAt: now });
       const descriptor = this.describeSession(sessionId);
       const dnd = this.deps.dnd?.view(sessionId);
-      const activityAt = Math.max(lastAuditAt.get(sessionId) ?? 0, ...sessionLeases.map((lease) => lease.issuedAt));
+      // 工作区外访问：只下发有记录的会话（空记录不占字段，避免快照噪声）
+      const access = this.deps.access?.view(sessionId);
+      const activityAt = Math.max(lastAuditAt.get(sessionId) ?? 0, ...sessionLeases.map((lease) => lease.issuedAt), access?.dirs[0]?.lastAt ?? 0);
       views.push({
         activityAt,
         view: {
@@ -120,6 +122,7 @@ export class GovernanceConsole {
           auth,
           sandbox,
           ...(dnd === undefined ? {} : { dnd }),
+          ...(access === undefined || access.total === 0 ? {} : { access }),
           stats: summarizeDecisions(decisionsBySession.get(sessionId) ?? []),
           actions: { canRevoke: auth.activeCount > 0 },
         },

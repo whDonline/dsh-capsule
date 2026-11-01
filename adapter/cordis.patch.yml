@@ -12,7 +12,8 @@
 #   - Guard **不改写会话沙箱档位**：每次升级审批仍由 DSH 自己决定，Guard 只负责
 #     「同一条操作在 TTL 内不再问你」与「免打扰窗口内自动放行」；
 #   - 敏感路径保护默认开启（SSH / 云凭据 / 浏览器配置等），通过原生 tools.guard 只做拒绝；
-#     命令类工具是命令文本扫描（启发式），不是安全边界。
+#     命令类工具是命令文本扫描（启发式），不是安全边界；
+#   - 工作区外访问记录默认开启：只记目录、不记文件名，可用 accessLog: false 关闭。
 #
 # 覆盖示例（加到 profile 的 cordis.patch.yml；patch 会替换整行 config，请重述要保留的字段）：
 #
@@ -27,6 +28,7 @@
 #         extra:
 #           - path: 'D:/company-secrets'
 #             scope: deny-write
+#       accessLog: true
 
 - insert:
     - id: capability-guard

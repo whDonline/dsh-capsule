@@ -74,6 +74,8 @@ export interface ConsoleSessionView {
   sandbox: ConsoleSandboxView;
   /** 免打扰窗口（仅当存在活动窗口时下发；没有窗口就没有这个字段） */
   dnd?: ConsoleDndView;
+  /** 工作区外访问记录（按目录聚合；未开启或没有记录时不下发） */
+  access?: ConsoleAccessView;
   /** 价值指标（少点了几次批准 / 最长放开多久） */
   stats: ConsoleSessionStats;
   actions: {
@@ -155,6 +157,16 @@ export interface ConsoleAuditSource {
 export interface ConsoleLeaseSource {
   list(): Promise<readonly CapabilityLease[]>;
 }
+/** 工作区外访问记录：只含目录与次数，不含文件名（隐私约束见 capability/access-log.ts）。 */
+export interface ConsoleAccessDir {
+  dir: string;
+  count: number;
+  lastAt: number;
+}
+export interface ConsoleAccessView {
+  total: number;
+  dirs: readonly ConsoleAccessDir[];
+}
 export interface GovernanceConsoleDeps {
   audit: ConsoleAuditSource;
   leases: ConsoleLeaseSource;
@@ -163,6 +175,8 @@ export interface GovernanceConsoleDeps {
   now?: () => number;
   /** 免打扰窗口状态源（可选：未注入时会话视图不带 dnd 字段） */
   dnd?: { view(sessionId: string): ConsoleDndView | undefined };
+  /** 工作区外访问记录源（可选：未注入时不带 access 字段） */
+  access?: { view(sessionId: string): ConsoleAccessView | undefined };
   /** 当前会话沙箱档位（可选：未注入时 currentMode 缺失，页面显示「未知」） */
   currentMode?: (sessionId: string) => SandboxMode | undefined;
   /** 会话名称解析（可选：未注入时降级为「会话 短ID」） */

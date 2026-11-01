@@ -39,6 +39,8 @@ export interface UniversalGateDeps {
   dnd?: Pick<DndManager, "evaluate">;
   /** 可注入时钟（默认 Date.now），保证 TTL/GC 语义可模拟时间测试 */
   now?: () => number;
+  /** 可选：工具执行观察者（工作区外访问记录用）——在 tools/execute 记录操作后调用，异常绝不影响执行。 */
+  observe?: (exec: ToolExecutionLike) => void;
 }
 export interface GuardEventBus {
   // 事件名/handler 签名/prepend 选项均已按真实 cordis 核实（2026-09-14）：
@@ -122,6 +124,11 @@ export class UniversalGate {
           // 策略/Scope 解析失败：不记录（审批照常交还人类），绝不猜测一个更宽的 Scope
         }
       }
+    }
+    try {
+      this.deps.observe?.(exec);
+    } catch {
+      // 观测失败不影响执行（访问记录是可选能力）
     }
     return await next();
   }

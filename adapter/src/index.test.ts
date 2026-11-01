@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Context } from "@deepseek-ai/cordis";
-import { apply, buildSandboxModeReader, resolveSensitivePathsConfig, type CapsuleHostContext } from "./index.js";
+import { apply, buildSandboxModeReader, resolveAccessLogConfig, resolveSensitivePathsConfig, type CapsuleHostContext } from "./index.js";
 function makeBus(host: CapsuleHostContext) {
   // 作用：为任意宿主 ctx 挂上事件总线（Guard 的 install 需要 on）；宿主本身可以是真实 cordis Context
   (host as { on?: unknown }).on = () => () => {};
@@ -123,5 +123,13 @@ describe("sensitivePaths 配置解析", () => {
   });
   it("非法形状直接拒绝装配（Fail Closed）", () => {
     expect(() => resolveSensitivePathsConfig({ sensitivePaths: "yes" as never })).toThrow(/GUARD_INSTALL_FAILED/);
+  });
+});
+describe("accessLog 配置解析", () => {
+  it("默认开启；false 关闭；非布尔值拒绝装配", () => {
+    expect(resolveAccessLogConfig(undefined)).toBe(true);
+    expect(resolveAccessLogConfig({ accessLog: true })).toBe(true);
+    expect(resolveAccessLogConfig({ accessLog: false })).toBe(false);
+    expect(() => resolveAccessLogConfig({ accessLog: "yes" as never })).toThrow(/GUARD_INSTALL_FAILED/);
   });
 });

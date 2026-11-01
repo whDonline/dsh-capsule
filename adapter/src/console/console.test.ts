@@ -563,3 +563,19 @@ describe("免打扰窗口投影", () => {
     expect(withoutDnd.sessions[0]?.dnd).toBeUndefined();
   });
 });
+describe("工作区外访问投影", () => {
+  it("按会话下发目录聚合；没有记录时不占字段", async () => {
+    const govConsole = new GovernanceConsole({
+      audit: new AuditService(),
+      leases: new LeaseManager(new MemoryLeaseStore()),
+      access: {
+        view: (sessionId: string) =>
+          sessionId === "s1" ? { total: 2, dirs: [{ dir: "D:\\outside", count: 2, lastAt: 1_000 }] } : { total: 0, dirs: [] },
+      },
+    });
+    const withAccess = await govConsole.snapshot({ sessionId: "s1" });
+    expect(withAccess.sessions[0]?.access).toMatchObject({ total: 2, dirs: [{ dir: "D:\\outside", count: 2 }] });
+    const without = await govConsole.snapshot({ sessionId: "s2" });
+    expect(without.sessions[0]?.access).toBeUndefined();
+  });
+});

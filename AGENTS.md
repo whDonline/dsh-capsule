@@ -40,6 +40,7 @@ DSH Capability Guard（TS 插件，横切）
    │     └── tools/result：清理 pending + 记录结果
    ├── DndManager（免打扰窗口：独立状态，不写档位、不签 Lease）
    ├── SensitivePaths（2026-11-01：静态敏感路径保护，注册到 DSH 原生 `ctx.tools.guard()`；只许拒绝）
+   ├── AccessLog（2026-11-01：工作区外访问记录，只记目录；可观测性，不参与判定）
    ├── LeaseManager（MemoryLeaseStore，接口抽象可换持久化）
    └── Console（输入框模式 chip / 能力授权 tab：配置 + 状态 + 审计 + 统计）
 ```
@@ -120,7 +121,7 @@ Phase 0/1/4 有效，Phase 2/3/5 已作废。当前验收基线见第 7.2 节：
 adapter/src/
 ├── index.ts                 # Guard Plugin 入口（纯 TypeScript）+ buildSandboxModeReader 宿主只读适配器
 ├── capability/              # types / canonical / scope-resolver / escalation / policy / settings
-│                            #   / dnd / sensitive-paths / lease-store / lease-manager / pending / operation
+│                            #   / dnd / sensitive-paths / access-log / lease-store / lease-manager / pending
 │                            #   / operation-registry / families / universal-gate
 ├── integration/             # 真 @deepseek-ai/cordis 集成测试：cordis-pipeline（hook 接线与瀑布认领语义）
 │                            #   / plugin-activation（Context.plugin 装载）/ cordis-get-semantics（ctx.get 降级契约）
@@ -168,6 +169,10 @@ assets/                      # README 用示意图（结构示意，非截图）
    即「不保护」而不是拒绝一切）。命中写 `STATIC_DENY` 审计；配置 `sensitivePaths` 可关闭或追加 `extra` 规则，
    非法形状在装配期直接失败（Fail Closed）。文件工具按参数路径判定；命令类工具只扫命令文本，**必须标注启发式**，
    不得宣称是安全边界。
+4.3. **工作区外访问记录（2026-11-01 新增）**：`capability/access-log.ts` 在 `tools/execute` 观察点
+   （Gate 的 `observe` 回调）记录文件类工具**工作区外**的读/写，按目录聚合后由 `sessions[].access` 下发。
+   **只记目录、不记文件名/命令文本**；内存态（重启清空），审计写 `ACCESS_OUTSIDE`（同样只含目录）。
+   工作区根读不到时不记录；`accessLog: false` 关闭。它是可观测性，**不参与任何允许/拒绝判定**。
 5. **客户端半边的槽位（2026-10-31 更新）**：`conversation.input.dock`（一眼层）与
    `conversation.view`（详情层）都是 session 作用域，组件直接拿到 `sessionId`；
    **不再注册 `main` 面板与 `sidebar.panellist` 图标**（项目所有者要求"先不做全局中台"）。
@@ -255,6 +260,9 @@ assets/                      # README 用示意图（结构示意，非截图）
   `index.test.ts` 覆盖默认注册、`sensitivePaths:false` 不注册、配置解析 Fail Closed；
   `console.test.ts` 覆盖 `/api/audit/export`。装配时写 `GUARD_APPLY` 自检事件。
 - **免打扰到期提醒**：`client.js` 的 `GuardModeChip.endingSoon` 在剩余 ≤2 分钟时高亮（仅展示）。
+- **工作区外访问记录已接入（2026-11-01）**：`capability/access-log.test.ts` 覆盖路径提取、工作区边界
+  （同名前缀兄弟目录算外面）、目录聚合、会话隔离、有界淘汰；`console.test.ts` 覆盖 `sessions[].access` 投影；
+  `console-ui.test.ts` 覆盖 tab 卡片文案。默认开启，`accessLog:false` 关闭。
 
 ## 8. 安全声明边界（README / 注释不得混淆）
 
