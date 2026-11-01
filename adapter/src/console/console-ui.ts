@@ -5,12 +5,10 @@
 //   ② DSH Web GUI 里的 Guard 面板（client.js 在 DSH 模块加载器里复用同一份脚本与同一套 HTTP API）。
 // 这样两个入口不会出现两套视图逻辑漂移。
 //
-// 【信息分层】首屏只出现人话（会话名 / 放开了什么 / 还剩多久 / 档位收回没有），原始 ID、Scope 哈希、
+// 【信息分层】首屏只出现人话（会话名 / 放开了什么 / 还剩多久 / 当前沙箱档位），原始 ID、Scope 哈希、
 // 完整 Scope 串一律收进「技术详情」展开区；审计单独一个 tab，不占首屏。
-// 【两个状态分离】「授权是否还有效」与「沙箱档位是否已恢复」是两条独立状态：
-//   - 倒计时只属于授权；
-//   - 档位状态只用状态词（已提升 / 待回滚 / 已恢复 / 无法确认），且必须等下一次快照确认，
-//     绝不因为倒计时归零就显示「已恢复」。
+// 【状态边界（2026-11-01）】本插件只做审批层的短期授权，不改写会话沙箱档位：首屏的「沙箱档位」
+// 是宿主当前读数，与授权倒计时无关；倒计时归零只表示授权到期。
 // 【安全约束】脚本内所有动态内容一律经 textContent 写入（杜绝注入）；不读取 document.body；
 // 唯一的写操作是 PATCH /api/config（挡位/TTL）与 POST /api/revoke（收缩型动作），且仅在用户点击后触发。
 export const CONSOLE_CLIENT_JS = String.raw`(function (root, factory) {
@@ -41,10 +39,9 @@ export const CONSOLE_CLIENT_JS = String.raw`(function (root, factory) {
     if (m > 0) return m + "m" + (s < 10 ? "0" : "") + s + "s";
     return s + "s";
   }
-  function modeLabelOf(sandbox, field) {
+  function modeLabelOf(sandbox) {
     // 作用：取服务端下发的档位中文名；缺失时退回机器值（绝不自己编造）
     if (!sandbox) return "未知";
-    if (field === "baseline") return sandbox.baselineModeText || sandbox.baselineMode || "未知";
     return sandbox.currentModeText || sandbox.currentMode || "未知";
   }
   function injectStyles(doc) {
@@ -82,9 +79,6 @@ export const CONSOLE_CLIENT_JS = String.raw`(function (root, factory) {
       ".dgc-fact{display:grid;grid-template-columns:72px 1fr;gap:10px;padding:5px 0;font-size:12.5px}",
       ".dgc-fact .dgc-fact-key{color:var(--fg2)}",
       ".dgc-fact .dgc-fact-value{color:var(--fg)}",
-      ".dgc-banner{margin-top:12px;padding:10px 12px;border-radius:8px;border:1px solid var(--line2);background:var(--surface2);font-size:12.5px}",
-      ".dgc-banner.dgc-warn{border-color:var(--warn);color:var(--warn)}",
-      ".dgc-banner.dgc-bad{border-color:var(--bad);color:var(--bad)}",
       ".dgc-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}",
       ".dgc-btn{font:inherit;font-size:12.5px;padding:5px 12px;border-radius:6px;border:1px solid var(--brand);background:var(--brand);color:#fff;cursor:pointer}",
       ".dgc-btn.dgc-ghost{background:var(--surface);color:var(--fg);border-color:var(--line2)}",
@@ -220,10 +214,6 @@ export const CONSOLE_CLIENT_JS = String.raw`(function (root, factory) {
     var sandboxRow = statusRow("沙箱档位");
     card.appendChild(sandboxRow.row);
 
-    var banner = el("div", "dgc-banner");
-    banner.hidden = true;
-    card.appendChild(banner);
-
     var facts = el("div", "dgc-facts");
     function factRow(keyText) {
       var row = el("div", "dgc-fact");
@@ -246,13 +236,8 @@ export const CONSOLE_CLIENT_JS = String.raw`(function (root, factory) {
     revokeBtn.type = "button";
     revokeBtn.hidden = true;
     revokeBtn.addEventListener("click", function () { void runAction("revoke", revokeBtn); });
-    var restoreBtn = el("button", "dgc-btn dgc-ghost", "立即回滚档位");
-    restoreBtn.type = "button";
-    restoreBtn.hidden = true;
-    restoreBtn.addEventListener("click", function () { void runAction("restore-sandbox", restoreBtn); });
     var actionMsg = el("span", "dgc-msg", "");
     actions.appendChild(revokeBtn);
-    actions.appendChild(restoreBtn);
     actions.appendChild(actionMsg);
     card.appendChild(actions);
 
@@ -426,7 +411,7 @@ export const CONSOLE_CLIENT_JS = String.raw`(function (root, factory) {
     function runAction(action, button) {
       var view = state.view;
       if (!view) return Promise.resolve(null);
-      var label = action === "revoke" ? "立即收回本会话的全部临时授权？这会同时把沙箱档位收回。" : "立即把沙箱档位收回到原值？这只影响档位，不会动仍然有效的授权。";
+      var label = "立即收回本会话的全部临时授权？下一次同类调用会重新征求你的同意。";
       if (typeof confirm === "function" && !confirm(label)) return Promise.resolve(null);
       button.disabled = true;
       setMsg(actionMsg, "执行中…", false);
@@ -435,9 +420,8 @@ export const CONSOLE_CLIENT_JS = String.raw`(function (root, factory) {
         headers: { "content-type": "application/json", "x-dsh-guard": "1" },
         body: JSON.stringify({ sessionId: view.sessionId, action: action })
       }).then(function (body) {
-        var restored = body && body.results ? body.results.length : 0;
         var revoked = body && typeof body.revoked === "number" ? body.revoked : 0;
-        setMsg(actionMsg, action === "revoke" ? ("已收回 " + revoked + " 条授权，档位处理 " + restored + " 项") : ("档位处理 " + restored + " 项"), false);
+        setMsg(actionMsg, "已收回 " + revoked + " 条授权", false);
         return refresh();
       }).catch(function (err) {
         setMsg(actionMsg, "未执行：" + (err && err.message ? err.message : String(err)), true);
@@ -499,23 +483,12 @@ export const CONSOLE_CLIENT_JS = String.raw`(function (root, factory) {
       return "dgc-pill dgc-idle";
     }
     function sandboxText(sandbox) {
-      if (!sandbox) return "不涉及沙箱档位";
-      if (sandbox.state === "raised") return "已提升：" + modeLabelOf(sandbox);
-      if (sandbox.state === "unchanged") return "未改动（本来就够宽）：" + modeLabelOf(sandbox);
-      if (sandbox.state === "user-override") return "由你设定：" + modeLabelOf(sandbox);
-      if (sandbox.state === "pending-restore") return "待回滚：仍为 " + modeLabelOf(sandbox);
-      if (sandbox.state === "restored") return "已恢复：" + modeLabelOf(sandbox);
-      if (sandbox.state === "unknown") return "无法确认";
-      return "不涉及沙箱档位";
+      if (!sandbox) return "未知";
+      if (sandbox.currentMode === undefined && !sandbox.currentModeText) return "未知";
+      return modeLabelOf(sandbox);
     }
     function sandboxPillClass(sandbox) {
-      if (!sandbox) return "dgc-pill dgc-idle";
-      if (sandbox.state === "raised") return "dgc-pill dgc-ok";
-      if (sandbox.state === "unchanged") return "dgc-pill dgc-idle";
-      if (sandbox.state === "pending-restore") return "dgc-pill dgc-warn";
-      if (sandbox.state === "user-override") return "dgc-pill dgc-idle";
-      if (sandbox.state === "restored") return "dgc-pill dgc-idle";
-      if (sandbox.state === "unknown") return "dgc-pill dgc-idle";
+      if (!sandbox || (sandbox.currentMode === undefined && !sandbox.currentModeText)) return "dgc-pill dgc-idle";
       return "dgc-pill dgc-idle";
     }
     function activeGrants(view) {
@@ -526,19 +499,9 @@ export const CONSOLE_CLIENT_JS = String.raw`(function (root, factory) {
     }
     function consequenceText(view) {
       if (!view) return "";
-      var sandbox = view.sandbox;
-      if (sandbox && sandbox.state === "pending-restore") {
-        return "授权已经失效，但档位还停在 " + modeLabelOf(sandbox) + "；点「立即回滚档位」可以马上收回。";
-      }
       if (view.auth.state === "active" || view.auth.state === "expiring") {
-        if (sandbox && (sandbox.state === "raised" || sandbox.state === "unchanged")) {
-          var seconds = state.config && state.config.sweep && state.config.sweep.intervalMs > 0 ? Math.round(state.config.sweep.intervalMs / 1000) : 0;
-          var tail = seconds > 0 ? "（最多 " + seconds + " 秒内自动回滚）" : "（会在你下次调用工具时回滚）";
-          return "到期后：同类请求会重新询问；沙箱档位会回滚到 " + modeLabelOf(sandbox, "baseline") + tail + "。";
-        }
-        return "到期后：同类请求会重新询问。";
+        return "到期后：同类请求会重新询问；沙箱档位由你自己设定，Guard 不会改动。";
       }
-      if (sandbox && sandbox.state === "restored") return "授权已失效，档位已恢复到 " + modeLabelOf(sandbox) + "。";
       if (view.auth.state === "revoked") return "授权已被收回；同类请求会重新询问。";
       if (view.auth.state === "expired") return "授权已到期；同类请求会重新询问。";
       return "本会话当前没有任何临时授权。";
@@ -558,14 +521,12 @@ export const CONSOLE_CLIENT_JS = String.raw`(function (root, factory) {
         authRow.side.textContent = "";
         sandboxRow.pill.textContent = "-";
         sandboxRow.pill.className = "dgc-pill dgc-idle";
-        sandboxRow.main.textContent = "不涉及沙箱档位";
+        sandboxRow.main.textContent = "未知";
         sandboxRow.side.textContent = "";
         capabilityFact.value.textContent = "还没有任何临时授权。";
         reasonFact.value.textContent = "工具调用会照常询问你，你批准后才会出现在这里。";
         consequenceFact.value.textContent = "";
-        banner.hidden = true;
         revokeBtn.hidden = true;
-        restoreBtn.hidden = true;
         authBar.hidden = true;
         renderDetails();
         return;
@@ -581,7 +542,7 @@ export const CONSOLE_CLIENT_JS = String.raw`(function (root, factory) {
       var sandbox = view.sandbox || null;
       sandboxRow.pill.textContent = sandboxText(sandbox);
       sandboxRow.pill.className = sandboxPillClass(sandbox);
-      sandboxRow.main.textContent = sandbox && sandbox.baselineMode ? ("你的默认档位是 " + modeLabelOf(sandbox, "baseline")) : "";
+      sandboxRow.main.textContent = "由 DSH 设定，Guard 不会改动";
       sandboxRow.side.textContent = sandbox && sandbox.checkedAt ? "核对于 " + new Date(sandbox.checkedAt).toLocaleTimeString() : "";
       var grants = view.auth && view.auth.grants ? view.auth.grants : [];
       if (grants.length === 0) {
@@ -596,14 +557,8 @@ export const CONSOLE_CLIENT_JS = String.raw`(function (root, factory) {
         reasonFact.value.textContent = grants[0].reasonText + (grants.length > 1 ? "（共 " + grants.length + " 条授权）" : "");
       }
       consequenceFact.value.textContent = consequenceText(view);
-      var showBanner = sandbox && (sandbox.state === "pending-restore" || sandbox.state === "unknown" || sandbox.state === "user-override");
-      banner.hidden = !showBanner;
-      banner.className = "dgc-banner" + (sandbox && sandbox.state === "pending-restore" ? " dgc-warn" : "");
-      banner.textContent = showBanner && sandbox && sandbox.note ? sandbox.note : "";
       var canRevoke = !!(view.actions && view.actions.canRevoke) && actionsEnabled("revoke");
-      var canRestore = !!(view.actions && view.actions.canRestoreSandbox) && actionsEnabled("restoreSandbox");
       revokeBtn.hidden = !canRevoke;
-      restoreBtn.hidden = !canRestore;
       renderRemaining();
       renderDetails();
     }
@@ -771,7 +726,7 @@ export const CONSOLE_CLIENT_JS = String.raw`(function (root, factory) {
       metaLine("档位/TTL 可写", document_ && document_.writable ? document_.writable.join("、") : "-");
       metaLine("部署配置（只读）", document_ && document_.immutable ? document_.immutable.join("、") : "-");
       var sweep = document_ && document_.sweep ? document_.sweep : null;
-      metaLine("档位自动回滚", sweep && sweep.intervalMs > 0 ? ("每 " + Math.round(sweep.intervalMs / 1000) + " 秒检查一次") : "已关闭（只在下次工具调用或手动操作时回滚）");
+      metaLine("免打扰结算", sweep && sweep.intervalMs > 0 ? ("每 " + Math.round(sweep.intervalMs / 1000) + " 秒检查一次窗口状态") : "已关闭（窗口状态在每次读取时实时判定）");
       var routes = document_ && document_.routes ? document_.routes : null;
       if (routes) metaLine("同源路由", routes.registered ? "已就绪" : "未就绪（面板会回落到独立端口）");
     }

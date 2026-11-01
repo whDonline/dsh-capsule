@@ -138,8 +138,8 @@ describe("治理台共享 UI（真实治理接口 + 最小 DOM）", () => {
     const leases = new LeaseManager(new MemoryLeaseStore());
     const audit = new AuditService();
     const policy = new GovernancePolicy({ initial: { defaultScope: "exact-arguments", defaultTtlSeconds: 60, maxTtlSeconds: 1800 } });
-    await leases.issue({ sessionId: "session-ui", toolName: "pwsh", scope: { kind: "sandbox-escalation", key: "k1", display: "tool=pwsh 沙箱升级至 danger-full-access" }, ttlSeconds: 300, kind: "sandbox-mode" });
-    audit.record({ sessionId: "session-ui", callId: "call-1", rootCallId: "call-1", toolName: "pwsh", decision: "LEASE_ISSUED", leaseId: "lease-1", scopeDisplay: "tool=pwsh 沙箱升级至 danger-full-access" });
+    await leases.issue({ sessionId: "session-ui", toolName: "pwsh", scope: { kind: "exact-arguments", key: "k1", display: "pwsh: Get-Date → danger-full-access" }, ttlSeconds: 300 });
+    audit.record({ sessionId: "session-ui", callId: "call-1", rootCallId: "call-1", toolName: "pwsh", decision: "LEASE_ISSUED", leaseId: "lease-1", scopeDisplay: "pwsh: Get-Date → danger-full-access" });
     const handle: ConsoleHttpHandle = await startConsoleServer({ console: makeConsole(leases, audit), policy, port: 0 });
     try {
       const document_ = makeDocument();
@@ -153,7 +153,7 @@ describe("治理台共享 UI（真实治理接口 + 最小 DOM）", () => {
       await ui.refresh();
       await ui.loadAudit();
       const rendered = texts(container);
-      expect(rendered.join("|")).toContain("tool=pwsh 沙箱升级至 danger-full-access");
+      expect(rendered.join("|")).toContain("pwsh: Get-Date → danger-full-access");
       expect(rendered.join("|")).toContain("生效中");
       expect(rendered.some((text) => /^\d+m\d+s$|^\d+s$/.test(text))).toBe(true); // 剩余时间倒计时
       expect(rendered.join("|")).toContain("已签发临时授权");
@@ -164,19 +164,15 @@ describe("治理台共享 UI（真实治理接口 + 最小 DOM）", () => {
       await handle.close();
     }
   });
-  it("首屏：当前会话 + 两条独立状态，原始授权 ID 只出现在技术详情里", async () => {
-    // 场景：授权已到期，但沙箱档位还没回滚——这正是「倒计时归零 ≠ 恢复完成」要显示出来的状态
+  it("首屏：当前会话 + 授权状态 + 宿主档位读数，原始授权 ID 只出现在技术详情里", async () => {
+    // 场景：授权已到期；沙箱档位只是宿主读数（本插件从不改写它），页面不得出现「待回滚」
     let now = 1_000_000;
     const leases = new LeaseManager(new MemoryLeaseStore(() => now), () => now);
     const audit = new AuditService();
-    const lease = await leases.issue({ sessionId: "session-pending", toolName: "pwsh", scope: { kind: "sandbox-escalation", key: "abcdef123456", display: "tool=pwsh 沙箱升级至 danger-full-access" }, ttlSeconds: 300, kind: "sandbox-mode" });
+    const lease = await leases.issue({ sessionId: "session-pending", toolName: "pwsh", scope: { kind: "exact-arguments", key: "abcdef123456", display: "pwsh: Get-Date → danger-full-access" }, ttlSeconds: 300 });
     now += 301_000;
-    const sandbox = {
-      states: () => [{ sessionId: "session-pending", baseline: "workspace-write" as const, lastWritten: "danger-full-access" as const, currentMode: "danger-full-access" as const, status: "raised" as const, liveCount: 0, staleCount: 1, grants: [{ leaseId: lease.id, toolName: "pwsh", requestedMode: "danger-full-access" as const, writtenMode: "danger-full-access" as const, raised: true, live: false }] }],
-      lastOutcomeOf: () => undefined,
-    };
-    const gov = new GovernanceConsole({ audit, leases, now: () => now, sandbox, sessions: { describe: () => ({ label: "修复登录超时", source: "title" as const, cwd: "D:\\gitpro\\demo" }) } });
-    const actions = { revokeSession: async (sessionId: string) => ({ sessionId, revoked: 0, results: [] }), restoreSandbox: async (sessionId: string) => ({ sessionId, results: [] }) };
+    const gov = new GovernanceConsole({ audit, leases, now: () => now, currentMode: () => "read-only", sessions: { describe: () => ({ label: "修复登录超时", source: "title" as const, cwd: "D:\\gitpro\\demo" }) } });
+    const actions = { revokeSession: async (sessionId: string) => ({ sessionId, revoked: 0 }) };
     const handle: ConsoleHttpHandle = await startConsoleServer({ console: gov, actions, sweepIntervalMs: 30_000, port: 0 });
     try {
       const document_ = makeDocument();
@@ -190,13 +186,14 @@ describe("治理台共享 UI（真实治理接口 + 最小 DOM）", () => {
       const sessionPanel = findPanel(container, "session");
       const firstScreen = texts(sessionPanel).join("|");
       const withoutDetails = textsExcept(sessionPanel, "dgc-details-body").join("|");
-      // 会话名 + 两条独立状态 + 人话说明
+      // 会话名 + 授权状态 + 宿主档位读数
       expect(firstScreen).toContain("修复登录超时");
       expect(firstScreen).toContain("已到期");
-      expect(firstScreen).toContain("待回滚");
-      expect(firstScreen).toContain("完全访问");
-      expect(firstScreen).toContain("立即回滚档位");
-      expect(firstScreen).toContain("档位还停在");
+      expect(firstScreen).toContain("只读");
+      expect(firstScreen).toContain("Guard 不会改动");
+      // 档位状态机已移除：不得再出现「待回滚 / 立即回滚档位」
+      expect(firstScreen).not.toContain("待回滚");
+      expect(firstScreen).not.toContain("立即回滚档位");
       // 原始 ID / Scope 只进技术详情，首屏不出现
       expect(firstScreen).toContain(lease.id);
       expect(withoutDetails).not.toContain(lease.id);
@@ -319,21 +316,20 @@ describe("DSH 客户端半边（adapter/client.js）", () => {
       { ...base, leaseId: "old", grantedAt: now - 60 * day },
       { ...base, leaseId: "exact", grantedAt: now - 1 * day, uses: 2 },
       { ...base, leaseId: "family", grantedAt: now - 2 * day, uses: 3, familyLabel: "同前缀 tsc" },
-      { ...base, leaseId: "window", grantedAt: now - 3 * day, uses: 1, kind: "sandbox-mode" },
       { ...base, leaseId: "active", grantedAt: now - 1 * day, outcome: "active", windowMs: 90_000 },
     ];
     // 默认近 30 天：60 天前那条被过滤掉
     const model = view.buildModel(records, 30, now);
-    expect(model.rows).toHaveLength(4);
+    expect(model.rows).toHaveLength(3);
     const pick = (label: string) => model.metrics.find((m) => m.label === label)?.value;
-    expect(pick("人工批准")).toBe("4");
-    expect(pick("命中复用")).toBe("6");
-    expect(pick("复用率")).toBe("60");
+    expect(pick("人工批准")).toBe("3");
+    expect(pick("命中复用")).toBe("5");
+    expect(pick("复用率")).toBe("63");
     expect(pick("生效中")).toBe("1");
-    expect(pick("精确 / 族 / 沙箱")).toBe("2 / 3 / 1");
+    expect(pick("精确 / 族")).toBe("2 / 3");
     expect(model.topFamilies[0]).toEqual(["同前缀 tsc", 3]);
     // rangeDays=0 → 全部
-    expect(view.buildModel(records, 0, now).rows).toHaveLength(5);
+    expect(view.buildModel(records, 0, now).rows).toHaveLength(4);
   });
   /** 作用：把 React 元素树里的文本全取出来（替身 React 没有真实 DOM）。 */
   function elementTexts(node: unknown): string[] {
@@ -371,17 +367,17 @@ describe("DSH 客户端半边（adapter/client.js）", () => {
     };
     const now = Date.now();
     const snapshotBody = {
-      schemaVersion: 3,
+      schemaVersion: 4,
       sessions: [{
         sessionId: "session-test",
         auth: { state: "active", activeCount: 1, nextExpiresAt: now + 60_000, grants: [] },
-        sandbox: { state: "not-involved", checkedAt: now },
-        stats: { total: 1, active: 1, savedApprovals: 0, longestWindowMs: 0, raised: 0, pendingRestore: 0, reuseByKind: { exact: 0, family: 0, window: 0 }, topFamilies: [] },
-        actions: { canRevoke: true, canRestoreSandbox: false },
+        sandbox: { currentMode: "workspace-write", currentModeText: "工作区可写", checkedAt: now },
+        stats: { total: 1, active: 1, savedApprovals: 0, longestWindowMs: 0, reuseByKind: { exact: 0, family: 0 }, topFamilies: [] },
+        actions: { canRevoke: true },
       }],
     };
     const decisionsBody = {
-      summary: { total: 1, active: 1, savedApprovals: 0, longestWindowMs: 0, raised: 0, pendingRestore: 0, reuseByKind: { exact: 0, family: 0, window: 0 }, topFamilies: [] },
+      summary: { total: 1, active: 1, savedApprovals: 0, longestWindowMs: 0, reuseByKind: { exact: 0, family: 0 }, topFamilies: [] },
       records: [{
         leaseId: "lease-1", grantedAt: now - 1_000, expiresAt: now + 60_000, outcome: "active", kind: "universal",
         uses: 1, familyLabel: "前缀 pwsh", ttlSeconds: 60, capability: "pwsh 测试命令", reason: "pwsh 测试命令 --flag",
@@ -426,7 +422,7 @@ describe("DSH 客户端半边（adapter/client.js）", () => {
     expect(text).toContain("pwsh 测试命令 --flag");
     expect(text).not.toContain("治理接口暂时不可达");
   });
-  it("对话内提示条：四种状态的文案（没有授权时也必须显示一行，否则用户以为功能不存在）", () => {
+  it("对话内提示条：有可行动授权时才出现（没有授权时整条隐藏）", () => {
     const { registrations } = registerPlugin();
     const dock = registrations.find((item) => item.slot === "conversation.input.dock")?.component as unknown as {
       describe(view: unknown, now: number): { tone: string; title: string; sub?: string; action?: { mode: string } } | null;
@@ -434,28 +430,21 @@ describe("DSH 客户端半边（adapter/client.js）", () => {
     const describe = dock.describe;
     expect(typeof describe).toBe("function");
     // ① 没有任何授权：提示条整条隐藏（模式 chip 已常驻显示"功能存在且当前档位"，不再写占位行）
-    const idle = describe({ sessionId: "s", auth: { state: "none", activeCount: 0, grants: [] }, sandbox: { state: "not-involved" } }, 1_000);
+    const idle = describe({ sessionId: "s", auth: { state: "none", activeCount: 0, grants: [] }, sandbox: { currentMode: "read-only", currentModeText: "只读" } }, 1_000);
     expect(idle).toBeNull();
     // ② 生效中：说清「放开了什么 + 还剩多久 + 到期会怎样」
     const active = describe(
-      { sessionId: "s", auth: { state: "active", activeCount: 1, nextExpiresAt: 61_000, grants: [{ capabilityText: "pwsh 可以免审批升到「完全访问」" }] }, sandbox: { state: "raised", currentMode: "danger-full-access", currentModeText: "完全访问" } },
+      { sessionId: "s", auth: { state: "active", activeCount: 1, nextExpiresAt: 61_000, grants: [{ capabilityText: "pwsh 的这条操作在到期前不再询问" }] }, sandbox: { currentMode: "read-only", currentModeText: "只读" } },
       1_000,
     );
     expect(active?.tone).toBe("active");
-    expect(active?.title).toContain("pwsh 可以免审批升到「完全访问」");
+    expect(active?.title).toContain("pwsh 的这条操作在到期前不再询问");
     expect(active?.sub).toContain("还剩 1 分 00 秒");
     expect(active?.action?.mode).toBe("revoke");
-    // ③ 授权已到期但权限没收回：必须是醒目告警 + 独立按钮
-    const pending = describe({ sessionId: "s", auth: { state: "expired", activeCount: 0, grants: [] }, sandbox: { state: "pending-restore", currentMode: "danger-full-access", currentModeText: "完全访问" } }, 1_000);
-    expect(pending?.tone).toBe("warn");
-    expect(pending?.title).toContain("没有收回");
-    expect(pending?.title).toContain("完全访问");
-    expect(pending?.action?.mode).toBe("restore-sandbox");
-    // ④ 已收回：给一句确认，之后由调用方按时间自然隐藏
-    const restored = describe({ sessionId: "s", auth: { state: "expired", activeCount: 0, grants: [] }, sandbox: { state: "restored", currentMode: "workspace-write", currentModeText: "工作区可写", lastOutcomeAt: 99_500 } }, 100_000);
-    expect(restored?.tone).toBe("done");
-    expect(restored?.title).toContain("已收回");
-    // ⑤ 连会话数据都没有（接口不可达）：不占位
+    // ③ 授权刚结束：不再显示「已收回 / 待回滚」这类档位话术（本插件不改写档位），整条隐藏
+    const expired = describe({ sessionId: "s", auth: { state: "expired", activeCount: 0, grants: [] }, sandbox: { currentMode: "read-only", currentModeText: "只读" } }, 1_000);
+    expect(expired).toBeNull();
+    // ④ 连会话数据都没有（接口不可达）：不占位
     expect(describe(null, 1_000)).toBeNull();
   });
   it("会话视图组件在「没有快照」时渲染占位（不抛错、不留白屏）", () => {

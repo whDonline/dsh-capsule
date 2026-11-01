@@ -86,7 +86,7 @@ describe("GovernanceConsole 聚合（规格第 24 节 Phase 4）", () => {
   it("snapshot 只保留会话视图与计数摘要（原 plugins/tools/activity/leases 已移除）", async () => {
     const { gov } = await makeConsole();
     const snap = await gov.snapshot();
-    expect(snap.schemaVersion).toBe(3);
+    expect(snap.schemaVersion).toBe(4);
     expect(snap.guardName).toBe("dsh-capability-guard");
     expect(snap.summary).toMatchObject({ leasesTotal: 1, leasesActive: 1, leasesRevoked: 0, leasesExpired: 0, auditedEvents: 5 });
     expect(snap.sessions).toHaveLength(1);
@@ -244,15 +244,15 @@ describe("治理策略写接口（默认范围挡位与 TTL）", () => {
   it("GovernancePolicy：挡位/TTL 校验 Fail Closed，变更递增 revision 且不做部分应用", async () => {
     const policy = makePolicy();
     expect(policy.snapshot().revision).toBe(1);
-    const updated = await policy.update({ defaultScope: "sandbox-escalation", defaultTtlSeconds: 300 });
-    expect(updated.defaultScope).toBe("sandbox-escalation");
+    const updated = await policy.update({ defaultScope: "tool", defaultTtlSeconds: 300 });
+    expect(updated.defaultScope).toBe("tool");
     expect(updated.defaultTtlSeconds).toBe(300);
     expect(updated.revision).toBe(2);
     // 未知挡位 / 非法 TTL / default>max 一律拒绝，且状态保持不变（整体拒绝，不部分生效）
     await expect(policy.update({ defaultScope: "whatever" as never })).rejects.toThrow(/GUARD_CONSOLE_INVALID/);
     await expect(policy.update({ defaultTtlSeconds: 0 })).rejects.toThrow(/GUARD_CONSOLE_INVALID/);
     await expect(policy.update({ defaultTtlSeconds: 3600 })).rejects.toThrow(/GUARD_CONSOLE_INVALID/);
-    expect(policy.snapshot()).toMatchObject({ defaultScope: "sandbox-escalation", defaultTtlSeconds: 300, revision: 2 });
+    expect(policy.snapshot()).toMatchObject({ defaultScope: "tool", defaultTtlSeconds: 300, revision: 2 });
   });
   it("挡位切换即时影响 PolicyResolver 解析结果（无需重启，且不放大已签发授权）", () => {
     const policy = makePolicy();
@@ -265,10 +265,10 @@ describe("治理策略写接口（默认范围挡位与 TTL）", () => {
     const policy = makePolicy();
     const handle = await startConsoleServer({ console: await makeGov(), policy, port: 0 });
     try {
-      const ok = await patch(handle, { defaultScope: "sandbox-escalation" });
+      const ok = await patch(handle, { defaultScope: "exact-arguments" });
       expect(ok.status).toBe(200);
       const body = (await ok.json()) as { policy: { defaultScope: string }; modes: { id: string; defaultable: boolean }[] };
-      expect(body.policy.defaultScope).toBe("sandbox-escalation");
+      expect(body.policy.defaultScope).toBe("exact-arguments");
       expect(body.modes.find((mode) => mode.id === "tool")?.defaultable).toBe(false);
       // CSRF 防护：缺少自定义头 → 403
       const noHeader = await fetch(`${handle.url}api/config`, { method: "PATCH", headers: { "content-type": "application/json" }, body: "{}" });
@@ -287,7 +287,7 @@ describe("治理策略写接口（默认范围挡位与 TTL）", () => {
       // 非法值 → 409（策略层 Fail Closed）
       expect((await patch(handle, { defaultTtlSeconds: 99999 })).status).toBe(409);
       // 未做任何成功变更之外的状态改动
-      expect(policy.snapshot().defaultScope).toBe("sandbox-escalation");
+      expect(policy.snapshot().defaultScope).toBe("exact-arguments");
     } finally {
       await handle.close();
     }

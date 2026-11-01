@@ -7,11 +7,10 @@
 #
 # 默认行为（刻意保守但可用）：
 #   - 注册四个观察型 hook：tools/pre-execute、tools/execute、approval/request、tools/result；
-#     原始 allow / deny 一律透传，只有下游 ask 与沙箱升级才进入 Guard；
-#   - 默认范围挡位 exact-arguments（可在 Web GUI 的「能力授权」面板里切换）；
-#   - 只为 pwsh / bash 打开沙箱升级链路（sandbox-escalation）：批准一次后，本会话内该工具
-#     升级到同一档位不再重复询问，TTL 到期回滚到批准前的档位。
-#     未带 sandbox_permissions + justification 的调用完全不受影响。
+#     原始 allow / deny 一律透传，只有下游 ask / DSH 的沙箱升级审批才进入 Guard；
+#   - 默认范围挡位 exact-arguments：批准一次只覆盖「同一条操作」（工具 + 参数 + 目标档位）；
+#   - Guard **不改写会话沙箱档位**：每次升级审批仍由 DSH 自己决定，Guard 只负责
+#     「同一条操作在 TTL 内不再问你」与「免打扰窗口内自动放行」。
 #
 # 覆盖示例（加到 profile 的 cordis.patch.yml；patch 会替换整行 config，请重述要保留的字段）：
 #
@@ -21,10 +20,6 @@
 #       defaultTtlSeconds: 60
 #       maxTtlSeconds: 1800
 #       console: { enabled: true, host: 127.0.0.1, port: 8787 }
-#       rules:
-#         - match: pwsh
-#           ttlSeconds: 300
-#           scope: { mode: sandbox-escalation }
 
 - insert:
     - id: capability-guard
@@ -37,12 +32,3 @@
           enabled: true
           host: 127.0.0.1
           port: 8787
-        rules:
-          - match: pwsh
-            ttlSeconds: 300
-            scope:
-              mode: sandbox-escalation
-          - match: bash
-            ttlSeconds: 300
-            scope:
-              mode: sandbox-escalation

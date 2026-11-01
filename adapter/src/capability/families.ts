@@ -205,8 +205,14 @@ export function parseCommandPrefix(command: string): { program: string; sub: str
 /** 作用：命令展示前的脱敏——把可能夹带密钥的赋值替换掉。
  *  **默认不截断**（保留全文供审计展开查看）；界面层自行截断显示。 */
 export function redactCommand(command: string, limit = 4000): string {
+  // 作用：命令展示前的脱敏——覆盖三类最常见的凭据写法（审计里出现 Secret 就等于泄漏）：
+  //   ① `--token=xxx` / `password: xxx` 这类「敏感键 + 值」；
+  //   ② `--with-token xxx` 这类「旗标名字里带 token、值在下一个 token」；
+  //   ③ 常见 Token 形状（GitHub / OpenAI / AWS）与 `Bearer xxx`。
   let text = command.replace(/((?:password|passwd|token|secret|api[-_]?key|access[-_]?key)\s*[=:]\s*)(\S+)/gi, "$1***");
-  text = text.replace(/(--(?:password|token|secret|api-key)\s+)(\S+)/gi, "$1***");
+  text = text.replace(/(--[a-z0-9-]*(?:token|secret|password|key)[a-z0-9-]*\s+)(\S+)/gi, "$1***");
+  text = text.replace(/\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16})\b/g, "***");
+  text = text.replace(/\b(Bearer\s+)(\S+)/gi, "$1***");
   text = text.replace(/(Bearer\s+)[\w.\-]+/gi, "$1***");
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }

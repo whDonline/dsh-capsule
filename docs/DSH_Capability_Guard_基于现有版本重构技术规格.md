@@ -1,6 +1,8 @@
 # DSH Capsule → DSH Capability Guard 重构技术规格
 
-> **当前项目决策（2026-10-30，项目所有者明确要求）**：凭证代理相关代码已移除，包括 Broker / Provider、命令凭证绑定、Managed Capability Service、Managed Extension SDK 与 GitHub 示例。当前仅保留通用短期授权、沙箱提升与回滚、审计、治理台。下文旧定位中涉及 Managed/Broker 的实现、保留及测试要求已作废，禁止按历史条款恢复这些模块；凭证管理交由 DSH 原生或相关工具。通用授权的安全红线及测试要求继续有效。
+> **当前项目决策（2026-10-30 / 2026-11-01，项目所有者明确要求）**：凭证代理相关代码已移除，包括 Broker / Provider、命令凭证绑定、Managed Capability Service、Managed Extension SDK 与 GitHub 示例。
+> **2026-11-01 追加决策：移除「提升会话沙箱档位 + TTL 回滚」整条链路**——`SandboxGrantManager`、`/api/window`、`action=restore-sandbox`、`sandbox-mode` Lease、`sandbox-escalation` 范围挡位、`WINDOW_OPENED` / `SANDBOX_MODE_*` 审计决策与档位状态机全部删除；Guard **不再调用 `setSandboxMode`**。
+> 当前仅保留：通用短期授权（同一条操作复用）、免打扰窗口、审计、治理台。下文旧定位中涉及 Managed/Broker、档位提升与回滚的实现、保留及测试要求已作废，禁止按历史条款恢复这些模块；凭证管理交由 DSH 原生或相关工具。通用授权的安全红线及测试要求继续有效。
 
 ## 基于现有 `dsh-capsule-main` 的可执行实现文档
 
@@ -16,11 +18,10 @@
 > | 第 6.2 节 / 第 34 节 | 下游 DSH 原生策略会返回 `ask`，Gate 在 `tools/pre-execute` 接管 | `tools/pre-execute` **落底决策就是 `allow`**；标准 profile 下无任何随产品交付的 listener 返回 `ask` |
 > | 第 6.3 / 11 节 | approval 请求可用于推导参数 Scope | 沙箱升级的审批来自**工具体内部**，且 `approval/request` 载荷**不含 arguments** |
 > | 第 24 节 Phase 1 | Guard 挂**三个** hook | 实为**四个**：新增 `tools/execute`（唯一能同时拿到 callId 与 arguments 的时机） |
-> | 第 5.4 节 | Scope 只有 exact-arguments / fields / tool | 新增 **`sandbox-escalation`**（按 `(toolName, 目标模式)` 取键） |
-> | —— | Lease 签发即授权生效 | Lease 自身不影响 DSH 判定，必须配合 `setSandboxMode` 提升会话模式并在 TTL 到期时回滚 |
+> | 第 5.4 节 | Scope 只有 exact-arguments / fields / tool | ~~新增 `sandbox-escalation`~~（**2026-11-01 再次作废**：该挡位与档位提升链路一起删除，默认只剩 exact-arguments） |
+> | —— | Lease 签发即授权生效 | ~~必须配合 `setSandboxMode` 提升会话模式并在 TTL 到期时回滚~~（**2026-11-01 作废**：Guard 不写档位，批准一次只放行当次调用并在 TTL 内代答同一条操作） |
 >
-> **仍然有效、必须继续遵守的部分**：Fail-Closed 原则、错误码体系、Secret 处理规则、Phase 顺序与测试要求、
-> Managed Mode 的 Provider 双重校验与 per-operation Credential Resolution。
+> **仍然有效、必须继续遵守的部分**：Fail-Closed 原则、错误码体系、Secret 处理规则、Phase 顺序与测试要求。
 >
 > 正文保留原样，仅作为历史设计记录，**不作为实现依据**。
 

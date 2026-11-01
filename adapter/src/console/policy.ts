@@ -10,7 +10,7 @@
 import { DEFAULT_UNIVERSAL_POLICY, type UniversalPolicyConfig } from "../capability/policy.js";
 import { isScopeMode, type ScopeMode } from "../capability/scope-modes.js";
 export interface ConsoleRuntimePolicy {
-  /** 下发授权时使用的默认范围挡位（exact-arguments / fields / tool / sandbox-escalation） */
+  /** 下发授权时使用的默认范围挡位（exact-arguments / fields / tool） */
   defaultScope: ScopeMode;
   /** 默认 TTL（秒） */
   defaultTtlSeconds: number;

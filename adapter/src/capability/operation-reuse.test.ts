@@ -14,8 +14,8 @@ interface Stack {
   audit: AuditService;
   advance: (ms: number) => void;
 }
-function makeStack(options: { active?: boolean; applyGrant?: ReturnType<typeof vi.fn> } = {}): Stack {
-  // 作用：新版语义的最小 Gate——注入 settings 即启用「按操作复用」，且不注入沙箱升级链路
+function makeStack(options: { active?: boolean } = {}): Stack {
+  // 作用：新版语义的最小 Gate——注入 settings 即启用「按操作复用」；本插件没有沙箱档位链路
   let now = 1_000;
   const clock = () => now;
   const leases = new LeaseManager(new MemoryLeaseStore(clock), clock);
@@ -29,8 +29,6 @@ function makeStack(options: { active?: boolean; applyGrant?: ReturnType<typeof v
     pending: new PendingRegistry(),
     audit,
     settings,
-    // 沙箱升级管理器：新语义下【不允许】被用来提升档位（applyGrant 必须是 0 次调用）
-    sandboxGrants: options.applyGrant ? ({ applyGrant: options.applyGrant, grantStates: () => [], lastOutcomeOf: () => undefined, settle: async () => [], restoreSession: async () => [] } as never) : undefined,
     now: clock,
   });
   return { gate, leases, audit, advance: (ms: number) => { now += ms; } };
@@ -105,14 +103,13 @@ describe("① 同操作模式：批准一次，同一条操作不再询问", () 
     const nextTime = await callTool(stack, "c2", { command: "Get-Date" });
     expect(nextTime.human).toHaveBeenCalledTimes(1);
   });
-  it("【安全】新语义绝不提升会话档位（applyGrant 一次都不调用）", async () => {
-    const applyGrant = vi.fn(async () => ({ outcome: "RAISED" }));
-    const stack = makeStack({ applyGrant });
+  it("【安全】签发的是「操作授权」而不是权限提升：kind=universal，scope=exact-arguments", async () => {
+    const stack = makeStack();
     await callTool(stack, "c1", { command: "Get-Date", sandbox_permissions: "danger-full-access" });
     await callTool(stack, "c2", { command: "Get-Date", sandbox_permissions: "danger-full-access" });
-    expect(applyGrant).not.toHaveBeenCalled();
-    // 签发的授权是「操作授权」而不是「沙箱授权」
-    expect((await stack.leases.list())[0].kind).toBe("universal");
+    const [lease] = await stack.leases.list();
+    expect(lease?.kind).toBe("universal");
+    expect(lease?.scope.kind).toBe("exact-arguments");
   });
   it("用户关闭开关：不记录、不签发、审批照常交给人", async () => {
     const stack = makeStack({ active: false });

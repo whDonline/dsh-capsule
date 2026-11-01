@@ -1,23 +1,24 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Context } from "@deepseek-ai/cordis";
 import { AuditService } from "../audit/audit-service.js";
 import { LeaseManager } from "../capability/lease-manager.js";
 import { MemoryLeaseStore } from "../capability/lease-store.js";
 import { PendingRegistry } from "../capability/pending.js";
 import { DEFAULT_UNIVERSAL_POLICY, PolicyResolver, type UniversalPolicyConfig } from "../capability/policy.js";
-import { SandboxGrantManager, type SandboxContext } from "../capability/sandbox-grant.js";
+import { GuardSettings } from "../capability/settings.js";
 import { ScopeResolver } from "../capability/scope-resolver.js";
 import { UniversalGate } from "../capability/universal-gate.js";
-import type { SandboxMode } from "../capability/escalation.js";
 import type { ApprovalOutcome, PreToolDecision } from "../capability/types.js";
 import { GovernanceConsole } from "../console/console-service.js";
 import { startConsoleServer } from "../console/http-server.js";
 import { GovernancePolicy } from "../console/policy.js";
 // 作用：Phase 1/4 端到端集成测试——在【真 cordis 总线】上把「通用场景的权限生命周期」整条跑通：
 //   ask → allowed-once → 签发 Lease → 复用（不再询问）→ TTL 到期 / 主动撤销 → 重新询问，
-// 外加沙箱升级链路的 ask → 提升 → 复用 → 到期回滚，以及治理接口在真实状态上的投影。
+// 外加治理接口在真实状态上的投影。
 // 为什么必须是真 cordis：hook 时序、prepend 遮蔽、服务解析三处历史缺陷只有这一层能发现
 // （单元测试的假 bus 会掩盖它们）；因此本文件的断言全部打在真实 Context 的 waterfall/emit 上。
+// 2026-11-01：沙箱档位提升/回滚链路已删除，这里不再有任何 setSandboxMode 替身；「宿主档位」只作为
+// 治理台的只读读数出现（currentMode），与授权状态互不覆盖。
 let now = 1_000_000;
 const clock = () => now;
 const SESSION = { id: "session-lifecycle" };
@@ -26,54 +27,42 @@ interface Host {
   leases: LeaseManager;
   audit: AuditService;
   policy: GovernancePolicy;
-  /** 低频 sweeper 用的公开结算入口（与 index.ts 的 30s 定时器同一方法） */
+  settings: GuardSettings;
   gate: UniversalGate;
-  /** 沙箱授权状态源——治理台的「档位是否已恢复」唯一数据来源 */
-  grants: SandboxGrantManager;
-  writes: SandboxMode[];
-  modeOf(session: unknown): SandboxMode | undefined;
-  /** 模拟用户在 GUI 里手动切换沙箱档位（Guard 之外的写入） */
-  setMode(session: unknown, mode: SandboxMode): void;
+  /** 真实的人类/机器答话器（被 Guard 观察到的那一个）——用于断言「有没有惊动人类」 */
+  human: ReturnType<typeof vi.fn>;
 }
 /** 组装真实 cordis 总线 + 忠实模拟 DSH 工具管线的宿主。
  * answerer 代表 DSH 自带的人类/机器答话器：它必须以「非 prepend」注册，才能排在 Guard 的 prepend
  * 之后被 Guard 观察到（真实验证见 cordis-pipeline.test.ts 的 prepend 遮蔽用例）。 */
 function makeHost(config: UniversalPolicyConfig, answerer?: () => Promise<ApprovalOutcome>): Host {
   const root = new Context();
-  if (answerer) root.on("approval/request", () => answerer());
+  const human = vi.fn(answerer ?? (() => Promise.resolve("unavailable" as ApprovalOutcome)));
+  root.on("approval/request", () => human());
   const leases = new LeaseManager(new MemoryLeaseStore(clock), clock);
-  const modes = new Map<unknown, SandboxMode>();
-  const writes: SandboxMode[] = [];
-  const sandboxHost: SandboxContext = {
-    sessionSandboxMode: (session) => modes.get(session) ?? "workspace-write",
-    setSessionSandboxMode: (session, mode) => {
-      modes.set(session, mode);
-      writes.push(mode);
-    },
-  };
   const audit = new AuditService();
   const policy = new GovernancePolicy({ initial: { defaultScope: config.defaultScope, defaultTtlSeconds: config.defaultTtlSeconds, maxTtlSeconds: config.maxTtlSeconds }, deployment: { enabled: config.enabled, rules: config.rules } });
-  const grants = new SandboxGrantManager(sandboxHost, leases);
+  const settings = new GuardSettings({ maxTtlSeconds: config.maxTtlSeconds, initial: { reuseTtlSeconds: Math.min(60, config.maxTtlSeconds) } });
   const gate = new UniversalGate({
     policy: new PolicyResolver(() => policy.config),
     scopes: new ScopeResolver(),
     leases,
     pending: new PendingRegistry(),
     audit,
-    sandboxGrants: grants,
+    settings,
     now: clock,
   });
   gate.install(root as never);
   // 模拟 DSH 注册的单调守卫（位于 Guard 之后，只透传）
   root.on("tools/pre-execute", (_exec: unknown, next: () => Promise<PreToolDecision>) => next());
-  return { root, leases, audit, policy, gate, grants, writes, modeOf: (session) => modes.get(session), setMode: (session, mode) => { modes.set(session, mode); writes.push(mode); } };
+  return { root, leases, audit, policy, settings, gate, human };
 }
 interface ExecLike {
   callId: string;
   rootCallId: string;
   name: string;
   arguments: unknown;
-  agent: { id: string; session: unknown };
+  agent: { id: string };
 }
 /** 按 DSH 真实顺序驱动一次工具调用；pre 决策非 allow 时不产生 tools/result（与 DSH 行为一致）。 */
 async function runTool(host: Host, exec: ExecLike, options: { pre?: () => Promise<PreToolDecision>; body?: () => Promise<unknown> } = {}) {
@@ -84,14 +73,13 @@ async function runTool(host: Host, exec: ExecLike, options: { pre?: () => Promis
   return { pre, result };
 }
 /** 发起一次审批（落底 unavailable；answerer 已在 makeHost 注册）。 */
-async function askApproval(host: Host, callId: string, toolName = "deploy.preview") {
+async function askApproval(host: Host, callId: string, toolName = "pwsh") {
   return await host.root.waterfall(host.root, "approval/request", { callId, toolName, agent: { id: SESSION.id }, reason: "需要人工确认" }, () => Promise.resolve("unavailable" as const));
 }
-const plainExec = (callId: string, command = "Get-Date"): ExecLike => ({ callId, rootCallId: callId, name: "pwsh", arguments: { command }, agent: { id: SESSION.id, session: SESSION } });
-const escalateExec = (callId: string, justification = "需要写入工作区外"): ExecLike => ({ callId, rootCallId: callId, name: "pwsh", arguments: { command: "Set-Content C:\\x", sandbox_permissions: "danger-full-access", justification }, agent: { id: SESSION.id, session: SESSION } });
+const plainExec = (callId: string, command = "Get-Date"): ExecLike => ({ callId, rootCallId: callId, name: "pwsh", arguments: { command }, agent: { id: SESSION.id } });
+const escalateExec = (callId: string, justification = "需要写入工作区外"): ExecLike => ({ callId, rootCallId: callId, name: "pwsh", arguments: { command: "Set-Content C:\\x", sandbox_permissions: "danger-full-access", justification }, agent: { id: SESSION.id } });
 const askDownstream = () => Promise.resolve({ kind: "ask" as const, reason: "原生策略要求确认" });
 const ALWAYS_ASK: UniversalPolicyConfig = { ...DEFAULT_UNIVERSAL_POLICY, rules: [], defaultTtlSeconds: 60, maxTtlSeconds: 1800 };
-const ESCALATION: UniversalPolicyConfig = { ...DEFAULT_UNIVERSAL_POLICY, rules: [{ match: "pwsh", scope: { mode: "sandbox-escalation" }, ttlSeconds: 300 }] };
 beforeEach(() => {
   now = 1_000_000;
 });
@@ -104,11 +92,12 @@ describe("通用场景权限生命周期（真 cordis 端到端）", () => {
     expect(first.pre.reason).toContain("TTL=60s");
     expect(first.pre.reason).toContain("Scope");
     expect(await host.leases.list()).toHaveLength(0);
-    // ② 批准一次 → 签发 Lease（此前 tools/result 已清理 pending，审批仍必须能找到上下文）
+    // ② 批准一次 → 签发 Lease
     expect(await askApproval(host, "c1")).toBe("allowed-once");
     const leases = await host.leases.list();
     expect(leases).toHaveLength(1);
     expect(leases[0]).toMatchObject({ sessionId: SESSION.id, toolName: "pwsh", status: "ACTIVE", kind: "universal" });
+    expect(leases[0].scope.kind).toBe("exact-arguments");
     // ③ 同参数第二次：下游仍然 ask，但 Guard 命中 Lease → allow（复用，不再打扰用户）
     const second = await runTool(host, plainExec("c2"), { pre: askDownstream });
     expect(second.pre.kind).toBe("allow");
@@ -153,7 +142,7 @@ describe("通用场景权限生命周期（真 cordis 端到端）", () => {
     await askApproval(host, "c1");
     // 旧授权是 exact-arguments：换了参数的调用仍然要问
     expect((await runTool(host, plainExec("c2", "Get-Process"), { pre: askDownstream })).pre.kind).toBe("ask");
-    // 让旧授权自然过期（避免它的 pending 上下文影响下一次审批），再切到 tool 挡位
+    // 让旧授权自然过期，再切到 tool 挡位
     now += 61_000;
     await host.policy.update({ defaultScope: "tool" });
     expect((await runTool(host, plainExec("c3", "Get-Process"), { pre: askDownstream })).pre.kind).toBe("ask");
@@ -179,86 +168,59 @@ describe("通用场景权限生命周期（真 cordis 端到端）", () => {
     expect(leases[0].sourceCallId).toBe("call-a");
   });
 });
-describe("沙箱升级授权生命周期（真 cordis 端到端）", () => {
-  it("升级 ask → 提升档位 → 第二次同类升级免于审批 → 到期回滚到批准前档位", async () => {
-    const host = makeHost(ESCALATION, () => Promise.resolve("allowed-once"));
+describe("审批放行生命周期（真 cordis 端到端）", () => {
+  it("批准一次 → 同一条操作（不同 justification）第二次完全不惊动人类答话器；到期后恢复询问", async () => {
+    const host = makeHost(ALWAYS_ASK, () => Promise.resolve("allowed-once"));
     await runTool(host, escalateExec("c1", "第一次"));
     expect(await host.leases.list()).toHaveLength(0);
-    expect(host.modeOf(SESSION)).toBeUndefined();
     expect(await askApproval(host, "c1", "pwsh")).toBe("allowed-once");
+    expect(host.human).toHaveBeenCalledTimes(1);
     const leases = await host.leases.list();
     expect(leases).toHaveLength(1);
-    expect(leases[0].kind).toBe("sandbox-mode");
-    expect(host.modeOf(SESSION)).toBe("danger-full-access");
-    // 第二次同类升级（不同参数与理由）：tools/execute 主动提升，工具体根本不会触发审批
+    expect(leases[0].kind).toBe("universal");
+    // 第二次：不同 callId、不同理由 → 同一操作指纹 → Guard 代答，不调用人类
     await runTool(host, escalateExec("c2", "完全不同的理由"));
-    expect(host.writes).toEqual(["danger-full-access"]);
+    expect(await askApproval(host, "c2", "pwsh")).toBe("allowed-once");
+    expect(host.human).toHaveBeenCalledTimes(1);
     expect(await host.leases.list()).toHaveLength(1);
-    // 到期后下一次调用触发结算 → 回滚到批准前的 workspace-write
-    now += 301_000;
-    await runTool(host, plainExec("c3"));
-    expect(host.modeOf(SESSION)).toBe("workspace-write");
-    const decisions = host.audit.list().map((event) => event.decision);
-    expect(decisions).toContain("SANDBOX_MODE_RAISED");
-    expect(decisions).toContain("SANDBOX_MODE_RESTORED");
+    // 到期后同一个调用重新交还人类
+    now += 61_000;
+    await runTool(host, escalateExec("c3"));
+    expect(await askApproval(host, "c3", "pwsh")).toBe("allowed-once");
+    expect(host.human).toHaveBeenCalledTimes(2);
   });
-  it("用户手动改过档位时跳过回滚（绝不覆盖用户选择），并留下审计", async () => {
-    const host = makeHost(ESCALATION, () => Promise.resolve("allowed-once"));
-    await runTool(host, escalateExec("c1"));
-    await askApproval(host, "c1", "pwsh");
-    expect(host.modeOf(SESSION)).toBe("danger-full-access");
-    expect(host.writes).toEqual(["danger-full-access"]);
-    // 模拟用户随后在 GUI 里把档位手动改成 read-only（不是 Guard 写入的值）
-    host.setMode(SESSION, "read-only");
-    now += 301_000;
-    await runTool(host, plainExec("c2"));
-    // Guard 回滚前做冲突检测：当前档位已非 Guard 写入值 → 跳过回滚，绝不冲掉用户选择
-    expect(host.writes).toEqual(["danger-full-access", "read-only"]);
-    expect(host.audit.list().some((event) => event.decision === "SANDBOX_MODE_SKIPPED_USER_OVERRIDE")).toBe(true);
-  });
-  it("未配置 sandbox-escalation 规则时，升级调用完全不进入 Guard（零行为改变）", async () => {
-    const host = makeHost({ ...DEFAULT_UNIVERSAL_POLICY, rules: [] }, () => Promise.resolve("allowed-once"));
-    await runTool(host, escalateExec("c1"));
+  it("规则 disabled 的工具：完全不进入 Guard（不签发、不代答）", async () => {
+    const host = makeHost({ ...DEFAULT_UNIVERSAL_POLICY, rules: [{ match: "pwsh", enabled: false }] }, () => Promise.resolve("allowed-once"));
+    await runTool(host, escalateExec("c1", "第一次"));
     expect(await askApproval(host, "c1", "pwsh")).toBe("allowed-once");
+    expect(host.human).toHaveBeenCalledTimes(1);
     expect(await host.leases.list()).toHaveLength(0);
-    expect(host.writes).toHaveLength(0);
+    // 第二次仍然要问人（没有任何授权）
+    await runTool(host, escalateExec("c2"));
+    expect(await askApproval(host, "c2", "pwsh")).toBe("allowed-once");
+    expect(host.human).toHaveBeenCalledTimes(2);
   });
-  it("【低频 sweeper】没有新的工具调用也能把到期档位收回，且审计与治理视图都能归属会话", async () => {
-    // 场景：用户批准后停手不再调用任何工具。若只靠 tools/execute 的惰性结算，档位会一直宽着；
-    // 30s sweeper 调用的就是这个 settleNow()，而治理台必须能同时看到「授权已失效」与「档位已恢复」。
-    const host = makeHost(ESCALATION, () => Promise.resolve("allowed-once"));
+  it("【治理视图】授权到期后 auth=expired、宿主档位读数不变，且没有「待回滚」动作", async () => {
+    const host = makeHost(ALWAYS_ASK, () => Promise.resolve("allowed-once"));
     await runTool(host, escalateExec("c1"));
     await askApproval(host, "c1", "pwsh");
-    expect(host.modeOf(SESSION)).toBe("danger-full-access");
-    const govConsole = new GovernanceConsole({
-      audit: host.audit,
-      leases: host.leases,
-      now: clock,
-      sandbox: { states: () => host.grants.grantStates(), lastOutcomeOf: (sessionId: string) => host.grants.lastOutcomeOf(sessionId) },
-    });
-    now += 301_000;
-    const pending = await govConsole.snapshot();
-    expect(pending.sessions[0]?.auth.state).toBe("expired");
-    expect(pending.sessions[0]?.sandbox.state).toBe("pending-restore");
-    expect(pending.sessions[0]?.actions.canRestoreSandbox).toBe(true);
-    // 关键：此处不运行任何工具，只调用 sweeper 的结算入口
-    const settled = await host.gate.settleNow();
-    expect(settled.map((result) => result.outcome)).toEqual(["RESTORED"]);
-    expect(host.modeOf(SESSION)).toBe("workspace-write");
-    const restoredEvent = host.audit.list().find((event) => event.decision === "SANDBOX_MODE_RESTORED");
-    expect(restoredEvent?.sessionId).toBe(SESSION.id);
+    const govConsole = new GovernanceConsole({ audit: host.audit, leases: host.leases, now: clock, currentMode: () => "read-only" });
+    expect((await govConsole.snapshot()).sessions[0]?.sandbox.currentMode).toBe("read-only");
+    now += 61_000;
     const after = await govConsole.snapshot();
-    expect(after.sessions[0]?.sandbox.state).toBe("restored");
-    expect(after.sessions[0]?.actions.canRestoreSandbox).toBe(false);
+    expect(after.sessions[0]?.auth.state).toBe("expired");
+    expect(after.sessions[0]?.actions).toEqual({ canRevoke: false });
+    // 宿主档位是用户自己的设置：无论授权是否失效，Guard 都只读不写
+    expect(after.sessions[0]?.sandbox.currentMode).toBe("read-only");
   });
 });
 describe("治理接口在真实生命周期状态上的投影", () => {
-  it("快照实时反映授权剩余时间；挡位写接口改变后续授权行为", async () => {
+  it("快照实时反映授权剩余时间；PATCH settings 改变后续签发的 TTL", async () => {
     const host = makeHost(ALWAYS_ASK, () => Promise.resolve("allowed-once"));
     await runTool(host, plainExec("c1"), { pre: askDownstream });
     await askApproval(host, "c1");
     const govConsole = new GovernanceConsole({ audit: host.audit, leases: host.leases, guardName: "dsh-capability-guard", now: clock });
-    const handle = await startConsoleServer({ console: govConsole, policy: host.policy, port: 0 });
+    const handle = await startConsoleServer({ console: govConsole, policy: host.policy, settings: host.settings, port: 0 });
     try {
       const snapshot = (await (await fetch(`${handle.url}api/snapshot`)).json()) as { summary: { leasesActive: number }; sessions: { auth: { remainingMs?: number; state: string; grants: { toolName: string }[] } }[] };
       expect(snapshot.summary.leasesActive).toBe(1);
@@ -269,13 +231,17 @@ describe("治理接口在真实生命周期状态上的投影", () => {
       now += 20_000;
       const later = (await (await fetch(`${handle.url}api/snapshot`)).json()) as { sessions: { auth: { remainingMs?: number } }[] };
       expect(later.sessions[0]?.auth.remainingMs).toBe(40_000);
-      // 挡位写接口 → 后续新授权使用新挡位
-      const patched = await fetch(`${handle.url}api/config`, { method: "PATCH", headers: { "content-type": "application/json", "x-dsh-guard": "1" }, body: JSON.stringify({ defaultScope: "sandbox-escalation" }) });
+      // 运行期设置写接口 → 后续新授权使用新的复用时长（写入的是产品设置，不是沙箱档位）
+      const patched = await fetch(`${handle.url}api/config`, { method: "PATCH", headers: { "content-type": "application/json", "x-dsh-guard": "1" }, body: JSON.stringify({ settings: { reuseTtlSeconds: 120 } }) });
       expect(patched.status).toBe(200);
-      expect(host.policy.snapshot().defaultScope).toBe("sandbox-escalation");
+      expect(host.settings.reuseTtlSeconds).toBe(120);
+      await runTool(host, plainExec("c2", "Get-Process"));
+      await askApproval(host, "c2");
+      const newest = (await host.leases.list()).find((lease) => lease.issuedAt === now);
+      expect(newest?.expiresAt).toBe(now + 120_000);
       // 审计接口按决策过滤
       const audit = (await (await fetch(`${handle.url}api/audit?decision=LEASE_ISSUED`)).json()) as unknown[];
-      expect(audit).toHaveLength(1);
+      expect(audit).toHaveLength(2);
     } finally {
       await handle.close();
     }

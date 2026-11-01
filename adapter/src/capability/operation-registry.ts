@@ -3,14 +3,14 @@
 // callId 反查。记录有界、按时间回收：它只是短命上下文，不是持久状态。
 import type { SandboxMode } from "./escalation.js";
 import type { FamilyRef } from "./families.js";
+import type { CapabilityScope } from "./types.js";
 export interface RecordedOperation {
   callId: string;
   sessionId: string;
   toolName: string;
-  /** 操作指纹（与 Lease.scope.key 同一算法） */
-  key: string;
-  /** 可安全展示的描述（只有参数键名） */
-  display: string;
+  /** 本次调用按策略解析出的 Scope——审批通过后签发的 Lease 直接复用它（不在审批阶段重算：
+   * approval/request 载荷不含 arguments，重算只能靠猜）。 */
+  scope: CapabilityScope;
   mode?: SandboxMode;
   /** 这次调用所属的操作族（② 同族模式用；可能为空） */
   families?: readonly FamilyRef[];

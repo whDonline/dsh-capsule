@@ -35,7 +35,7 @@
 > **项目定位已经变化。** 当前仓库是纯 TypeScript 的 Capability Guard，不再包含旧版 Python / Docker / Unix Domain Socket 隔离 Runtime。本文只描述当前代码真实存在的能力。2026-10-30 按项目决策移除凭证代理、命令凭证绑定及 Managed SDK/示例，当前聚焦通用短期授权。
 
 > [!WARNING]
-> **Developer Preview。** 核心链路（Lease、沙箱升级有界授权、Audit、Console）已在仓库实现，有**真 cordis 集成测试**守护 hook 接线与完整权限生命周期，并已在本机 desktop profile 中实跑。
+> **Developer Preview。** 核心链路（Lease、免打扰窗口、Audit、Console）已在仓库实现，有**真 cordis 集成测试**守护 hook 接线与完整权限生命周期，并已在本机 desktop profile 中实跑。
 >
 > DSH 本身仍在快速迭代：本仓库与本机安装版源码的核对结论记录在 `docs/集成基线-真实DSH行为.md`，**升级 DSH 后请重跑该文档第 10 节的检查清单**。
 
@@ -70,7 +70,7 @@ DSH Capsule 补的就是中间那一层：
 |---|---|
 | 同一个安全操作反复弹审批 | `allowed-once` 后签发短期 Lease，在相同 Scope + Session 内复用 |
 | 授权范围太宽 | Lease 绑定 `Session × Tool × Scope × TTL` |
-| 授权无法自动收回 | TTL 到期回收；沙箱模式提升还会**回滚到批准前的档位** |
+| 授权无法自动收回 | TTL 到期后恢复询问；Guard **从不改写**会话沙箱档位 |
 | 发生了什么难以追踪 | 授权决策记录（谁批的 / 复用几次 / 怎么结束）+ 只读治理台 |
 | 安全失败被静默放行 | 关键路径统一 **Fail Closed** |
 
@@ -92,13 +92,13 @@ Guard 工作在 DSH 原生工具管线的**四个** hook 上（`tools/pre-execut
 - 用户返回 `allowed-once` 后，Guard 才签发带 Scope 与 TTL 的 Lease；
 - `rejected` / `cancelled` / `unavailable` 均不签发。
 
-> **沙箱升级（sandbox escalation）是当前最有价值的一条链路。** 它经过了与本机安装版 DSH 源码的逐行核对（结论见 `docs/集成基线-真实DSH行为.md`）：
+> **沙箱升级是真实审批的入口，但 Guard 只做「这一次要不要问你」。** 它经过了与本机安装版 DSH 源码的逐行核对（结论见 `docs/集成基线-真实DSH行为.md`）：
 >
 > DSH 的 `tools/pre-execute` **落底决策就是 `allow`**，标准 profile 下没有任何随产品交付的监听器会返回 `ask`。真实审批来自 pwsh/bash/fs **工具体内部**的 `approveEscalation → ctx.approval.request(...)`（例如文件写入越出工作区时，模型带 `sandbox_permissions` + `justification` 重试）。
 >
-> 因此 Guard 的接入点是：在 `tools/execute`（工具体之前、参数仍可用）识别这次升级并按 **`(toolName, 目标模式)`** 生成语义 Scope；用户批准一次后签发 `sandbox-mode` Lease，并**提升该会话的沙箱模式**——后续同类升级不会被沙箱拒绝，也就**不再需要审批**。
+> 因此 Guard 的接入点是：在 `tools/execute`（工具体之前、参数仍可用）记录**这一次是什么操作**——工具名 + 参数（去掉模型自由文本）+ 目标档位；用户批准一次后签发一条 `universal` 操作授权。之后同一条操作再出现时，Guard 在 `approval/request` 上代答 `allowed-once`，DSH 仍按**单次升级**执行这次调用，**会话档位保持你设定的值**。
 >
-> 到期或撤销时，模式会**回滚到批准前的档位**；若用户在此期间手动改过模式，Guard 跳过回滚并记录审计，**绝不覆盖用户的选择**。
+> 到期或撤销后，下一次同类操作重新问你。2026-11-01 起移除了旧的「提升会话档位 + TTL 回滚」链路：Guard 不再调用 `setSandboxMode`，也就不存在覆盖用户档位的问题。
 
 这意味着 Universal Mode 的价值是**减少重复审批，同时保持 DSH 原有权限语义不变**。
 
@@ -113,7 +113,7 @@ Guard 接在 DSH 原生工具与审批管线上，保持原有审批与沙箱职
 - UniversalGate：四个 hook，关联 callId、观察审批、签发与复用 Lease。
 - ScopeResolver / PolicyResolver：确定性范围解析与 TTL 配置。
 - LeaseManager / MemoryLeaseStore：Session 绑定、有效期与撤销。
-- SandboxGrantManager：会话沙箱模式提升、失效回滚与用户改动冲突检测。
+- DndManager：免打扰窗口（限时完全访问的审批放行层）——独立的窗口状态，不写档位、不签 Lease。
 - AuditService / GovernanceConsole：脱敏审计、授权剩余时间与运行期策略。
 
 ### 与 DSH 原生机制的边界
@@ -124,7 +124,7 @@ DSH Capsule **不是第二套 Harness**。它有意复用 DSH 已有机制：
 - Tool 最终是否允许执行仍受 DSH 其他 Gate / Guard 约束；
 - 凭证管理仍由 DSH 原生服务或相关工具负责，Guard 不解析或注入凭证；
 - 进程 / 文件 / 网络隔离仍由 DSH Sandbox 或外部安全机制负责；
-- 沙箱档位本身仍由 DSH 的会话状态承载，Guard 只是**给它的变更加上时间边界与回滚**。
+- 沙箱档位仍完全由 DSH 的会话状态承载，Guard **只读不改写**（没有 `setSandboxMode` 调用）。
 
 Guard 只新增一件事：**把一次明确的授权变成受 Scope、Session 与 TTL 约束的短期 Capability。**
 
@@ -138,7 +138,7 @@ Guard 只新增一件事：**把一次明确的授权变成受 Scope、Session �
 Session × Tool × Scope × TTL
 ```
 
-默认 Scope 按工具名与 canonical JSON 参数生成 SHA-256；沙箱升级按工具名与目标模式生成 Scope。
+默认 Scope 按工具名与 canonical JSON 参数（去掉 `justification`）+ 目标沙箱档位生成 SHA-256：同一条命令「升到工作区可写」与「升到完全访问」是两条不同的操作。
 
 ### Lease 生命周期
 
@@ -168,40 +168,23 @@ ASK
 默认 Scope：
 
 ```text
-SHA-256(toolName + canonical JSON(arguments))
+SHA-256(toolName + canonical JSON(arguments 去掉 justification) + 目标沙箱档位)
 ```
 
-只有 Tool 与参数完全一致时才能复用，是 Universal Mode 最保守的零配置策略。
+只有「同一条操作」才复用：参数逐字节一致、且目标档位相同。它是 Universal Mode 最保守的零配置策略。
+
+> 目标档位进入指纹：批准「升到工作区可写」不会让「升到完全访问」免问。
+> `justification` 是模型每次现写的理由，**刻意不参与哈希**（否则措辞一变授权立即失效，
+> 等于把安全边界建立在模型输出上）；它只用于给人看的展示。
 
 ### `fields` — 显式放宽
 
 只把指定字段纳入 Scope。例如只按 `repo` 与 `branch` 授权，其他参数变化不会重新 Ask。
+它必须按工具显式配置 `paths`，不能作为默认值。
 
 ### `tool` — 最宽
 
 同一 Session 内只按 Tool Name 复用。它必须显式配置，不能成为默认行为。
-
-### `sandbox-escalation` — 沙箱升级语义 Scope
-
-只对带 `sandbox_permissions` + `justification` 的调用生效，Scope Key 为：
-
-```text
-SHA-256(toolName + 目标沙箱模式)
-```
-
-**刻意不把 `justification` 或参数原文纳入 Scope**：前者是模型每次现写的自由文本，纳入就等于把安全边界建立在模型输出上，且措辞一变授权立即失效；后者在升级场景里复用率几乎为零。按 `(工具, 目标模式)` 取键，语义恰好是「本会话内该工具可以升到这一档」。
-
-启用方式（默认**不启用**，不配置就完全不改变 DSH 行为）：
-
-```jsonc
-{
-  "rules": [
-    { "match": "pwsh", "scope": { "mode": "sandbox-escalation" }, "ttlSeconds": 300 }
-  ]
-}
-```
-
-授权真正生效依赖宿主服务（`ctx.sessionProjections` + `session.append("sandbox/mode", …)`）；服务缺失时该链路自动降级为"不提升"，即回到 DSH 原生逐次审批，**不会越权**。
 
 ## 界面：一眼、详情、配置
 
@@ -246,34 +229,27 @@ SHA-256(toolName + 目标沙箱模式)
 独立页面（与上面的会话内 tab 共用同一份数据源）的视图：
 
 ```text
-当前会话       会话名 · 授权状态与剩余时间 · 沙箱档位是否已恢复 · 到期后会怎样 · 立即收回 / 立即回滚档位
+当前会话       会话名 · 授权状态与剩余时间 · 当前沙箱档位（宿主读数） · 到期后会怎样 · 立即收回
 全部会话       本进程内出现过的授权会话，点会话名可切换聚焦
-审计           按 sessionId / toolName / decision 过滤的治理事件流（含档位提升、回滚与收回）
+审计           按 sessionId / toolName / decision 过滤的治理事件流
 设置           默认范围挡位、TTL 上下限、只读部署规则、运行信息
 ```
 
-**授权状态与沙箱档位是两个独立状态**，页面分行显示，绝不合并成一个倒计时：
+「授权是否仍有效」与「当前沙箱档位」是页面上的两行**独立读数**：
 
 | 授权状态 | 含义 |
 |---|---|
 | 生效中 / 即将到期 | 还有可复用的短期授权（≤30s 标为即将到期） |
 | 已到期 / 已撤销 | 授权已失效，接下来的同类调用会重新询问 |
 
-| 沙箱档位状态 | 含义 |
-|---|---|
-| 已提升：完全访问 | Guard 提升过档位，且授权仍有效 |
-| 未改动（本来就够宽） | 授权有效，但档位本来就够宽，Guard 没动过 |
-| 由你设定 | 档位是你自己改的，Guard 不会覆盖你的选择 |
-| **待回滚** | **授权已失效，但档位还没收回**——倒计时归零并不等于恢复完成，页面会明确显示并提供「立即回滚档位」 |
-| 已恢复 | 授权已失效，档位已回滚 |
-| 无法确认 | 读不到宿主档位（能力缺失），页面不会假装已恢复 |
-| 不涉及沙箱档位 | 本会话只有普通工具授权 |
+「沙箱档位」那一行只是宿主实时读数（例如「只读」）：它由 DSH 与你自己的设定决定，
+**Guard 从不改写它**，因此页面上不存在「已提升 / 待回滚 / 已恢复」这类状态；读不到时显示「未知」，不做推断。
 
 原始 `Lease ID`、`sessionId`、Scope 哈希与完整 Scope 串只出现在「技术详情」展开区；会话名来自 DSH 的会话标题（`ctx.sessionTitle`），读不到时降级为工作目录名或短 ID。
 
 ### 授权决策记录（而不是"事件流"）
 
-会话内 tab 展示的是**一条授权一份记录**：批准了什么 → 被复用了多少次 → 权限级别抬高/收回没有 → 最后怎么结束的。
+会话内 tab 展示的是**一条授权一份记录**：批准了什么 → 被复用了多少次 → 怎么结束的。
 `PASSTHROUGH_ALLOW` / `TOOL_SUCCESS` 这类属于遥测，默认折叠在「原始事件（排障用）」里——把几百条遥测摆在用户面前，
 等于没有审计。
 
@@ -282,31 +258,28 @@ SHA-256(toolName + 目标沙箱模式)
 会话顶部还有一行**价值指标**：
 
 ```
-本次会话：少点了 12 次批准 · 最长一次放开了 4 分 51 秒 · 待收回 1 项
+本次会话：少点了 12 次批准 · 最长一次放开了 4 分 51 秒
 ```
 
 `少点了 N 次批准` = 该会话里授权被复用的次数（每一次复用，都是你不用再点一次「允许一次」）。
 
-### 旧的有界放宽接口（`/api/window`，当前 UI 不调用）
+### 旧的有界放宽接口已删除（2026-11-01）
 
-`POST /api/window` 仍保留"签发 sandbox-mode Lease + 提升会话档位"的能力，供脚本/排障使用；
-它**不是**免打扰窗口（免打扰见上文「免打扰窗口（限时完全访问）」）。约束：TTL 必须是正整数且不得超过
-`maxTtlSeconds`（不静默裁剪）；只对配置为 `sandbox-escalation` 的工具生效；必须能解析到真实 Session；
-开窗失败会撤销刚签发的授权；审计记 `WINDOW_OPENED`。
+`POST /api/window`、`action=restore-sandbox`、`SandboxGrantManager` 以及
+`WINDOW_OPENED` / `SANDBOX_MODE_RAISED` / `SANDBOX_MODE_RESTORED` 审计决策都已随
+「提升会话沙箱档位 + TTL 回滚」整条链路一起删除。Guard 现在**没有任何改写沙箱档位的入口**。
+免打扰窗口（见下文）是唯一的"放宽"动作，且它也只放行审批、不改档位。
 
-> **安全提示**：治理接口是本机 loopback 上的**无鉴权面**——"能开窗 / 能开免打扰"就等于
-> "本机进程也能放宽权限"（上限受 `maxTtlSeconds` 约束）。不信任本机进程时，请把 `console.enabled` 设为 `false`。
-
-档位自动回滚（`sweepIntervalMs`，默认 **30000**，`0` 表示关闭）：
+低频结算（`sweepIntervalMs`，默认 **30000**，`0` 表示关闭）：
 
 ```ts
 {
-  sweepIntervalMs: 30000,   // 每 30s 结算一次「授权已失效但档位还没收回」的会话
+  sweepIntervalMs: 30000,   // 每 30s 检查一次免打扰窗口的到期与档位漂移
   console: { enabled: true, host: "127.0.0.1", port: 8787 }
 }
 ```
 
-> 定时器**不是安全机制**：授权是否有效始终在读写时实时判定；关掉它只会让回滚推迟到「下次任意工具调用」或用户点按钮。
+> 定时器**不是安全机制**：窗口是否有效、授权是否有效都在读写时实时判定；关掉它只会让状态与审计更新晚一点。
 
 配置（默认**已开启**；端口被占用时自动回退到系统分配的随机端口，实际地址写在 stderr 里）：
 
@@ -327,14 +300,13 @@ GET   /                 前端页面（独立入口；支持 ?session=<id> 聚�
 GET   /console.js       共享前端脚本（面板与独立页面复用）
 GET   /api/snapshot     治理快照（会话视图 + 免打扰窗口 sessions[].dnd；可带 ?session=<id>）
 GET   /api/audit        审计过滤查询（原始事件流，含 DND_ALLOWED / DND_OPENED 等决策）
-GET   /api/decisions    授权决策记录（一条授权一份：批准/复用/权限级别/结束方式；可带 sessionId/toolName/limit）
-GET   /api/config       运行期策略 + 挡位目录 + 收缩动作可用性 + 自动回滚节拍 + features.dndWindow
+GET   /api/decisions    授权决策记录（一条授权一份：批准/复用/结束方式；可带 sessionId/toolName/limit）
+GET   /api/config       运行期策略 + 挡位目录 + 收缩动作可用性 + 结算节拍 + features.dndWindow
 PATCH /api/config       写接口：defaultScope / defaultTtlSeconds / maxTtlSeconds / settings(enabled·reuseTtlSeconds·dndDurationSeconds)
-POST  /api/revoke       收缩型动作：action=revoke（撤销本会话全部授权）| restore-sandbox（只回滚档位）
+POST  /api/revoke       收缩型动作：撤销本会话仍有效的全部授权（唯一动作）
 POST  /api/dnd          开启免打扰窗口：{sessionId, ttlSeconds}（限时完全访问；窗口内自动批准沙箱升级）
 POST  /api/dnd/stop     结束免打扰：{sessionId}（纯收缩）
 POST  /api/dnd/extend   延长免打扰：{sessionId, addSeconds}（总窗口不超过 maxTtlSeconds）
-POST  /api/window       旧的有界放宽：{sessionId, toolName, mode, ttlSeconds}（签发 sandbox-mode Lease 并提升档位，保留给脚本/排障）
 ```
 
 此外，插件会尝试把同一组接口挂到 DSH Web 服务器上的**同源**前缀 `/guard/…`（`registerGuardWebRoutes`）。
@@ -347,9 +319,8 @@ POST  /api/window       旧的有界放宽：{sessionId, toolName, mode, ttlSeco
 
 | 挡位 | 复用范围 | 可否作为默认值 |
 |---|---|---|
-| `exact-arguments` | 工具名 + 参数逐字节一致 | ✅（零配置默认） |
+| `exact-arguments` | 工具名 + 参数（去 justification）+ 目标档位 | ✅（零配置默认，也是目前唯一可默认的挡位） |
 | `fields` | 只按指定字段取键 | ❌ 必须按工具显式配置 `paths` |
-| `sandbox-escalation` | 工具名 + 目标沙箱档位 | ✅ |
 | `tool` | 同一 Session 内该工具的全部调用 | ❌ 必须按工具显式配置 |
 
 > `tool` 被刻意排除在默认值之外（规格第 7 条）：默认值决定了「任意一次批准能复用多大范围」，
@@ -364,17 +335,13 @@ POST  /api/window       旧的有界放宽：{sessionId, toolName, mode, ttlSeco
 - 策略写接口只能改 `defaultScope` / `defaultTtlSeconds` / `maxTtlSeconds`；
 - `enabled` 与 `rules` **接口层不可写**（返回 400）——页面不能关掉 Guard，也不能凭空新增授权规则；
 - 运行期改动**不落盘**：Guard 不改写 profile 的 `cordis.patch.yml`，重启后回到 profile 配置值；
-- **收缩型动作**（`POST /api/revoke`）只有两个方向，且都只能让权限变小：
-  - `action=revoke`：撤销该会话仍有效的全部授权，并回滚会话沙箱档位；
-  - `action=restore-sandbox`：只结算该会话中**已经失效**的授权并回写档位，仍有效的授权原样不动。
-  - 两者都写审计（`LEASE_REVOKED` / `SANDBOX_MODE_RESTORED`），都遵守「用户手动改过档位则跳过回滚」的红线。
+- **收缩型动作**（`POST /api/revoke`）只有一个动作：撤销该会话仍有效的**全部授权**，
+  并写 `LEASE_REVOKED` 审计。它不影响沙箱档位（那是用户自己的设置）。
 - **用户显式发起的放宽是 `POST /api/dnd`（免打扰窗口，限时完全访问）**：窗口内只自动批准
   本会话带 `requestedMode` 的已记录沙箱升级；**不改沙箱挡位、不改审批策略、不签发 Lease**。
   约束：TTL ≤ `maxTtlSeconds`（不静默裁剪）、必须能解析到真实 Session、完全访问挡位下拒绝；
   到期 / 手动结束 / 原生挡位变化 / 插件卸载立即失效；`/api/dnd/stop` 纯收缩，`/api/dnd/extend`
   延长但总窗口不超过上限。每次放行写 `DND_ALLOWED`，不伪装成授权。
-- **`POST /api/window` 是旧的"签发 sandbox-mode Lease + 提升档位"有界放宽**，保留给脚本/排障；
-  当前 UI 不调用它，不要和免打扰混为一谈。
 - 页面**不做审批**：免打扰只是在用户显式开启的窗口内代答 `allowed-once`；普通审批永远走 DSH 原生流程。
 
 > **安全提示**：治理接口是本机 loopback 上的无鉴权面。"能开免打扰"就等于"窗口内能自动批准沙箱升级
@@ -435,9 +402,9 @@ dsh web
 
 安装后 Guard 会注册四个观察型 hook，并默认打开治理台。开箱默认行为：
 
-- 默认范围挡位 `exact-arguments`（可在治理台里切换）；
-- 为 `pwsh` / `bash` 打开沙箱升级复用（`sandbox-escalation`，TTL 300s）——
-  **只有**带 `sandbox_permissions` + `justification` 的调用会进入这条链路，其余调用完全不受影响；
+- 默认范围挡位 `exact-arguments`：批准一次只覆盖「同一条操作」（工具 + 参数 + 目标档位）；
+- **不提供任何"提升沙箱档位"的配置**：每次升级仍由 DSH 决定，Guard 只在 TTL 内代答同一条操作，
+  或在免打扰窗口内放行审批；
 - 治理台监听 `127.0.0.1:8787`。
 
 要按自己的偏好覆盖，在 profile 的 `cordis.patch.yml` 中按 `id` 覆盖该行（patch 会替换整行 config，请重述要保留的字段）：
@@ -451,9 +418,6 @@ dsh web
     defaultScope: exact-arguments
     console: { enabled: true, host: 127.0.0.1, port: 8787 }
     rules:
-      - match: pwsh
-        ttlSeconds: 300
-        scope: { mode: sandbox-escalation }
       - match: deploy.preview
         ttlSeconds: 120
         scope: { mode: fields, paths: [project, environment] }
@@ -496,13 +460,6 @@ dsh web
       }
     },
     {
-      // 沙箱升级：本会话内该工具可升到 danger-full-access，批准一次后 300 秒内免问，
-      // 到期回滚到批准前的档位。默认不配置 = 完全不改变 DSH 行为。
-      match: "pwsh",
-      ttlSeconds: 300,
-      scope: { mode: "sandbox-escalation" }
-    },
-    {
       match: "dangerous.admin",
       enabled: false
     }
@@ -530,12 +487,15 @@ LEASE_POLICY_INVALID
 
 > **无法校验身份、Scope 或 TTL 时，不签发或复用 Lease，保留原生审批语义。**
 
-沙箱升级链路同样遵循这一原则，且可审计的治理事件是完整的（放宽与收回都有记录）：
+审计里与授权生命周期相关的事件（其余是遥测与免打扰窗口事件）：
 
 ```text
-SANDBOX_MODE_RAISED                  会话沙箱模式被提升（含工具与目标档位）
-SANDBOX_MODE_RESTORED                Lease 结束，模式已回滚
-SANDBOX_MODE_SKIPPED_USER_OVERRIDE   检测到用户已手动改动模式，跳过回滚并交还控制权
+ASK                   Guard 决定询问（下游 ask 且没有可复用授权）
+LEASE_ISSUED          人工批准后签发短期授权
+LEASE_REUSED          命中已有授权 / 族放行（记「凭族放行：…」）
+LEASE_REVOKED         用户提前收回
+APPROVAL_REJECTED     人工拒绝（或下游返回非 allowed-once）
+DND_OPENED / DND_ALLOWED / DND_EXTENDED / DND_CLOSED   免打扰窗口的开关与放行
 ```
 
 ---
@@ -546,10 +506,10 @@ SANDBOX_MODE_SKIPPED_USER_OVERRIDE   检测到用户已手动改动模式，跳�
 
 ### Universal Mode 能承诺什么
 
-- 为原本触发 `ask` 的 Tool（以及沙箱升级）增加短期 Lease；
+- 为原本触发 `ask` 的 Tool（包括 DSH 的沙箱升级审批）增加短期 Lease；
 - Session / Tool / Scope / TTL 绑定；
 - 过期、撤销、复用与审计；
-- 沙箱模式提升会在 Lease 结束后**回滚**，且不覆盖用户的手动改动；
+- 免打扰窗口内的自动放行（限时完全访问），到期/结束立即恢复询问；
 - 不覆盖 DSH 原始 `deny`；
 - 不修改已有 Tool 代码即可接入。
 
@@ -559,7 +519,7 @@ SANDBOX_MODE_SKIPPED_USER_OVERRIDE   检测到用户已手动改动模式，跳�
 - 不能阻止插件自己发网络请求；
 - 不提供进程、容器、VM 或 microVM 级恶意代码隔离；
 - **不能阻止其他插件认领 `approval/request`**：这是 DSH 的开放瀑布事件，"谁认领谁说了算"。任何插件都可以零交互返回 `allowed-once`，也可以抢先认领从而遮蔽 Guard 的观察位置。这是 DSH 事件模型的固有性质，不属于本插件能防御的范围；
-- **不能阻止其他插件直接改写会话权限状态**：`setSandboxMode(session, mode)`、`ctx.permissionPresets.set(...)`、`ctx.approval.setPolicy(...)` 在 DSH 中都是公开 API，Guard 只是选择"只用其中最小的一档并加上边界"。
+- **不能阻止其他插件直接改写会话权限状态**：`setSandboxMode(session, mode)`、`ctx.permissionPresets.set(...)`、`ctx.approval.setPolicy(...)` 在 DSH 中都是公开 API；Guard 自己的选择是**一个都不调用**，只观察审批。
 
 ## 当前状态
 
@@ -567,13 +527,13 @@ SANDBOX_MODE_SKIPPED_USER_OVERRIDE   检测到用户已手动改动模式，跳�
 |---|---|
 | Universal Lease Gate（四 hook） | ✅ 已实现 |
 | Session / Scope / TTL / Revoke | ✅ 已实现 |
-| 沙箱升级有界授权（`sandbox-escalation` + 模式提升与回滚） | ✅ 已实现 |
+| 免打扰窗口（限时完全访问的审批放行层） | ✅ 已实现（`capability/dnd.ts`） |
 | 真 cordis 集成测试（真实 `Context` / `waterfall` / `emit`） | ✅ 已实现 |
 | 权限生命周期端到端集成测试（ask→签发→复用→过期/撤销） | ✅ 已实现（`integration/permission-lifecycle.test.ts`） |
 | DSH 行为基线核实（逐行核对已安装版本源码） | ✅ 已完成（`docs/集成基线-真实DSH行为.md`） |
-| 治理台：会话视图 / 授权剩余时间 / 两状态（授权有效 vs 档位已恢复）/ 审计 / 范围挡位 | ✅ 已实现（Web GUI 面板 + 独立页面 + `/guard/` 同源路由） |
-| 治理台收缩型动作：立即收回 / 立即回滚档位（只收缩，带审计） | ✅ 已实现（`POST /api/revoke`） |
-| 档位自动回滚（`sweepIntervalMs`，默认 30s，可关） | ✅ 已实现（非安全机制，只负责及时性） |
+| 治理台：会话视图 / 授权剩余时间 / 宿主档位读数 / 审计 / 范围挡位 | ✅ 已实现（Web GUI 面板 + 独立页面 + `/guard/` 同源路由） |
+| 治理台收缩型动作：立即收回（只收缩，带审计） | ✅ 已实现（`POST /api/revoke`） |
+| 免打扰窗口结算（`sweepIntervalMs`，默认 30s，可关） | ✅ 已实现（非安全机制，只负责及时性） |
 | Secret-safe Audit | ✅ 已实现 |
 | Ubuntu / Windows / macOS CI workflow | ✅ 已配置 |
 | 在真实 profile 中安装并实跑（hook 挂载 + 治理台 + 面板注册） | ✅ 已完成（本机 desktop profile） |
@@ -588,15 +548,15 @@ DeepSeek Harness 本身也处于 Developer Preview 并快速迭代，因此正�
 
 ```text
 adapter/
-├── client.js                 # DSH 治理台面板与侧栏入口
-├── cordis.patch.yml          # 插件配置与默认沙箱升级规则
+├── client.js                 # DSH 客户端半边：模式 chip + 会话内「能力授权」tab
+├── cordis.patch.yml          # 插件默认配置（默认不写任何沙箱档位）
 └── src/
-    ├── index.ts              # 插件装配与宿主适配（含 30s 档位结算节拍）
-    ├── capability/           # 四个 hook、Scope、Lease、沙箱提升与回滚、回滚审计
+    ├── index.ts              # 插件装配与宿主适配（档位只读读取 / 免打扰结算节拍）
+    ├── capability/           # 四个 hook、Scope、Lease、免打扰窗口
     ├── integration/          # 真 cordis 接线与权限生命周期测试
     ├── audit/                # 脱敏审计
-    └── console/              # 会话视图 / 决策记录 / HTTP 接口 / 动作（收缩 + 有界放宽）/ 会话名解析
-scripts/smoke-console.mjs     # 治理台冒烟脚本（示例数据 + 真实收缩动作）
+    └── console/              # 会话视图 / 决策记录 / HTTP 接口 / 撤销动作 / 会话名解析
+scripts/smoke-console.mjs     # 治理台冒烟脚本（示例数据 + 真实撤销动作）
 .github/workflows/ci.yml      # Windows / macOS / Linux 构建与测试
 ```
 
@@ -632,15 +592,20 @@ RBAC 更适合回答“这个角色通常拥有什么权限”。Capability Leas
 
 因为零配置情况下无法可靠猜测某个第三方 Tool 的业务资源语义。默认只复用完全相同的参数，宁可多问一次，也不扩大授权面。
 
-**但要说实话**：在同一路径上，LLM 很少两次生成逐字节相同的参数，所以零配置的 `exact-arguments` 实际收益有限。真正省事的是显式配置 `fields`（按业务字段）或 `sandbox-escalation`（按工具与目标档位）——**收益来自显式配置，而不是默认值**。
+**但要说实话**：零配置的 `exact-arguments` 只覆盖「同一条操作」——LLM 换个路径、换个命令就要再问一次。
+真正省事的是一次性开一个免打扰窗口（限时完全访问）；`fields` 则是按业务字段放宽，需要显式配置——**收益来自显式选择，而不是默认值**。
 
-### 沙箱升级为什么不把 `justification` 算进 Scope？
+### 同一条操作怎么判定？
 
-因为它是模型每次现写的自由文本。把它纳入 Scope 等于把安全边界建立在模型输出上，而且措辞一变授权立即失效、复用率几乎为零。Guard 只按 `(toolName, 目标模式)` 取键——这也符合"禁止用字符串启发式猜测安全边界"的项目规则。`justification` 只用于给人看（截断后展示）。
+工具名 + 参数（`justification` 不参与，因为它每次都由模型现写）+ 目标沙箱档位，取 SHA-256。
+因此「同一条命令升到工作区可写」与「升到完全访问」是两条操作；换一条命令、换一个路径都算新操作。
+命令行里的凭据形状（`--with-token xxx`、`ghp_…`、`Bearer …`）在展示前会被脱敏，审计里不出现原文。
 
-### 沙箱升级会不会把用户手动设的权限冲掉？
+### Guard 会不会改我的沙箱档位？
 
-不会。回滚前会做冲突检测：如果当前模式已不是 Guard 最后写入的值（说明用户手动改过），Guard **跳过回滚**并写入 `SANDBOX_MODE_SKIPPED_USER_OVERRIDE` 审计，把控制权交还用户。
+不会。2026-11-01 起「提升会话档位 + TTL 回滚」整条链路已删除，Guard 没有 `setSandboxMode` 调用，
+治理台里的「沙箱档位」只是宿主实时读数。批准一次的效果是：**这一次 DSH 的升级审批被代答 `allowed-once`**，
+以及「同一条操作在 TTL 内不再问」；档位始终由你和 DSH 决定。
 
 ### 支持 Windows / macOS / Linux 吗？
 
@@ -674,5 +639,5 @@ MIT License. See [`LICENSE`](LICENSE).
 
 <p align="center">
   <b>DSH Capsule</b><br/>
-  <sub>Short-lived authorization · Sandbox rollback · Fail-closed by design</sub>
+  <sub>Short-lived authorization · Time-boxed DND · Fail-closed by design</sub>
 </p>

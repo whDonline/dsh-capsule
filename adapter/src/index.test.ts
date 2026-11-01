@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Context } from "@deepseek-ai/cordis";
-import { apply, buildSandboxContext, type CapsuleHostContext } from "./index.js";
+import { apply, buildSandboxModeReader, type CapsuleHostContext } from "./index.js";
 function makeBus(host: CapsuleHostContext) {
   // 作用：为任意宿主 ctx 挂上事件总线（Guard 的 install 需要 on）；宿主本身可以是真实 cordis Context
   (host as { on?: unknown }).on = () => () => {};
@@ -40,39 +40,32 @@ describe("Guard 插件入口（仅短期授权）", () => {
     expect(ctx.capabilities).toBeUndefined();
   });
 });
-describe("buildSandboxContext（P0-2 宿主适配器）", () => {
-  const sessionWith = (id: string, sink: { type: string; data: unknown }[]) => ({ id, append: (type: string, data: unknown) => sink.push({ type, data }) });
-  it("读取 DSH 会话投影中的 sandboxMode，写入走 session.append('sandbox/mode')", () => {
-    const sink: { type: string; data: unknown }[] = [];
-    const ctx = { sessionProjections: { stateOf: () => "workspace-write" } };
-    const sandbox = buildSandboxContext(ctx);
-    const session = sessionWith("s1", sink);
-    expect(sandbox.sessionSandboxMode(session)).toBe("workspace-write");
-    sandbox.setSessionSandboxMode(session, "danger-full-access");
-    expect(sink).toEqual([{ type: "sandbox/mode", data: { mode: "danger-full-access" } }]);
+describe("buildSandboxModeReader（宿主只读适配器）", () => {
+  it("读取 DSH 会话投影中的 sandboxMode", () => {
+    const ctx = { get: (name: string) => (name === "sessionProjections" ? { stateOf: () => "read-only" } : undefined) };
+    expect(buildSandboxModeReader(ctx).sessionSandboxMode({ id: "s1" })).toBe("read-only");
   });
   it("投影缺失 / 返回非法值：读返回保守默认，绝不猜测", () => {
-    expect(buildSandboxContext({}).sessionSandboxMode({ id: "s1" })).toBe("workspace-write");
-    expect(buildSandboxContext({ sessionProjections: { stateOf: () => "full-access" } }).sessionSandboxMode({ id: "s1" })).toBe("workspace-write");
-    expect(buildSandboxContext({ sessionProjections: { stateOf: () => undefined } }).sessionSandboxMode({ id: "s1" })).toBe("workspace-write");
+    expect(buildSandboxModeReader({}).sessionSandboxMode({ id: "s1" })).toBe("workspace-write");
+    expect(buildSandboxModeReader({ get: () => ({ stateOf: () => "full-access" }) }).sessionSandboxMode({ id: "s1" })).toBe("workspace-write");
+    expect(buildSandboxModeReader({ get: () => ({ stateOf: () => undefined }) }).sessionSandboxMode({ id: "s1" })).toBe("workspace-write");
   });
   it("投影读取抛错：仍返回保守默认（不向外抛，避免打断执行链）", () => {
     const ctx = {
-      sessionProjections: {
+      get: () => ({
         stateOf: () => {
           throw new Error("boom");
         },
+      }),
+    };
+    expect(buildSandboxModeReader(ctx).sessionSandboxMode({ id: "s1" })).toBe("workspace-write");
+  });
+  it("ctx.get 本身抛错：同样返回保守默认", () => {
+    const ctx = {
+      get: () => {
+        throw new Error("no inject");
       },
     };
-    expect(buildSandboxContext(ctx).sessionSandboxMode({ id: "s1" })).toBe("workspace-write");
-  });
-  it("session 不可写（无 append / 无 id）：写入静默忽略，不抛错", () => {
-    const sink: { type: string; data: unknown }[] = [];
-    const sandbox = buildSandboxContext({ sessionProjections: { stateOf: () => "read-only" } });
-    expect(() => sandbox.setSessionSandboxMode({ id: "s1" }, "workspace-write")).not.toThrow();
-    expect(() => sandbox.setSessionSandboxMode({ append: () => {} }, "workspace-write")).not.toThrow();
-    expect(() => sandbox.setSessionSandboxMode(null, "workspace-write")).not.toThrow();
-    expect(() => sandbox.setSessionSandboxMode("not-a-session", "workspace-write")).not.toThrow();
-    expect(sink).toHaveLength(0);
+    expect(buildSandboxModeReader(ctx).sessionSandboxMode({ id: "s1" })).toBe("workspace-write");
   });
 });

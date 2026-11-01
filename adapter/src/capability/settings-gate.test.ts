@@ -17,7 +17,7 @@ function makeGate(active: boolean) {
     leases,
     pending,
     audit,
-    settings: { active, mode: "same-operation" },
+    settings: { active, reuseTtlSeconds: 1800 },
   });
   return { gate, leases, audit };
 }

@@ -1,4 +1,4 @@
-import type { CapabilityLease, LeaseKind } from "./types.js";
+import type { CapabilityLease } from "./types.js";
 // 作用：LeaseStore 抽象与内存实现（重构规格第 5.6 节）——V1 用 MemoryLeaseStore 即可
 //（Lease 是短生命周期权限，进程重启全部失效 = Fail Closed）；接口抽象保证未来可换
 // DshStorageLeaseStore / SQLiteLeaseStore / JsonLeaseStore 而不改核心逻辑。
@@ -6,7 +6,6 @@ export interface LeaseQuery {
   sessionId: string;
   toolName: string;
   scopeKey: string;
-  kind?: LeaseKind;
 }
 export interface LeaseStore {
   insert(lease: CapabilityLease): void | Promise<void>;
@@ -37,7 +36,6 @@ export class MemoryLeaseStore implements LeaseStore {
     if (!bucket || bucket.length === 0) return undefined;
     const latest = bucket[bucket.length - 1];
     if (!latest || latest.status !== "ACTIVE") return undefined;
-    if (query.kind !== undefined && latest.kind !== query.kind) return undefined;
     return latest;
   }
   get(id: string): CapabilityLease | undefined {

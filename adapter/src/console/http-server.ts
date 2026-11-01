@@ -10,20 +10,20 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { AUDIT_DECISIONS, AUDIT_DECISION_LABELS, isAuditDecision } from "../audit/catalog.js";
 import { SCOPE_MODES, DEFAULTABLE_SCOPE_MODES, isScopeMode, type ScopeMode } from "../capability/scope-modes.js";
-import { isSandboxMode, SANDBOX_MODE_LABELS, SANDBOX_MODES } from "../capability/escalation.js";
+import { SANDBOX_MODE_LABELS, SANDBOX_MODES } from "../capability/escalation.js";
 import { CONSOLE_HTML, CONSOLE_CLIENT_JS } from "./console-ui.js";
 import { GovernancePolicy, type ConsolePolicySnapshot } from "./policy.js";
 import type { GuardSettings } from "../capability/settings.js";
 import { GUARD_MODE_LABELS, GUARD_MODES, GUARD_MODE_SUMMARIES } from "../capability/settings.js";
 import type { DecisionQuery, GovernanceConsole } from "./console-service.js";
-import type { ConsoleActions, ConsoleAuditQuery, ConsoleWindowRequest } from "./types.js";
+import type { ConsoleActions, ConsoleAuditQuery } from "./types.js";
 export interface ConsoleHttpOptions {
   console: GovernanceConsole;
   /** 运行期治理策略（挡位 / TTL）；未注入时写接口一律拒绝（Fail Closed） */
   policy?: GovernancePolicy;
-  /** 收缩型治理动作（撤销 / 回滚档位）；未注入时相关接口返回 503 */
+  /** 收缩型治理动作（撤销授权）；未注入时相关接口返回 503 */
   actions?: ConsoleActions;
-  /** 档位自动回滚节拍（毫秒，0 = 关闭）——只用于在页面上如实说明「多久内会自动回滚」 */
+  /** 低频结算节拍（毫秒，0 = 关闭）——只用于在页面上如实说明免打扰窗口的状态多久更新一次 */
   sweepIntervalMs?: number;
   /** 用户可见的三档设置（开关 / 模式 / 时长）；未注入时 /api/config 不返回 settings */
   settings?: GuardSettings;
@@ -45,7 +45,7 @@ export const GUARD_WRITE_HEADER = "x-dsh-guard";
 /** Guard 治理接口挂到 DSH Web 服务器上的同源前缀（面板优先走这条路径，避免跨源与额外端口）。 */
 export const GUARD_WEB_PREFIX = "/guard";
 /** 同源路径与路径映射表——同一份路由同时服务独立端口与 DSH 同源前缀，避免两套实现漂移。 */
-const ROUTES: readonly string[] = ["/", "/index.html", "/console.js", "/api/snapshot", "/api/audit", "/api/decisions", "/api/config", "/api/revoke", "/api/window", "/api/dnd", "/api/dnd/stop", "/api/dnd/extend"];
+const ROUTES: readonly string[] = ["/", "/index.html", "/console.js", "/api/snapshot", "/api/audit", "/api/decisions", "/api/config", "/api/revoke", "/api/dnd", "/api/dnd/stop", "/api/dnd/extend"];
 const LOOPBACK_HOSTNAMES: readonly string[] = ["127.0.0.1", "localhost", "[::1]", "::1"];
 /** 允许被跨源读取的来源——只放行本机页面（http://127.0.0.1:任意端口 / http://localhost:任意端口）。
  * 为什么需要：DSH Web GUI 运行在 http://127.0.0.1:<DSH 端口>，与独立 Console 端口不同源；
@@ -127,7 +127,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, govConso
       return;
     }
     // 写接口只接受 POST：其他方法一律 405（不要让 GET 落到「未知路径」的 404 上，误导排障）
-    if ((pathname === "/api/revoke" || pathname === "/api/window" || pathname === "/api/dnd" || pathname === "/api/dnd/stop" || pathname === "/api/dnd/extend") && req.method !== "POST") {
+    if ((pathname === "/api/revoke" || pathname === "/api/dnd" || pathname === "/api/dnd/stop" || pathname === "/api/dnd/extend") && req.method !== "POST") {
       sendJson(res, 405, { error: "METHOD_NOT_ALLOWED" });
       return;
     }
@@ -181,10 +181,6 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, govConso
     }
     if (req.method === "POST" && pathname === "/api/revoke") {
       await handleRevoke(req, res, routeOptions.actions);
-      return;
-    }
-    if (req.method === "POST" && pathname === "/api/window") {
-      await handleWindow(req, res, routeOptions.actions);
       return;
     }
     if (req.method === "POST" && pathname === "/api/dnd") {
@@ -501,10 +497,10 @@ async function handleConfigPatch(req: IncomingMessage, res: ServerResponse, poli
 function policyDocument(policy: GovernancePolicy | undefined, routeOptions: ConsoleRouteOptions = {}): unknown {
   // 作用：GET /api/config 的响应——运行期策略（可写）+ 挡位目录（前后端同一事实来源）+
   // 说明「哪些项属于部署配置、只能改 profile patch」+ 同源路由注册状态（链路自证）+
-  // 收缩型动作是否可用（前端据此决定是否渲染「立即收回 / 回滚档位」按钮）+
-  // 档位自动回滚节拍（前端据此在「到期后」一句里写清多久内会回滚）。
+  // 收缩型动作是否可用（前端据此决定是否渲染「立即收回」按钮）+
+  // 免打扰窗口结算节拍（前端据此说明窗口状态多久更新一次）。
   const routes = { ...guardRouteStatus };
-  const actions = { revoke: routeOptions.actions !== undefined, restoreSandbox: routeOptions.actions !== undefined };
+  const actions = { revoke: routeOptions.actions !== undefined };
   const sweep = { intervalMs: routeOptions.sweepIntervalMs ?? 0 };
   // 沙箱档位目录：前端不再自己维护「只读 / 工作区可写 / 完全访问」的映射，一律从这里取
   const sandboxModes = SANDBOX_MODES.map((mode) => ({ id: mode, label: SANDBOX_MODE_LABELS[mode] }));
@@ -582,23 +578,18 @@ function parseSnapshotQuery(params: URLSearchParams): { sessionId?: string } | u
 }
 export interface RevokeRequestBody {
   sessionId: string;
-  /** revoke = 撤销该会话全部授权并回滚档位（默认）；restore-sandbox = 只回收已失效授权的档位 */
-  action?: "revoke" | "restore-sandbox";
 }
 export function parseRevokeBody(raw: unknown): RevokeRequestBody | undefined {
-  // 作用：解析并校验治理动作请求体——只认识 sessionId 与 action 两个字段，
+  // 作用：解析并校验治理动作请求体——只认识 sessionId 一个字段，
   // 其余字段一律拒绝（Fail Closed：不猜测调用方意图，也不做任何隐式扩权）
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
   const record = raw as Record<string, unknown>;
   for (const key of Object.keys(record)) {
-    if (key !== "sessionId" && key !== "action") return undefined;
+    if (key !== "sessionId") return undefined;
   }
   const sessionId = record.sessionId;
   if (typeof sessionId !== "string" || sessionId.length === 0 || sessionId.length > 200) return undefined;
-  const action = record.action;
-  if (action === undefined) return { sessionId };
-  if (action !== "revoke" && action !== "restore-sandbox") return undefined;
-  return { sessionId, action };
+  return { sessionId };
 }
 async function handleRevoke(req: IncomingMessage, res: ServerResponse, actions: ConsoleActions | undefined): Promise<void> {
   // 作用：收缩型治理动作入口（POST /api/revoke）——与 PATCH /api/config 同一套三道闸门：
@@ -630,11 +621,6 @@ async function handleRevoke(req: IncomingMessage, res: ServerResponse, actions: 
     return;
   }
   try {
-    if (body.action === "restore-sandbox") {
-      const result = await actions.restoreSandbox(body.sessionId);
-      sendJson(res, 200, { ok: true, action: "restore-sandbox", ...result });
-      return;
-    }
     const result = await actions.revokeSession(body.sessionId);
     sendJson(res, 200, { ok: true, action: "revoke", ...result });
   } catch (err) {
@@ -642,25 +628,6 @@ async function handleRevoke(req: IncomingMessage, res: ServerResponse, actions: 
     process.stderr.write(`[dsh-guard] console action failed: ${String(err)}\n`);
     sendJson(res, 500, { error: "ACTION_FAILED" });
   }
-}
-export function parseWindowBody(raw: unknown): ConsoleWindowRequest | undefined {
-  // 作用：解析「免打扰窗口」请求体——四个字段必须齐全且类型正确，多一个字段都拒绝（Fail Closed）；
-  // 档位必须是沙箱闭集，TTL 必须是正整数（上限由动作层按运行期 maxTtlSeconds 再校验）
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
-  const record = raw as Record<string, unknown>;
-  const allowed = new Set(["sessionId", "toolName", "mode", "ttlSeconds"]);
-  for (const key of Object.keys(record)) {
-    if (!allowed.has(key)) return undefined;
-  }
-  const sessionId = record.sessionId;
-  const toolName = record.toolName;
-  const mode = record.mode;
-  const ttlSeconds = record.ttlSeconds;
-  if (typeof sessionId !== "string" || sessionId.length === 0 || sessionId.length > 200) return undefined;
-  if (typeof toolName !== "string" || toolName.length === 0 || toolName.length > 200) return undefined;
-  if (!isSandboxMode(mode)) return undefined;
-  if (typeof ttlSeconds !== "number" || !Number.isInteger(ttlSeconds) || ttlSeconds <= 0) return undefined;
-  return { sessionId, toolName, mode, ttlSeconds };
 }
 function parseDndSession(raw: unknown, extraKeys: readonly string[]): Record<string, unknown> | undefined {
   // 作用：免打扰三个写接口的公共请求体校验——只接受 sessionId 与各自声明的额外字段，多一个都拒绝。
@@ -789,48 +756,6 @@ async function handleDndExtend(req: IncomingMessage, res: ServerResponse, action
     sendJson(res, 200, { ok: true, ...actions.extendDnd(body.sessionId as string, addSeconds) });
   } catch (err) {
     dndError(res, err);
-  }
-}
-async function handleWindow(req: IncomingMessage, res: ServerResponse, actions: ConsoleActions | undefined): Promise<void> {
-  // 作用：POST /api/window —— 用户显式开启有界「免打扰窗口」。与 revoke 共用三道闸门
-  //（自定义头 + JSON content-type + loopback 来源），并把动作层的 Fail Closed 校验错误映射成 400。
-  if (!actions) {
-    sendJson(res, 503, { error: "ACTIONS_UNAVAILABLE" });
-    return;
-  }
-  if (req.headers[GUARD_WRITE_HEADER] === undefined) {
-    sendJson(res, 403, { error: "WRITE_HEADER_REQUIRED" });
-    return;
-  }
-  const contentType = String(req.headers["content-type"] ?? "");
-  if (!contentType.toLowerCase().startsWith("application/json")) {
-    sendJson(res, 415, { error: "JSON_CONTENT_TYPE_REQUIRED" });
-    return;
-  }
-  let raw: unknown;
-  try {
-    raw = JSON.parse((await readBody(req)).toString("utf8"));
-  } catch {
-    sendJson(res, 400, { error: "INVALID_JSON" });
-    return;
-  }
-  const body = parseWindowBody(raw);
-  if (!body) {
-    sendJson(res, 400, { error: "INVALID_BODY" });
-    return;
-  }
-  try {
-    const result = await actions.openWindow(body);
-    sendJson(res, 200, { ok: true, ...result });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (message.startsWith("GUARD_CONSOLE_INVALID")) {
-      // 参数/环境不满足开窗条件：明确拒绝，不静默降级
-      sendJson(res, 400, { error: "WINDOW_REJECTED", message });
-      return;
-    }
-    process.stderr.write(`[dsh-guard] console window failed: ${String(err)}\n`);
-    sendJson(res, 500, { error: "ACTION_FAILED" });
   }
 }
 function parseDecisionQuery(params: URLSearchParams): DecisionQuery | undefined {

@@ -13,7 +13,8 @@ beforeEach(() => {
   now = 1_000_000;
 });
 function makeGate(config?: UniversalPolicyConfig) {
-  // 作用：组装被测 UniversalGate 及其依赖（注入可控时钟，规格 22.10 模拟时间用）
+  // 作用：组装被测 UniversalGate 及其依赖（注入可控时钟，规格 22.10 模拟时间用）。
+  // reuseTtlSeconds 取 60 秒，与策略默认 TTL 对齐，让「TTL 到期」用例的时间推进可读。
   const audit = new AuditService();
   const pending = new PendingRegistry();
   const leases = new LeaseManager(new MemoryLeaseStore(clock), clock);
@@ -23,6 +24,7 @@ function makeGate(config?: UniversalPolicyConfig) {
     leases,
     pending,
     audit,
+    settings: { active: true, reuseTtlSeconds: 60 },
     now: clock,
   });
   return { gate, leases, pending, audit };
@@ -34,6 +36,12 @@ function execOf(callId: string, args: unknown, sessionId = "s1", name = "github_
 const ask = () => Promise.resolve({ kind: "ask" as const, reason: "need confirm" });
 const allow = () => Promise.resolve({ kind: "allow" as const });
 const deny = () => Promise.resolve({ kind: "deny" as const });
+/** 作用：模拟真实顺序——pre-execute 决策 → tools/execute 记录操作 → 审批到达。 */
+async function askAndRecord(gate: UniversalGate, callId: string, args: unknown, sessionId = "s1", name = "github_create_issue") {
+  const decision = await gate.handlePreExecute(execOf(callId, args, sessionId, name), ask);
+  await gate.handleExecute(execOf(callId, args, sessionId, name), async () => ({ ok: true }));
+  return decision;
+}
 async function approveOnce(gate: UniversalGate, callId: string) {
   // 作用：模拟 DSH answerer 返回 allowed-once 的 approval/request 处理
   return await gate.handleApprovalRequest({ callId }, async () => "allowed-once" as const);
@@ -49,14 +57,14 @@ describe("UniversalGate tools/pre-execute（规格 22 清单）", () => {
   });
   it("22.2 原 DENY 永远不能被 Lease 覆盖：即使存在有效 Lease 仍 deny", async () => {
     const { gate } = makeGate();
-    await gate.handlePreExecute(execOf("c1", { repo: "a/b" }), ask);
+    await askAndRecord(gate, "c1", { repo: "a/b" });
     await approveOnce(gate, "c1");
     const out = await gate.handlePreExecute(execOf("c2", { repo: "a/b" }), deny);
     expect(out.kind).toBe("deny");
   });
   it("22.3 ASK + allowed-once 签发 Lease，且 reason 明确包含 Scope/TTL 信息（规格 4.2）", async () => {
     const { gate, leases } = makeGate();
-    const askOut = await gate.handlePreExecute(execOf("c1", { repo: "a/b" }), ask);
+    const askOut = await askAndRecord(gate, "c1", { repo: "a/b" });
     expect(askOut.kind).toBe("ask");
     expect(askOut.reason).toContain("need confirm");
     expect(askOut.reason).toContain("TTL=60s");
@@ -68,11 +76,12 @@ describe("UniversalGate tools/pre-execute（规格 22 清单）", () => {
     expect(all[0].status).toBe("ACTIVE");
     expect(all[0].sessionId).toBe("s1");
     expect(all[0].sourceCallId).toBe("c1");
+    expect(all[0].kind).toBe("universal");
   });
   it("22.4/22.5/22.6 rejected/cancelled/unavailable 均不签发 Lease", async () => {
     for (const outcome of ["rejected", "cancelled", "unavailable"] as const) {
       const { gate, leases } = makeGate();
-      await gate.handlePreExecute(execOf("c1", { repo: "a/b" }), ask);
+      await askAndRecord(gate, "c1", { repo: "a/b" });
       const out = await gate.handleApprovalRequest({ callId: "c1" }, async () => outcome);
       expect(out).toBe(outcome);
       expect(await leases.list()).toHaveLength(0);
@@ -80,7 +89,7 @@ describe("UniversalGate tools/pre-execute（规格 22 清单）", () => {
   });
   it("22.7 Lease Reuse：同 Session + 同 Tool + 同 Scope + TTL 内 ask 直接转 allow", async () => {
     const { gate, audit } = makeGate();
-    await gate.handlePreExecute(execOf("c1", { repo: "a/b" }), ask);
+    await askAndRecord(gate, "c1", { repo: "a/b" });
     await approveOnce(gate, "c1");
     const again = await gate.handlePreExecute(execOf("c2", { repo: "a/b" }), ask);
     expect(again.kind).toBe("allow");
@@ -88,21 +97,21 @@ describe("UniversalGate tools/pre-execute（规格 22 清单）", () => {
   });
   it("22.8 Session Isolation：Session A 的 Lease 不能被 Session B 复用", async () => {
     const { gate } = makeGate();
-    await gate.handlePreExecute(execOf("c1", { repo: "a/b" }, "s1"), ask);
+    await askAndRecord(gate, "c1", { repo: "a/b" }, "s1");
     await approveOnce(gate, "c1");
     const out = await gate.handlePreExecute(execOf("c2", { repo: "a/b" }, "s2"), ask);
     expect(out.kind).toBe("ask");
   });
   it("22.9 Scope Isolation：exact args 下参数变化重新 Ask", async () => {
     const { gate } = makeGate();
-    await gate.handlePreExecute(execOf("c1", { repo: "a/b", title: "A" }), ask);
+    await askAndRecord(gate, "c1", { repo: "a/b", title: "A" });
     await approveOnce(gate, "c1");
     const out = await gate.handlePreExecute(execOf("c2", { repo: "a/b", title: "B" }), ask);
     expect(out.kind).toBe("ask");
   });
   it("22.10 TTL：模拟时间前进超过 TTL 后重新 Ask", async () => {
     const { gate } = makeGate();
-    await gate.handlePreExecute(execOf("c1", { repo: "a/b" }), ask);
+    await askAndRecord(gate, "c1", { repo: "a/b" });
     await approveOnce(gate, "c1");
     now += 60_001;
     const out = await gate.handlePreExecute(execOf("c2", { repo: "a/b" }), ask);
@@ -110,7 +119,7 @@ describe("UniversalGate tools/pre-execute（规格 22 清单）", () => {
   });
   it("22.11 Revoke：撤销后下一次重新 Ask", async () => {
     const { gate, leases } = makeGate();
-    await gate.handlePreExecute(execOf("c1", { repo: "a/b" }), ask);
+    await askAndRecord(gate, "c1", { repo: "a/b" });
     await approveOnce(gate, "c1");
     const [lease] = await leases.list();
     await leases.revoke(lease.id, "manual");
@@ -119,8 +128,8 @@ describe("UniversalGate tools/pre-execute（规格 22 清单）", () => {
   });
   it("22.12 Parallel Calls：两个并行调用按 callId 隔离，scope/lease 互不串", async () => {
     const { gate, leases, pending } = makeGate();
-    const outA = await gate.handlePreExecute(execOf("c1", { repo: "a/b", title: "A" }), ask);
-    const outB = await gate.handlePreExecute(execOf("c2", { repo: "a/b", title: "B" }), ask);
+    const outA = await askAndRecord(gate, "c1", { command: "Get-Date" }, "s1", "pwsh");
+    const outB = await askAndRecord(gate, "c2", { command: "Get-Process" }, "s1", "pwsh");
     expect(outA.kind).toBe("ask");
     expect(outB.kind).toBe("ask");
     expect(pending.size()).toBe(2);
@@ -131,16 +140,16 @@ describe("UniversalGate tools/pre-execute（规格 22 清单）", () => {
     expect(new Set(all.map((l) => l.scope.key)).size).toBe(2);
     expect(new Set(all.map((l) => l.sourceCallId))).toEqual(new Set(["c1", "c2"]));
   });
-  it("22.13 Cancellation：approval 取消后 pending 清理且无 Lease", async () => {
+  it("22.13 Cancellation：approval 取消后清理待办且无 Lease", async () => {
     const { gate, pending, leases } = makeGate();
-    await gate.handlePreExecute(execOf("c1", { repo: "a/b" }), ask);
+    await askAndRecord(gate, "c1", { repo: "a/b" });
     await gate.handleApprovalRequest({ callId: "c1" }, async () => "cancelled");
     expect(pending.size()).toBe(0);
     expect(await leases.list()).toHaveLength(0);
   });
   it("22.14 Canonical JSON：key 顺序不同的参数命中同一 Lease", async () => {
     const { gate } = makeGate();
-    await gate.handlePreExecute(execOf("c1", { repo: "a/b", title: "x" }), ask);
+    await askAndRecord(gate, "c1", { repo: "a/b", title: "x" });
     await approveOnce(gate, "c1");
     const out = await gate.handlePreExecute(execOf("c2", { title: "x", repo: "a/b" }), ask);
     expect(out.kind).toBe("allow");
@@ -161,7 +170,7 @@ describe("UniversalGate tools/pre-execute（规格 22 清单）", () => {
   });
   it("tools/result：记录 TOOL_SUCCESS 并清理 pending", async () => {
     const { gate, pending, audit } = makeGate();
-    await gate.handlePreExecute(execOf("c1", { repo: "a/b" }), ask);
+    await askAndRecord(gate, "c1", { repo: "a/b" });
     await approveOnce(gate, "c1");
     gate.handleToolResult(execOf("c1", { repo: "a/b" }), { isError: false });
     expect(pending.size()).toBe(0);
@@ -198,7 +207,7 @@ describe("UniversalGate tools/pre-execute（规格 22 清单）", () => {
       ...DEFAULT_UNIVERSAL_POLICY,
       rules: [{ match: "github_create_issue", scope: { mode: "fields", paths: ["repo"] } }],
     });
-    await gate.handlePreExecute(execOf("c1", { repo: "a/b", title: "A" }), ask);
+    await askAndRecord(gate, "c1", { repo: "a/b", title: "A" });
     await approveOnce(gate, "c1");
     const out = await gate.handlePreExecute(execOf("c2", { repo: "a/b", title: "B" }), ask);
     expect(out.kind).toBe("allow");
@@ -217,7 +226,7 @@ describe("UniversalGate tools/pre-execute（规格 22 清单）", () => {
   });
   it("P0-3 不变量：approval/request 处理器只观察、绝不合成 outcome——sentinel 必须原样（同一引用）返回", async () => {
     const { gate, leases, pending } = makeGate();
-    await gate.handlePreExecute(execOf("c1", { repo: "a/b" }), ask);
+    await askAndRecord(gate, "c1", { repo: "a/b" });
     const sentinel = Object.freeze({ decision: "allowed-once" });
     const spy = vi.fn(async () => sentinel);
     const out = await gate.handleApprovalRequest({ callId: "c1" }, spy);
@@ -229,25 +238,23 @@ describe("UniversalGate tools/pre-execute（规格 22 清单）", () => {
   it("P0-3 不变量：rejected / cancelled / unavailable / allowed-once 四种下游结果全部原样引用返回", async () => {
     for (const decision of ["allowed-once", "rejected", "cancelled", "unavailable"]) {
       const { gate } = makeGate();
-      await gate.handlePreExecute(execOf("c1", { repo: "a/b" }), ask);
+      await askAndRecord(gate, "c1", { repo: "a/b" });
       const sentinel = Object.freeze({ decision });
       const out = (await gate.handleApprovalRequest({ callId: "c1" }, async () => sentinel)) as unknown as object;
       expect(out).toBe(sentinel);
     }
   });
-  it("P0-3 不变量：无 pending 的 callId 必须原样透传下游结果且不签发 Lease", async () => {
+  it("P0-3 不变量：无记录（Guard 未接管）的 callId 必须原样透传下游结果且不签发 Lease", async () => {
     const { gate, leases } = makeGate();
     const sentinel = Object.freeze({ decision: "allowed-once" });
     const out = await gate.handleApprovalRequest({ callId: "unmanaged" }, async () => sentinel);
     expect(out).toBe(sentinel);
     expect(await leases.list()).toHaveLength(0);
   });
-  it("P0-3 不变量：签发失败（缺失 TTL，防御路径）也不得改写下游 outcome", async () => {
-    const { gate, pending } = makeGate();
+  it("P0-3 不变量：签发失败也不得改写下游 outcome（Fail Closed）", async () => {
+    const { gate } = makeGate();
     const deps = (gate as unknown as { deps: { leases: LeaseManager } }).deps;
-    await gate.handlePreExecute(execOf("c1", { repo: "a/b" }), ask);
-    // 人为制造非法 TTL：签发必然抛错，验证 handleApprovalRequest 仍返回下游原值（Fail Closed 不改写）
-    pending.get("c1")!.ttlSeconds = 0;
+    await askAndRecord(gate, "c1", { repo: "a/b" });
     const originalIssue = deps.leases.issue.bind(deps.leases);
     deps.leases.issue = async () => {
       throw new Error("LEASE_TTL_INVALID: forged for test");
@@ -257,7 +264,7 @@ describe("UniversalGate tools/pre-execute（规格 22 清单）", () => {
     expect(out).toBe(sentinel);
     deps.leases.issue = originalIssue;
   });
-  it("install：注册四个 hook（前三个 prepend，含 P0-2 的 tools/execute）且 dispose 正常", () => {
+  it("install：注册四个 hook（前三个 prepend，含 tools/execute）且 dispose 正常", () => {
     const { gate, pending } = makeGate();
     const registrations: { event: string; options?: { prepend?: boolean } }[] = [];
     const disposers: (() => void)[] = [];
@@ -298,8 +305,7 @@ describe("UniversalGate 免打扰窗口（限时完全访问的审批放行层�
       leases,
       pending,
       audit,
-      // 注入 settings 才走「按操作记录 + 免打扰」的新语义
-      settings: { active: true, mode: "same-operation", reuseTtlSeconds: 1800 },
+      settings: { active: true, reuseTtlSeconds: 1800 },
       dnd,
       now: clock,
     });

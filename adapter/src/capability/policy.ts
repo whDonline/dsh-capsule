@@ -9,8 +9,7 @@ export interface FieldsScopeConfig {
 export type ScopeConfig =
   | { mode: "exact-arguments" }
   | FieldsScopeConfig
-  | { mode: "tool" }
-  | { mode: "sandbox-escalation" };
+  | { mode: "tool" };
 export interface ToolLeaseRule {
   match: string;
   enabled?: boolean;
@@ -112,6 +111,5 @@ export function defaultScopeConfig(config: UniversalPolicyConfig): ScopeConfig {
     return { mode: "fields", paths };
   }
   if (config.defaultScope === "tool") return { mode: "tool" };
-  if (config.defaultScope === "sandbox-escalation") return { mode: "sandbox-escalation" };
   return { mode: "exact-arguments" };
 }

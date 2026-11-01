@@ -1,11 +1,12 @@
 import { canonicalize, sha256Scope } from "./canonical.js";
-import { escalationScopeDisplay, escalationScopeKey, parseEscalation } from "./escalation.js";
 import { GuardError } from "./errors.js";
+import { parseEscalation } from "./escalation.js";
+import { operationFingerprint } from "./operation.js";
 import type { ResolvedToolPolicy } from "./policy.js";
 import type { CapabilityScope } from "./types.js";
 // 作用：Scope Resolver（重构规格第 5.4 节）——用确定性规则生成 Scope，禁止 LLM/字符串启发式
-// 猜测 Provider/Resource/Action；四种模式：exact-arguments（默认最保守）/ fields（用户显式配置）/
-// tool（最宽）/ sandbox-escalation（P0-2：沙箱升级，按 (toolName, 目标模式) 语义复用）。
+// 猜测 Provider/Resource/Action；三种模式：exact-arguments（默认最保守）/ fields（用户显式配置）/
+// tool（最宽）。
 const SENSITIVE_KEY_PATTERN = /(token|secret|password|authorization|cookie|credential|api[_-]?key)/i;
 const DISPLAY_MAX_LENGTH = 160;
 export class ScopeResolver {
@@ -15,17 +16,14 @@ export class ScopeResolver {
     if (mode === "exact-arguments") return this.resolveExactArguments(input.toolName, input.arguments);
     if (mode === "fields") return this.resolveFields(input.toolName, input.arguments, (policy.scope as { paths: string[] }).paths);
     if (mode === "tool") return this.resolveToolLevel(input.toolName);
-    if (mode === "sandbox-escalation") return this.resolveSandboxEscalation(input.toolName, input.arguments);
     throw new GuardError("LEASE_SCOPE_INVALID", `unsupported scope mode ${String(mode)}`);
   }
   private resolveExactArguments(toolName: string, args: unknown): CapabilityScope {
-    // 作用：默认零配置策略——Scope = SHA-256(toolName + canonical JSON(arguments))，
-    // 只有完全相同的调用可复用 Lease，参数变化即重新 Ask（规格 5.4.1）
-    return {
-      kind: "exact-arguments",
-      key: sha256Scope({ tool: toolName, args }),
-      display: `tool=${toolName} args=${displayOf(args)}`,
-    };
+    // 作用：默认零配置策略——复用单位就是「同一条操作」：工具名 + 参数（去掉模型自由文本 justification）
+    // + 目标沙箱档位。与 tools/execute 记录的操作指纹逐字一致，因此 pre-execute 的复用判断与
+    // approval/request 签发的授权永远指向同一个 key（2026-11-01 对齐；此前两条路径各算一套，互不命中）。
+    const fingerprint = operationFingerprint(toolName, args, parseEscalation(args)?.requestedMode);
+    return { kind: "exact-arguments", key: fingerprint.key, display: fingerprint.display };
   }
   private resolveFields(toolName: string, args: unknown, paths: string[]): CapabilityScope {
     // 作用：用户显式配置的宽 scope——只对指定字段生成 Scope，其余字段变化可复用（规格 5.4.2）；
@@ -53,21 +51,6 @@ export class ScopeResolver {
       kind: "tool",
       key: `tool:${toolName}`,
       display: `tool=${toolName}（本 Session 内该工具全部调用）`,
-    };
-  }
-  private resolveSandboxEscalation(toolName: string, args: unknown): CapabilityScope {
-    // 作用：沙箱升级语义 Scope（P0-2）——key = SHA-256(toolName + 目标模式)，与参数原文无关：
-    // 用户批准「本会话内该工具可升级到某模式」后，同类升级都可复用；这是 DSH 原生缺失的「有界授权」。
-    // 参数中若不含可识别的升级请求（parseEscalation 返回 undefined）则抛错，上层 Fail Closed 保持原 ask。
-    const escalation = parseEscalation(args);
-    if (!escalation) {
-      throw new GuardError("LEASE_SCOPE_INVALID", `tool ${toolName} has no recognizable sandbox escalation request`);
-    }
-    const key = escalationScopeKey({ toolName, requestedMode: escalation.requestedMode });
-    return {
-      kind: "sandbox-escalation",
-      key,
-      display: escalationScopeDisplay({ toolName, requestedMode: escalation.requestedMode }, escalation.justification),
     };
   }
 }

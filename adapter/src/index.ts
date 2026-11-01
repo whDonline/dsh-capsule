@@ -1,11 +1,11 @@
 import { AuditService } from "./audit/audit-service.js";
+import { isAuditDecision } from "./audit/catalog.js";
 import { sha256Scope } from "./capability/canonical.js";
 import { LeaseManager } from "./capability/lease-manager.js";
 import { MemoryLeaseStore } from "./capability/lease-store.js";
 import { PendingRegistry } from "./capability/pending.js";
 import { DEFAULT_UNIVERSAL_POLICY, PolicyResolver, type UniversalPolicyConfig } from "./capability/policy.js";
 import { ScopeResolver } from "./capability/scope-resolver.js";
-import { SandboxGrantManager, type SandboxContext } from "./capability/sandbox-grant.js";
 import { DndManager } from "./capability/dnd.js";
 import { isSandboxMode, type SandboxMode } from "./capability/escalation.js";
 import { DEFAULTABLE_SCOPE_MODES, SCOPE_MODES, isScopeMode, type ScopeMode } from "./capability/scope-modes.js";
@@ -24,35 +24,33 @@ import { registerGuardWebRoutes, startConsoleServer, DEFAULT_CONSOLE_HOST, DEFAU
 import type { ConsoleHttpConfig } from "./console/types.js";
 export type CapsuleHostContext = Record<string, unknown>;
 export type DisposeHook = () => void | Promise<void>;
-// 作用：P0-2 宿主适配器——把 DSH 的会话沙箱模式读写能力收敛成 SandboxContext 最小接口。
+// 作用：宿主适配器——把 DSH 的「读取会话沙箱模式」能力收敛成一个只有读取的最小接口。
+// 本插件**不写**沙箱档位（2026-11-01：提升档位 + 回滚整条链路已删除），因此这里没有 setter，
+// 编译期就保证 Guard 无法改动用户的沙箱设置。
 // 【cordis API 事实（2026-09-14 由插件装载测试发现）】服务必须用 `ctx.get(name)` 读取：
 //   inject 声明的是**硬依赖**，而未经 inject 的服务用属性访问（`ctx.sessionProjections`）会被
 //   cordis 代理直接抛 `cannot get property "…" without inject`。`ctx.get()` 在服务缺失时返回
-//   undefined，正是"缺失即降级"所需的语义，因此本适配器只依赖 `ctx.get` 与 `ctx.on` 两个方法。
+//   undefined，正是"缺失即降级"所需的语义，因此本适配器只依赖 `ctx.get`。
 // 读取：ctx.get("sessionProjections").stateOf(session, "sandboxMode")
-// 写入：session.append("sandbox/mode", { mode })（与 dsh-sandbox-policy 的 setSandboxMode 同源）
-// 任一依赖缺失时：读返回保守默认 workspace-write，写静默忽略 → Guard 无法收紧或放宽沙箱，
-// 只会回到 DSH 原生审批语义（用户多被问一次，不会越权）。
-export function buildSandboxContext(ctx: CapsuleHostContext, fallbackMode: SandboxMode = "workspace-write"): SandboxContext {
+// 依赖缺失时：读返回保守默认 workspace-write → 免打扰窗口的「完全访问下不可开启」判断会退化为
+// 不拦截；这只影响提示准确性，不涉及任何权限放宽。
+export interface SandboxModeReader {
+  /** 读取该 session 当前生效的沙箱模式。 */
+  sessionSandboxMode(session: unknown): SandboxMode;
+}
+export function buildSandboxModeReader(ctx: CapsuleHostContext, fallbackMode: SandboxMode = "workspace-write"): SandboxModeReader {
   const readMode = (session: unknown): SandboxMode => {
     const projections = getService(ctx, "sessionProjections") as { stateOf?: unknown } | undefined;
     if (!projections || typeof projections.stateOf !== "function") return fallbackMode;
     try {
       const state = (projections.stateOf as (session: unknown, key: string) => unknown)(session, "sandboxMode");
-      if (state === "read-only" || state === "workspace-write" || state === "danger-full-access") return state;
+      if (isSandboxMode(state)) return state;
     } catch {
       // 投影读取异常：按缺失处理（保守默认），绝不猜测
     }
     return fallbackMode;
   };
-  const writeMode = (session: unknown, mode: SandboxMode): void => {
-    const append = session && typeof session === "object" ? (session as { append?: unknown }).append : undefined;
-    if (typeof append !== "function") return;
-    const id = session && typeof session === "object" ? (session as { id?: unknown }).id : undefined;
-    if (typeof id !== "string" && typeof id !== "number") return;
-    (append as (type: string, data: { mode: SandboxMode }) => unknown).call(session, "sandbox/mode", { mode });
-  };
-  return { sessionSandboxMode: readMode, setSessionSandboxMode: writeMode };
+  return { sessionSandboxMode: readMode };
 }
 function getService(ctx: CapsuleHostContext, name: string): unknown {
   // 作用：按 cordis 的方式解析宿主服务——只走 `ctx.get(name)`（缺失返回 undefined，不抛错）。
@@ -65,22 +63,22 @@ function getService(ctx: CapsuleHostContext, name: string): unknown {
     return undefined;
   }
 }
-export { AuditService, GovernanceConsole, GovernancePolicy, GuardActions, LeaseManager, MemoryLeaseStore, PendingRegistry, PolicyResolver, SandboxGrantManager, ScopeResolver, UniversalGate, createHostSessionDirectory, registerGuardWebRoutes, startConsoleServer, DEFAULT_UNIVERSAL_POLICY, DEFAULT_CONSOLE_HOST, DEFAULT_CONSOLE_PORT, DEFAULTABLE_SCOPE_MODES, GUARD_WEB_PREFIX, ROUTE_RETRY_DELAYS_MS, SCOPE_MODES, guardRouteStatus, isScopeMode, sha256Scope };
+export { AuditService, GovernanceConsole, GovernancePolicy, GuardActions, LeaseManager, MemoryLeaseStore, PendingRegistry, PolicyResolver, ScopeResolver, UniversalGate, createHostSessionDirectory, registerGuardWebRoutes, startConsoleServer, DEFAULT_UNIVERSAL_POLICY, DEFAULT_CONSOLE_HOST, DEFAULT_CONSOLE_PORT, DEFAULTABLE_SCOPE_MODES, GUARD_WEB_PREFIX, ROUTE_RETRY_DELAYS_MS, SCOPE_MODES, guardRouteStatus, isScopeMode, sha256Scope };
 export type { UniversalPolicyConfig } from "./capability/policy.js";
 export type { ScopeMode } from "./capability/scope-modes.js";
 export type { ConsoleHttpConfig } from "./console/types.js";
 export type { ConsoleHttpHandle, GuardRouteStatus } from "./console/http-server.js";
 export type { GuardMode, GuardSettingsSnapshot } from "./capability/settings.js";
 // 作用：Guard 插件完整配置——策略项（Partial<UniversalPolicyConfig>）+ Phase 4 Governance Console
-// 查看器开关（默认开启；提供授权剩余时间、审计与范围挡位配置）+ 沙箱档位低频回滚节拍。
+// 查看器开关（默认开启；提供授权剩余时间、审计与范围挡位配置）+ 免打扰窗口结算节拍。
 export interface GuardPluginConfig extends Partial<UniversalPolicyConfig> {
   console?: ConsoleHttpConfig;
-  /** 低频结算节拍（毫秒）：默认 30000；0 表示关闭（关闭后档位只在下次工具调用 / 用户点按钮时回收）。
-   * 【不是安全机制】授权是否有效始终在读写时实时判定，本定时器只负责让「到期后档位回收」更及时。 */
+  /** 低频结算节拍（毫秒）：默认 30000；0 表示关闭。只用于让免打扰窗口的过期/档位漂移结算更及时；
+   * 授权是否有效始终在读写时实时判定，因此它【不是安全机制】。 */
   sweepIntervalMs?: number;
   /** 用户开关的初始值（默认 true）。运行期可在「能力授权」页切换，不落盘。 */
   modeEnabled?: boolean;
-  /** ①② 复用时长（秒）；缺省沿用 defaultTtlSeconds */
+  /** ① ② 复用时长（秒）；缺省沿用产品默认 */
   reuseTtlSeconds?: number;
   /** 免打扰窗口的默认时长（秒） */
   dndDurationSeconds?: number;
@@ -93,7 +91,7 @@ export interface GuardPluginConfig extends Partial<UniversalPolicyConfig> {
 export function defaultAuditFile(): string {
   return join(homedir(), ".dsh", "capability-guard", "audit.ndjson");
 }
-/** 默认低频结算节拍——多快把「已失效授权的会话宽档位」收回去（治理台会显示「待回滚」直到收回）。 */
+/** 默认低频结算节拍——多快把已到期的免打扰窗口收掉（治理台会显示窗口剩余时间）。 */
 export const DEFAULT_SWEEP_INTERVAL_MS = 30_000;
 // 作用：解析并校验结算节拍——必须是非负整数（0 = 关闭）；非法值 Fail Closed 直接拒绝装配，
 // 避免出现「配了个 NaN 就静默不结算」的难以察觉的偏差。
@@ -121,7 +119,7 @@ export const inject = ["tools", "approval"];
 export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig): Promise<DisposeHook> {
   // 作用：组装 Guard 并安装到 DSH——策略来自插件配置（缺省 DEFAULT_UNIVERSAL_POLICY：默认 TTL 60s、
   // 上限 1800s、默认 exact-arguments scope）；任何安装失败立即抛错（Fail Closed，绝不静默降级）。
-  // 治理台聚合授权、工具调用与审计；不注册凭证服务或代理执行工具。
+  // 治理台聚合授权、工具调用与审计；不注册凭证服务或代理执行工具，也不写沙箱档位。
   const deployment = {
     enabled: config?.enabled ?? DEFAULT_UNIVERSAL_POLICY.enabled,
     rules: config?.rules ?? DEFAULT_UNIVERSAL_POLICY.rules,
@@ -137,7 +135,7 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
     source: "plugin-config",
   });
   const policyConfig = (): UniversalPolicyConfig => ({ ...governance.config, defaultScopePaths: deployment.defaultScopePaths });
-  // 用户可见的三档设置（开关 / 同操作 / 同族 / 免打扰）。与部署策略相互独立：
+  // 用户可见的设置（开关 / 复用时长 / 免打扰默认时长）。与部署策略相互独立：
   // 部署 enabled=false 表示"不装配"，这里的 enabled=false 表示"装好了但用户关掉了"。
   const settings = new GuardSettings({
     initial: {
@@ -155,12 +153,17 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
   const store = new MemoryLeaseStore();
   const audit = new AuditService(1000, journal ? (event) => journal.append({ type: "event", event }) : undefined);
   if (journal) {
-    // 重放：同一 Lease 的多条记录只保留最后一条状态（签发 → 撤销/过期），避免重复入库
+    // 重放：同一 Lease 的多条记录只保留最后一条状态（签发 → 撤销/过期），避免重复入库。
+    // 兼容旧日志：已移除的决策（沙箱档位提升/回滚）与旧的 sandbox-mode 授权一律跳过——
+    // 那些授权对应的能力已经不存在，重放它们只会让治理台显示一条永远不会生效的"授权"。
     const events: ToolAuditEvent[] = [];
     const latestLeases = new Map<string, CapabilityLease>();
     for (const record of journal.load()) {
-      if (record.type === "event") events.push(record.event);
-      else latestLeases.set(record.lease.id, record.lease);
+      if (record.type === "event") {
+        if (isAuditDecision(record.event?.decision)) events.push(record.event);
+      } else if (record.lease?.kind === "universal") {
+        latestLeases.set(record.lease.id, record.lease);
+      }
     }
     audit.restore(events);
     for (const lease of latestLeases.values()) {
@@ -172,10 +175,6 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
     }
   }
   const leases = new LeaseManager(store, Date.now, journal ? (lease) => journal.append({ type: "lease", lease }) : undefined);
-  // P0-2：沙箱模式有界授权。宿主服务缺失时该链路自动失效（Fail Closed：不提升 = 不越权），
-  // 其余 Universal Mode 行为完全不受影响。实例在此保留引用：治理台要读它的档位状态，
-  // 收缩型动作要经它回滚档位（此前只注入 Gate，导致治理台完全看不到沙箱状态）。
-  const sandboxGrants = new SandboxGrantManager(buildSandboxContext(ctx), leases);
   // 免打扰窗口（2026-11-01 定稿）：任务级"限时完全访问"的审批放行层。
   // 只放行窗口内带 requestedMode 的已记录升级；不改沙箱档位、不改审批策略、不签发 Lease。
   const resolveSession = (sessionId: string): unknown => {
@@ -200,7 +199,7 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
       }
     }
     try {
-      return buildSandboxContext(ctx).sessionSandboxMode(session);
+      return buildSandboxModeReader(ctx).sessionSandboxMode(session);
     } catch {
       return undefined;
     }
@@ -216,7 +215,6 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
     leases,
     pending: new PendingRegistry(),
     audit,
-    sandboxGrants,
     dnd,
     // 用户开关关闭时所有 hook 直接透传（不签发、不提升、不改写任何状态）
     settings,
@@ -225,33 +223,15 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
     audit,
     leases,
     guardName: name,
-    // 治理台的两个状态来源：授权来自 LeaseManager，档位来自 SandboxGrantManager 的实时投影
-    sandbox: { states: () => sandboxGrants.grantStates(), lastOutcomeOf: (sessionId: string) => sandboxGrants.lastOutcomeOf(sessionId) },
     // 免打扰窗口是独立于 Lease 的实时状态（不进授权列表、不伪装成授权）
     dnd: { view: (sessionId: string) => dnd.view(sessionId) },
-    // 宿主实时档位：免打扰据此判断"完全访问下不可开启"，tab 也据此显示当前档位
+    // 宿主实时档位：只用于展示「当前是哪一档」与免打扰的适用性判断
     currentMode: resolveMode,
     // 会话显示名（可选能力：读不到标题就降级为 cwd / 短 ID）
     sessions: createHostSessionDirectory(ctx),
   });
-  // 收缩型治理动作：撤销授权 / 回滚档位。二者都只会让权限变小（见 console/actions.ts 注释）
-  const actions = new GuardActions({
-    leases,
-    sandbox: sandboxGrants,
-    audit,
-    // 免打扰窗口要真正生效必须能解析到会话（缺失时动作层拒绝开窗，Fail Closed）
-    resolveSession,
-    maxTtlSeconds: () => governance.config.maxTtlSeconds,
-    // 只允许给「配置里真的走沙箱升级链路」的工具开窗（防止把窗口变成任意工具的放宽通道）
-    allowTool: (toolName: string) => {
-      try {
-        const resolved = new PolicyResolver(policyConfig).resolve(toolName);
-        return resolved.enabled && resolved.scope.mode === "sandbox-escalation";
-      } catch {
-        return false;
-      }
-    },
-  });
+  // 收缩型治理动作：撤销授权（只会让权限变小）
+  const actions = new GuardActions({ leases, audit });
   if (typeof (ctx as { on?: unknown }).on !== "function") {
     throw new Error("GUARD_INSTALL_FAILED: ctx.on unavailable");
   }
@@ -260,8 +240,6 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
   const consoleActions = {
     // 显式委托：GuardActions 是 class，方法在原型上，展开运算符拷不过来
     revokeSession: (sessionId: string) => actions.revokeSession(sessionId),
-    restoreSandbox: (sessionId: string) => actions.restoreSandbox(sessionId),
-    openWindow: (request: Parameters<typeof actions.openWindow>[0]) => actions.openWindow(request),
     startDnd: (sessionId: string, ttlSeconds: number) => {
       if (!settings.active) throw new Error("GUARD_DND_INVALID: 能力授权已关闭，免打扰不会生效");
       if (resolveSession(sessionId) === undefined) throw new Error("GUARD_DND_INVALID: session not resolvable");
@@ -274,17 +252,13 @@ export async function apply(ctx: CapsuleHostContext, config?: GuardPluginConfig)
       return { sessionId, expiresAt: view.expiresAt };
     },
   };
-  // 低频结算：把「授权已失效但档位还没收回」的会话宽模式及时收回去。
-  // 正确性不依赖它（安全性由 LeaseManager 实时判定），关闭它只会让回滚推迟到下次工具调用。
+  // 低频结算：让免打扰窗口的「已到期 / 原生档位被改」及时落到状态与审计上。
+  // 正确性不依赖它（窗口有效性在每次判定时实时比较），关闭它只会让状态晚一点更新。
   const sweepIntervalMs = resolveSweepInterval(config);
   let sweepTimer: ReturnType<typeof setInterval> | undefined;
   if (sweepIntervalMs > 0) {
     sweepTimer = setInterval(() => {
-      // 免打扰窗口的过期/档位漂移不依赖定时器（读写时实时判定），这里只是让状态与审计更及时。
       dnd.sweep();
-      void gate.settleNow().catch((err: unknown) => {
-        process.stderr.write(`[dsh-guard] sandbox sweep failed: ${String(err)}\n`);
-      });
     }, sweepIntervalMs);
     // 定时器不应阻止进程退出
     (sweepTimer as { unref?: () => void }).unref?.();

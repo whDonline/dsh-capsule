@@ -1,14 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { GuardError } from "./errors.js";
 import type { LeaseStore } from "./lease-store.js";
-import type { CapabilityLease, CapabilityScope, LeaseKind } from "./types.js";// 作用：LeaseManager（重构规格第 5.7 节）——只负责 issue / validate / findMatching / revoke /
+import type { CapabilityLease, CapabilityScope } from "./types.js";// 作用：LeaseManager（重构规格第 5.7 节）——只负责 issue / validate / findMatching / revoke /
 // revokeSession / list；禁止混入 Approval UI、Tool Hook、Credential、Provider 逻辑。
 export interface IssueLeaseInput {
   sessionId: string;
   toolName: string;
   scope: CapabilityScope;
   ttlSeconds: number;
-  kind?: LeaseKind;
   sourceCallId?: string;
 }
 export class LeaseManager {
@@ -44,7 +43,7 @@ export class LeaseManager {
     const issuedAt = this.now();
     const lease: CapabilityLease = {
       id: randomUUID(),
-      kind: input.kind ?? "universal",
+      kind: "universal",
       sessionId: input.sessionId,
       toolName: input.toolName,
       scope: input.scope,
@@ -57,12 +56,10 @@ export class LeaseManager {
     this.notify(lease);
     return lease;
   }
-  async findMatching(sessionId: string, toolName: string, scopeKey: string, kind?: LeaseKind): Promise<CapabilityLease | undefined> {
+  async findMatching(sessionId: string, toolName: string, scopeKey: string): Promise<CapabilityLease | undefined> {
     // 作用：查找并校验可复用 Lease——store 命中后 validate（实时 TTL 比较 + 惰性标记 EXPIRED）；
     // 任何无效（撤销/过期/不存在）统一返回 undefined，由上层保持 ask 重新走授权。
-    // kind 可选：沙箱授权（sandbox-mode）必须按种类精确匹配，避免与 exact-arguments 等同 scope key 的
-    // 其他种类 Lease 互相复用（不同种类授权的"效果"完全不同，混用会造成越权）
-    const lease = await Promise.resolve(this.store.findMatching({ sessionId, toolName, scopeKey, kind }));
+    const lease = await Promise.resolve(this.store.findMatching({ sessionId, toolName, scopeKey }));
     if (!lease) return undefined;
     try {
       return this.validate(lease);
@@ -71,9 +68,9 @@ export class LeaseManager {
     }
   }
   get(id: string): CapabilityLease | undefined {
-    // 作用：按 id 读取单条 Lease（不校验、不改状态）——供沙箱授权回收路径实时查询「该 Lease 是否还活着」。
-    // 刻意不做 validate：调用方需要区分「不存在 / 已撤销 / 已过期」三种失效情形并统一按失效处理，
-    // 抛错反而会打断批量回收（settle）流程；安全判定请改用 isLive()。
+    // 作用：按 id 读取单条 Lease（不校验、不改状态）——供审计与诊断路径实时查询「该 Lease 是否还活着」。
+    // 刻意不做 validate：调用方需要区分「不存在 / 已撤销 / 已过期」三种失效情形并统一按失效处理；
+    // 安全判定请改用 isLive()。
     return this.store.get(id) as CapabilityLease | undefined;
   }
   isLive(id: string): boolean {

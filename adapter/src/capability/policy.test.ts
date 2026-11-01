@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_UNIVERSAL_POLICY, PolicyResolver } from "./policy.js";
 import { DEFAULTABLE_SCOPE_MODES } from "./scope-modes.js";
 describe("默认挡位白名单（DEFAULTABLE_SCOPE_MODES）", () => {
-  it("fields 不能作为默认挡位：兜底路径对多数工具缺失，只会让它永远无法复用", () => {
-    expect([...DEFAULTABLE_SCOPE_MODES].sort()).toEqual(["exact-arguments", "sandbox-escalation"]);
+  it("只有 exact-arguments 能作为默认挡位：fields 需要显式字段，tool 范围过宽", () => {
+    expect([...DEFAULTABLE_SCOPE_MODES]).toEqual(["exact-arguments"]);
     expect(DEFAULTABLE_SCOPE_MODES).not.toContain("fields");
     expect(DEFAULTABLE_SCOPE_MODES).not.toContain("tool");
   });

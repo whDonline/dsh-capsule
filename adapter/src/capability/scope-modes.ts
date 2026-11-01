@@ -3,7 +3,7 @@
 // PolicyResolver / GovernancePolicy / Console API / 前端 UI 共用（避免前后端各自硬编码一份）。
 // 本文件不引入任何 DSH/Cordis 依赖。
 import { GuardError } from "./errors.js";
-export type ScopeMode = "exact-arguments" | "fields" | "tool" | "sandbox-escalation";
+export type ScopeMode = "exact-arguments" | "fields" | "tool";
 export interface ScopeModeMeta {
   id: ScopeMode;
   /** 治理页面上的中文标签 */
@@ -11,7 +11,7 @@ export interface ScopeModeMeta {
   /** 一句话说明该挡位把什么纳入复用范围 */
   summary: string;
   /** 复用范围由宽到窄的风险提示（页面据此给出警示文案） */
-  risk: "narrowest" | "narrow" | "wide" | "escalation";
+  risk: "narrowest" | "narrow" | "wide";
   /** fields 挡位需要字段路径；其余挡位不使用该值 */
   defaultPaths?: readonly string[];
 }
@@ -28,12 +28,6 @@ export const SCOPE_MODES: readonly ScopeModeMeta[] = [
     summary: "只把指定字段纳入复用键，其余参数变化不重新询问；未配置字段时退化为兜底字段集合。",
     risk: "narrow",
     defaultPaths: ["path", "file_path"],
-  },
-  {
-    id: "sandbox-escalation",
-    label: "sandbox-escalation（按工具与目标沙箱档位）",
-    summary: "只对带沙箱升级参数的调用生效，复用键为「工具名 + 目标档位」，且会提升会话沙箱模式。",
-    risk: "escalation",
   },
   {
     id: "tool",
@@ -53,8 +47,10 @@ export const SCOPE_MODE_IDS: readonly ScopeMode[] = SCOPE_MODES.map((mode) => mo
  *     结果不是"复用键更窄"，而是**这条授权永远用不上、每次都要问**——比默认挡位还吵。
  *   fields 仍然可以在 `rules[].scope.mode = "fields"` 里按工具显式配置（那时 paths 是明确的），
  *   只是不能作为"一键默认值"。
+ * 【为什么只剩 exact-arguments（2026-11-01）】`sandbox-escalation` 已随「提升沙箱档位」整条链路移除：
+ * 本插件不改写会话档位，批准一次就是「这一条操作在 TTL 内不再问」，默认挡位因此只有最保守的一种。
  */
-export const DEFAULTABLE_SCOPE_MODES: readonly ScopeMode[] = ["exact-arguments", "sandbox-escalation"];
+export const DEFAULTABLE_SCOPE_MODES: readonly ScopeMode[] = ["exact-arguments"];
 export function isScopeMode(value: unknown): value is ScopeMode {
   return typeof value === "string" && (SCOPE_MODE_IDS as readonly string[]).includes(value);
 }

@@ -13,11 +13,25 @@ describe("ScopeResolver", () => {
     expect(a.key).toBe(b.key);
     expect(a.key).not.toBe(c.key);
   });
-  it("display 脱敏：敏感 key 的值替换为 ***，不出现原文", () => {
+  it("exact-arguments 的展示串不输出参数值（隐私），也不出现敏感原文", () => {
     const policy = policyOf({ mode: "exact-arguments" });
     const scope = resolver.resolve({ toolName: "t", arguments: { token: "ghp_secret_value", repo: "a/b" } }, policy);
-    expect(scope.display).toContain("***");
+    expect(scope.display).toContain("token");
     expect(scope.display).not.toContain("ghp_secret_value");
+    expect(scope.display).not.toContain("a/b");
+    // shell 类工具展示脱敏后的命令文本（便于审计看出批准的是哪条命令）
+    const command = resolver.resolve({ toolName: "pwsh", arguments: { command: "gh auth login --with-token ghp_secret_value" } }, policy);
+    expect(command.display).toContain("pwsh");
+    expect(command.display).not.toContain("ghp_secret_value");
+  });
+  it("exact-arguments 把目标沙箱档位纳入 key：同一条命令升不同档位是两条操作", () => {
+    const policy = policyOf({ mode: "exact-arguments" });
+    const args = { command: "Set-Content C:\\x", sandbox_permissions: "workspace-write", justification: "第一次" };
+    const a = resolver.resolve({ toolName: "pwsh", arguments: args }, policy);
+    const b = resolver.resolve({ toolName: "pwsh", arguments: { ...args, justification: "换个措辞" } }, policy);
+    const c = resolver.resolve({ toolName: "pwsh", arguments: { ...args, sandbox_permissions: "danger-full-access" } }, policy);
+    expect(a.key).toBe(b.key);
+    expect(a.key).not.toBe(c.key);
   });
   it("fields：指定字段相同即同 scope，其余字段可变（规格 5.4.2）", () => {
     const policy = policyOf({ mode: "fields", paths: ["repo"] });

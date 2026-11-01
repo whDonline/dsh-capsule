@@ -1,21 +1,14 @@
 import type { AuditDecision, ToolAuditEvent } from "../audit/types.js";
 import type { SandboxMode } from "../capability/escalation.js";
 import type { CapabilityLease, LeaseKind, ScopeKind } from "../capability/types.js";
-import type { SandboxModeOutcome, SessionGrantState } from "../capability/sandbox-grant.js";
 // 作用：治理台只读视图——会话、授权与决策记录；不暴露原始工具参数。
 // 2026-10-31 清理：plugins / tools / leases / activity 四个快照字段没有任何界面或生产代码读取
 //（只有测试在读），已随「无调用方的冗余」一并移除；需要原始事件请用 /api/audit，需要授权明细请看 sessions。
-/** 授权（Lease）是否仍然有效——与沙箱档位是否已恢复是【两个独立状态】，不得合并成一个倒计时。 */
+// 2026-11-01 清理：沙箱档位提升/回滚链路删除后，会话视图里的 sandbox 只剩「宿主当前档位」这一项读数；
+// raised / pending-restore / restored / user-override 这些状态机字段全部移除（它们描述的是 Guard 改写过档位，
+// 而本插件从 2026-11-01 起不再写沙箱档位）。
+/** 授权（Lease）是否仍然有效——四态只由 Lease 自身决定。 */
 export type ConsoleAuthState = "active" | "expiring" | "expired" | "revoked" | "none";
-/** 沙箱档位状态——回答「那一次放宽是否已经收回去了」。语义逐条对应 capability/sandbox-grant.ts：
- *   raised          Guard 提升过档位，且授权仍有效
- *   unchanged       授权仍有效，但档位本来就够宽（Guard 没改过）
- *   user-override   档位现在是用户自己设定的值（Guard 不覆盖用户选择）；授权可能仍有效，但不再生效
- *   pending-restore 授权已失效，档位仍是 Guard 写入的宽值——【倒计时归零后最危险的那个中间态】
- *   restored        授权已失效，档位已回滚
- *   not-involved    本会话没有沙箱授权
- *   unknown         读不到宿主档位（能力缺失）——此时绝不允许声称「已恢复」 */
-export type ConsoleSandboxState = "raised" | "unchanged" | "user-override" | "pending-restore" | "restored" | "not-involved" | "unknown";
 export interface ConsoleGrantView {
   id: string;
   toolName: string;
@@ -32,8 +25,6 @@ export interface ConsoleGrantView {
   issuedAt: number;
   expiresAt: number;
   remainingMs: number;
-  /** 沙箱授权对应的目标档位（来自沙箱授权记录，可能缺失） */
-  targetMode?: SandboxMode;
 }
 export interface ConsoleSessionAuth {
   state: ConsoleAuthState;
@@ -43,23 +34,14 @@ export interface ConsoleSessionAuth {
   remainingMs?: number;
   grants: ConsoleGrantView[];
 }
+/** 会话当前沙箱档位（宿主实时读数）——只用于展示与免打扰适用性判断，不是 Guard 的状态。 */
 export interface ConsoleSandboxView {
-  state: ConsoleSandboxState;
-  /** 宿主实时读到的当前档位；undefined = 读不到（不许推断为「已恢复」） */
+  /** 宿主实时读到的当前档位；undefined = 读不到（不许推断，页面显示「未知」） */
   currentMode?: SandboxMode;
   /** 档位的中文说法（服务端下发，前端不再自己维护映射表） */
   currentModeText?: string;
-  /** Guard 介入前的档位（回滚落点） */
-  baselineMode?: SandboxMode;
-  baselineModeText?: string;
-  /** 被授权允许的最高档位 */
-  targetMode?: SandboxMode;
-  targetModeText?: string;
-  /** 本次读数的产生时间——UI 据此展示「核对中」，而不是拿倒计时推断 */
+  /** 本次读数的产生时间——UI 据此展示「核对于 …」 */
   checkedAt: number;
-  lastOutcomeAt?: number;
-  /** 人话补充说明（例如「你已把档位调回 workspace-write，Guard 不会覆盖」） */
-  note?: string;
 }
 /** 免打扰窗口内一次自动放行的记录（脱敏展示；不含参数原文）。 */
 export interface ConsoleDndRecord {
@@ -92,16 +74,14 @@ export interface ConsoleSessionView {
   sandbox: ConsoleSandboxView;
   /** 免打扰窗口（仅当存在活动窗口时下发；没有窗口就没有这个字段） */
   dnd?: ConsoleDndView;
-  /** 价值指标（少点了几次批准 / 最长放开多久 / 有没有待收回的权限级别） */
+  /** 价值指标（少点了几次批准 / 最长放开多久） */
   stats: ConsoleSessionStats;
   actions: {
     /** 有仍有效的授权可撤销 */
     canRevoke: boolean;
-    /** 存在「授权已失效但档位未回滚」的情形，可手动立即回滚（纯收缩动作） */
-    canRestoreSandbox: boolean;
   };
 }
-/** 作用：会话级价值指标——回答「这个插件到底帮我省了什么」，同时暴露需要人处理的风险。 */
+/** 作用：会话级价值指标——回答「这个插件到底帮我省了什么」。 */
 export interface ConsoleSessionStats {
   /** 授权总条数（含已结束的） */
   total: number;
@@ -111,10 +91,6 @@ export interface ConsoleSessionStats {
   savedApprovals: number;
   /** 最长一次放开的时长（毫秒） */
   longestWindowMs: number;
-  /** 提升过权限级别的授权数 */
-  raised: number;
-  /** 已结束但仍未收回权限级别的授权数（需要处理） */
-  pendingRestore: number;
 }
 export interface ConsoleFocus {
   sessionId?: string;
@@ -130,44 +106,13 @@ export interface ConsoleSessionDescriptor {
 export interface ConsoleSessionDirectory {
   describe(sessionId: string): ConsoleSessionDescriptor;
 }
-/** 沙箱状态数据源（由 SandboxGrantManager 提供；未注入时治理台显示「不涉及沙箱」） */
-export interface ConsoleSandboxSource {
-  states(): readonly SessionGrantState[];
-  lastOutcomeOf(sessionId: string): { outcome: SandboxModeOutcome; mode: SandboxMode; at: number } | undefined;
-}
-/** 收缩型治理动作（撤销授权 / 回滚档位）——只能收紧权限，永远不能放开。 */
+/** 收缩型治理动作（撤销授权）——只能收紧权限，永远不能放开。 */
 export interface ConsoleRevokeResult {
   sessionId: string;
   revoked: number;
-  results: readonly { outcome: string; mode: SandboxMode }[];
-}
-export interface ConsoleRestoreResult {
-  sessionId: string;
-  results: readonly { outcome: string; mode: SandboxMode }[];
-}
-/** 免打扰窗口请求——用户显式点击后由页面发起，等价于一次 allowed-once，但有界（TTL）且可随时收回。 */
-export interface ConsoleWindowRequest {
-  sessionId: string;
-  /** 对哪个工具免打扰（与配置里的 escalation 规则一致，例如 pwsh） */
-  toolName: string;
-  /** 提升到哪一档（只允许沙箱档位闭集） */
-  mode: SandboxMode;
-  /** 窗口时长（秒），不得超过运行期 maxTtlSeconds */
-  ttlSeconds: number;
-}
-export interface ConsoleWindowResult {
-  sessionId: string;
-  leaseId: string;
-  /** 实际生效的档位（可能是"本来就够宽"的原档位） */
-  mode: SandboxMode;
-  outcome: string;
-  expiresAt: number;
 }
 export interface ConsoleActions {
   revokeSession(sessionId: string): Promise<ConsoleRevokeResult>;
-  restoreSandbox(sessionId: string): Promise<ConsoleRestoreResult>;
-  /** 有界放宽：开启免打扰窗口（唯一由页面发起的放宽动作，受 TTL 上限与沙箱档位闭集约束） */
-  openWindow(request: ConsoleWindowRequest): Promise<ConsoleWindowResult>;
   /** 免打扰时间窗：只放行审批，**不改沙箱档位**（原生档位保持用户设定值） */
   startDnd?(sessionId: string, ttlSeconds: number): { sessionId: string; expiresAt: number };
   /** 提前结束免打扰窗口（纯收缩） */
@@ -183,7 +128,7 @@ export interface GovernanceSummary {
   auditedEvents: number;
 }
 export interface GovernanceSnapshot {
-  /** 快照契约版本：3 = 移除无调用方的 plugins/tools/activity/leases（原始事件请用 /api/audit） */
+  /** 快照契约版本：4 = 移除沙箱档位状态机（sandbox 只剩当前档位读数） */
   schemaVersion: number;
   generatedAt: number;
   guardName: string;
@@ -216,11 +161,9 @@ export interface GovernanceConsoleDeps {
   guardName?: string;
   /** 可注入时钟（默认 Date.now），供测试模拟时间推进 */
   now?: () => number;
-  /** 沙箱授权状态源（可选：未注入时所有会话的沙箱状态为 not-involved） */
-  sandbox?: ConsoleSandboxSource;
   /** 免打扰窗口状态源（可选：未注入时会话视图不带 dnd 字段） */
   dnd?: { view(sessionId: string): ConsoleDndView | undefined };
-  /** 当前会话沙箱档位（可选：未注入时只有 Guard 自己改过档位的会话才带 currentMode） */
+  /** 当前会话沙箱档位（可选：未注入时 currentMode 缺失，页面显示「未知」） */
   currentMode?: (sessionId: string) => SandboxMode | undefined;
   /** 会话名称解析（可选：未注入时降级为「会话 短ID」） */
   sessions?: ConsoleSessionDirectory;

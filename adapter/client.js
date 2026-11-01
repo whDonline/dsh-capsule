@@ -39,7 +39,6 @@ window.__ModuleLoader__.load({
     const DOCK_POLL_MS = 2000;
     const DOCK_ORDER = 5;
     const VIEW_ORDER = 20;
-    const DONE_VISIBLE_MS = 15000;
     const AUDIT_LIMIT = 20;
     const probeCache = { host: null };
 
@@ -106,14 +105,6 @@ window.__ModuleLoader__.load({
       };
       return pad(date.getHours()) + ':' + pad(date.getMinutes()) + ':' + pad(date.getSeconds());
     }
-    /** 作用：取档位中文名——宿主已在快照里下发 currentModeText / baselineModeText，
-     * 前端刻意不再维护「只读 / 工作区可写 / 完全访问」的映射表；缺失时退回机器值。 */
-    function sandboxModeName(sandbox, field) {
-      if (!sandbox) return '未知';
-      if (field === 'baseline') return sandbox.baselineModeText || sandbox.baselineMode || '未知';
-      return sandbox.currentModeText || sandbox.currentMode || '未知';
-    }
-
     /** 作用：注入插件自有样式（只注入一次；带令牌兜底，脱离主题也能读）。
      *  挡位按钮的几何与配色逐项对齐 DSH 原生沙箱档位控件（dsh-client-ui-permission-presets）：
      *  高 28px、13px/500、label-secondary、radius-sm、14px 图标 + 14px 箭头、hover 用交互底色、
@@ -165,72 +156,32 @@ window.__ModuleLoader__.load({
       return null;
     }
 
-    /** 作用：把会话视图翻译成提示条文案——返回 null 表示连一行都不占（连会话数据都没有）。 */
+    /** 作用：把会话视图翻译成提示条文案——返回 null 表示连一行都不占（连会话数据都没有）。
+     *  2026-11-01：沙箱档位不再由 Guard 改写，因此这里只按「授权是否仍有效」说话。 */
     function describe(view, now) {
       if (!view) return null;
       const auth = view.auth || { state: 'none', activeCount: 0, grants: [] };
-      const sandbox = view.sandbox || { state: 'not-involved' };
       const grants = Array.isArray(auth.grants) ? auth.grants : [];
       const remaining = auth.activeCount > 0 && auth.nextExpiresAt ? auth.nextExpiresAt - now : 0;
       const first = grants[0];
-      if (sandbox.state === 'pending-restore') {
-        return {
-          tone: 'warn',
-          dot: '⚠',
-          title: '临时授权已经到期，但权限还停在「' + sandboxModeName(sandbox) + '」，没有收回。',
-          sub: '点「现在收回」可以立刻恢复；不点的话，下次执行命令时也会自动收回。',
-          action: { kind: 'stop', label: '现在收回', mode: 'restore-sandbox' },
-        };
-      }
       if (auth.activeCount > 0) {
         const title = first
           ? (grants.length > 1 ? '本会话临时放开了 ' + grants.length + ' 项：' : '本会话临时放开：') + first.capabilityText
           : '本会话有 ' + auth.activeCount + ' 项临时授权';
-        const after =
-          sandbox.state === 'raised' || sandbox.state === 'unchanged'
-            ? '到期后会自动收回，之后同类操作会再问你一次。'
-            : sandbox.state === 'user-override'
-              ? '到期后不会改动你自己设置的权限。'
-              : '到期后同类操作会再问你一次。';
         const expired = remaining <= 0;
         const saved = view.stats && view.stats.savedApprovals ? view.stats.savedApprovals : 0;
         return {
           tone: expired ? 'warn' : 'active',
           dot: expired ? '⏳' : '●',
           title: title,
-          sub: expired ? '正在核对是否已经收回…' : '还剩 ' + fmtCn(remaining) + ' · ' + after + (saved > 0 ? ' · 已少点 ' + saved + ' 次批准' : ''),
+          sub: expired ? '正在核对是否已经收回…' : '还剩 ' + fmtCn(remaining) + ' · 到期后同类操作会再问你一次。' + (saved > 0 ? ' · 已少点 ' + saved + ' 次批准' : ''),
           extra: grants.slice(1).map(function (grant) {
             return grant.capabilityText;
           }),
           action: { kind: 'stop', label: '提前收回', mode: 'revoke' },
         };
       }
-      if (sandbox.state === 'restored' && sandbox.lastOutcomeAt && now - sandbox.lastOutcomeAt < DONE_VISIBLE_MS) {
-        return {
-          tone: 'done',
-          dot: '✓',
-          title: '已收回：本会话的临时授权结束了，权限已回到「' + sandboxModeName(sandbox) + '」。',
-          sub: '之后的同类操作会重新征求你的同意。',
-        };
-      }
-      if (sandbox.state === 'restored') return null;
-      if (sandbox.state === 'unknown') {
-        return { tone: 'done', dot: '?', title: '无法确认当前权限级别，请到 DSH 的设置里看一眼。', sub: '临时授权本身已经结束。' };
-      }
-      if (sandbox.state === 'user-override') {
-        return {
-          tone: 'done',
-          dot: '·',
-          title: '你手动把权限改成了「' + sandboxModeName(sandbox) + '」，临时授权不会覆盖你的设置。',
-          sub: '之后的同类操作会重新征求你的同意。',
-        };
-      }
-      if (auth.state === 'expired' || auth.state === 'revoked') {
-        // 授权刚结束：没有可操作的东西，审计里能看到记录 → 不占用输入框上方空间
-        return null;
-      }
-      // 没有任何临时授权时【不再显示占位行】（2026-10-31 改定）：输入框左侧的模式 chip 已经
-      // 常驻显示"能力授权存在且当前是哪一档"，这里再写一句"没有临时放开的操作"纯属噪声。
+      // 没有任何临时授权 / 授权刚结束：不占用输入框上方空间（输入框左侧的 chip 常驻显示当前状态）
       return null;
     }
 
@@ -303,10 +254,7 @@ window.__ModuleLoader__.load({
 
       const onAction = async function () {
         if (busy || !host) return;
-        const label =
-          info.action.mode === 'restore-sandbox'
-            ? '现在把权限收回去？（只影响权限级别，不动仍然有效的授权）'
-            : '现在收回本会话的全部临时授权，并恢复权限级别？';
+        const label = '现在收回本会话的全部临时授权？下一次同类调用会重新问你。';
         if (typeof window !== 'undefined' && typeof window.confirm === 'function' && !window.confirm(label)) return;
         setBusy(true);
         setMessage('');
@@ -466,7 +414,7 @@ window.__ModuleLoader__.load({
       const list = Array.isArray(records) ? records : [];
       const cutoff = rangeDays > 0 ? now - rangeDays * 86_400_000 : 0;
       const rows = list.filter(function (record) { return record.grantedAt >= cutoff; });
-      const reuse = { exact: 0, family: 0, window: 0 };
+      const reuse = { exact: 0, family: 0 };
       let saved = 0;
       let longestWindowMs = 0;
       let activeCount = 0;
@@ -476,10 +424,11 @@ window.__ModuleLoader__.load({
         longestWindowMs = Math.max(longestWindowMs, record.windowMs || 0);
         if (record.outcome === 'active') activeCount += 1;
         if (record.uses > 0) {
-          if (record.kind === 'sandbox-mode') reuse.window += record.uses;
-          else if (record.familyLabel) {
-            reuse.family += record.uses;
-            familyCounts.set(record.familyLabel, (familyCounts.get(record.familyLabel) || 0) + record.uses);
+          const familyUses = typeof record.familyUses === 'number' ? Math.min(record.familyUses, record.uses) : record.familyLabel ? record.uses : 0;
+          if (familyUses > 0) {
+            reuse.family += familyUses;
+            reuse.exact += record.uses - familyUses;
+            if (record.familyLabel) familyCounts.set(record.familyLabel, (familyCounts.get(record.familyLabel) || 0) + familyUses);
           } else reuse.exact += record.uses;
         }
       }
@@ -494,7 +443,7 @@ window.__ModuleLoader__.load({
           { label: '命中复用', value: String(saved), unit: '次' },
           { label: '复用率', value: String(reuseRate), unit: '%' },
           { label: '生效中', value: String(activeCount), unit: '条' },
-          { label: '精确 / 族 / 沙箱', value: reuse.exact + ' / ' + reuse.family + ' / ' + reuse.window, unit: '次' },
+          { label: '精确 / 族', value: reuse.exact + ' / ' + reuse.family, unit: '次' },
           { label: '最长放开', value: longestWindowMs > 0 ? fmtCn(longestWindowMs) : '-', unit: '' },
           { label: '最常命中族', value: topFamilies.length > 0 ? topFamilies.map(function (f) { return f[0] + '×' + f[1]; }).join('，') : '-', unit: '' },
         ],
@@ -813,7 +762,7 @@ window.__ModuleLoader__.load({
                   null,
                   rows.map(function (record) {
                     const remaining = record.outcome === 'active' ? Math.max(0, record.expiresAt - nowMs) : 0;
-                    const modeText = record.kind === 'sandbox-mode' ? '沙箱授权' : '短期授权';
+                    const modeText = '短期授权';
                     const hitText = record.familyLabel ? '族：' + record.familyLabel : '精确';
                     const approvalText = '人工' + (record.uses > 0 ? ' + 复用 ' + record.uses + ' 次' : '');
                     const leftText = record.outcome === 'active' ? fmtCn(remaining) : record.outcome === 'revoked' ? '已收回' : '已过期';

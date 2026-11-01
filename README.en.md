@@ -7,8 +7,8 @@
 </p>
 
 > [!NOTE]
-> **This English README is out of date.** The UI was rebuilt in 2026-10 (session-scoped dock + "Capability" tab +
-> settings page; decision log; bounded "quiet window"). The Chinese [README.md](README.md) is the source of truth
+> **This English README is out of date.** The UI was rebuilt in 2026-10/11 (session-scoped mode chip + "Capability" tab;
+> decision log; time-boxed "do not disturb" window). The Chinese [README.md](README.md) is the source of truth
 > until this file is fully re-translated.
 
 <p align="center">
@@ -26,7 +26,7 @@
 
 <p align="center">
   DSH Capsule is a <b>Capability Guard</b> for <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a>:<br/>
-  a short-lived lease layer over existing approvals, with sandbox elevation, rollback, and audit.
+  a short-lived lease layer over existing approvals, with audit and a time-boxed "do not disturb" window.
 </p>
 
 > [!IMPORTANT]
@@ -34,7 +34,7 @@
 
 > [!CAUTION]
 > **This English README is out of date (2026-09-14).** Source-level verification against an installed DSH build falsified one of its core assumptions: `tools/pre-execute` falls through to `allow`, so Universal Mode cannot wait for a downstream `ask` there; the real approval path is the sandbox escalation inside the pwsh/bash/fs tool bodies.
-> The **Chinese README ([`README.md`](README.md)) is authoritative** and already carries the corrected model (four hooks, `sandbox-escalation` scope, sandbox-mode grants with TTL rollback, and the honest security-boundary wording). Porting those sections here is tracked as follow-up work. The technical baseline with file/line citations lives in `docs/集成基线-真实DSH行为.md` (Chinese).
+> The **Chinese README ([`README.md`](README.md)) is authoritative** and already carries the corrected model (four hooks, operation fingerprint with target sandbox mode, time-boxed DND window that never writes the sandbox mode, and the honest security-boundary wording). Porting those sections here is tracked as follow-up work. The technical baseline with file/line citations lives in `docs/集成基线-真实DSH行为.md` (Chinese).
 
 > [!WARNING]
 > **Developer Preview.** The authorization lifecycle is covered by real Cordis integration tests. DSH upgrades still require compatibility checks against the installed version.
@@ -43,7 +43,7 @@
 
 ## Why DSH Capsule?
 
-Agent tooling often lands at one of two extremes: repeated one-time approvals or broad session permissions. Guard adds an explicit time boundary and rollback to temporary authorization.
+Agent tooling often lands at one of two extremes: repeated one-time approvals or broad session permissions. Guard adds an explicit time boundary to temporary authorization without touching the session's sandbox mode.
 
 DSH Capsule inserts a **short-lived capability layer** between them:
 
@@ -84,7 +84,7 @@ Universal Mode therefore reduces repetitive approval while preserving native DSH
 - UniversalGate: four hooks, approval observation, callId isolation, and lease reuse.
 - ScopeResolver / PolicyResolver: deterministic scopes and TTL policy.
 - LeaseManager / MemoryLeaseStore: session binding, expiry, and revocation.
-- SandboxGrantManager: sandbox elevation, rollback, and user-override detection.
+- DndManager: time-boxed "do not disturb" window (auto-approves recorded sandbox escalations; never writes the sandbox mode).
 - AuditService / GovernanceConsole: redacted audit, remaining time, and runtime policy.
 
 ### Boundary with native DSH mechanisms
@@ -314,7 +314,7 @@ adapter/
 ├── cordis.patch.yml          # Plugin policy
 └── src/
     ├── index.ts              # Plugin assembly and host adapter
-    ├── capability/           # Four hooks, scopes, leases, elevation and rollback
+    ├── capability/           # Four hooks, scopes, leases, time-boxed DND window
     ├── integration/          # Real Cordis and authorization lifecycle tests
     ├── audit/                # Redacted audit
     └── console/              # Shared governance UI, API and runtime policy
@@ -385,5 +385,5 @@ MIT License. See [`LICENSE`](LICENSE).
 
 <p align="center">
   <b>DSH Capsule</b><br/>
-  <sub>Short-lived authorization · Sandbox rollback · Fail-closed by design</sub>
+  <sub>Short-lived authorization · Time-boxed DND · Fail-closed by design</sub>
 </p>

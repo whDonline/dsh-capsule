@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { ESCALATION_DISPLAY_MAX_LENGTH, SANDBOX_MODES, escalationScopeDisplay, escalationScopeKey, isModeWiderThan, isSandboxMode, parseEscalation } from "./escalation.js";
-describe("沙箱升级确定性识别（P0-1）", () => {
+import { SANDBOX_MODES, SANDBOX_MODE_LABELS, isSandboxMode, parseEscalation, sandboxModeLabel } from "./escalation.js";
+describe("沙箱升级请求的确定性识别", () => {
   it("识别标准升级参数：sandbox_permissions 为闭集字面量且 justification 非空", () => {
     const parsed = parseEscalation({ sandbox_permissions: "danger-full-access", justification: "需要写入工作区外文件" });
     expect(parsed).toEqual({ requestedMode: "danger-full-access", justification: "需要写入工作区外文件" });
@@ -39,49 +39,15 @@ describe("沙箱升级确定性识别（P0-1）", () => {
     expect(parsed?.requestedMode).toBe("danger-full-access");
   });
 });
-describe("沙箱升级语义 Scope（P0-1）", () => {
-  it("key 与模型自由文本无关：justification 不同但工具与模式相同 → key 相同（获批后可复用）", () => {
-    const a = parseEscalation({ sandbox_permissions: "danger-full-access", justification: "第一次措辞" });
-    const b = parseEscalation({ sandbox_permissions: "danger-full-access", justification: "完全不同的第二次措辞" });
-    expect(a && b).toBeTruthy();
-    expect(escalationScopeKey({ toolName: "pwsh", requestedMode: a!.requestedMode })).toBe(escalationScopeKey({ toolName: "pwsh", requestedMode: b!.requestedMode }));
-  });
-  it("key 与参数原文无关：命令不同但工具与模式相同 → key 相同", () => {
-    expect(escalationScopeKey({ toolName: "pwsh", requestedMode: "danger-full-access" })).toBe(escalationScopeKey({ toolName: "pwsh", requestedMode: "danger-full-access" }));
-  });
-  it("工具名或目标模式不同 → key 不同（授权面不跨工具、不跨模式扩大）", () => {
-    const base = escalationScopeKey({ toolName: "pwsh", requestedMode: "danger-full-access" });
-    expect(escalationScopeKey({ toolName: "write", requestedMode: "danger-full-access" })).not.toBe(base);
-    expect(escalationScopeKey({ toolName: "pwsh", requestedMode: "workspace-write" })).not.toBe(base);
-    expect(escalationScopeKey({ toolName: "bash", requestedMode: "danger-full-access" })).not.toBe(base);
-  });
-  it("key 是稳定 SHA-256 十六进制（64 字符）", () => {
-    expect(escalationScopeKey({ toolName: "pwsh", requestedMode: "read-only" })).toMatch(/^[0-9a-f]{64}$/);
-  });
-  it("display 只含工具名与目标模式，无 justification 时不追加", () => {
-    expect(escalationScopeDisplay({ toolName: "pwsh", requestedMode: "danger-full-access" })).toBe("tool=pwsh 沙箱升级至 danger-full-access");
-  });
-  it("display 超长 justification 必须截断到固定上限（审计与 Approval reason 不接受无限文本）", () => {
-    const long = "理由".repeat(500);
-    const display = escalationScopeDisplay({ toolName: "write", requestedMode: "danger-full-access" }, long);
-    expect(display).toBe(`tool=write 沙箱升级至 danger-full-access（模型理由：${"理由".repeat(ESCALATION_DISPLAY_MAX_LENGTH / 2)}…）`);
-  });
-});
-describe("沙箱模式宽窄比较（P0-1）", () => {
-  it("只有严格更宽才为 true（用于判断是否需要提升会话模式）", () => {
-    expect(isModeWiderThan("danger-full-access", "workspace-write")).toBe(true);
-    expect(isModeWiderThan("workspace-write", "read-only")).toBe(true);
-    expect(isModeWiderThan("danger-full-access", "read-only")).toBe(true);
-  });
-  it("相同或更窄均为 false（避免无意义的模式抖动与降级）", () => {
-    expect(isModeWiderThan("workspace-write", "workspace-write")).toBe(false);
-    expect(isModeWiderThan("workspace-write", "danger-full-access")).toBe(false);
-    expect(isModeWiderThan("read-only", "workspace-write")).toBe(false);
-  });
+describe("档位文案与闭集校验", () => {
   it("isSandboxMode 只接受闭集字面量", () => {
     expect(isSandboxMode("danger-full-access")).toBe(true);
     expect(isSandboxMode("danger-full-access ")).toBe(false);
     expect(isSandboxMode(undefined)).toBe(false);
     expect(isSandboxMode(3)).toBe(false);
+  });
+  it("档位中文名唯一来源：缺失时给「未知」，绝不编造", () => {
+    for (const mode of SANDBOX_MODES) expect(sandboxModeLabel(mode)).toBe(SANDBOX_MODE_LABELS[mode]);
+    expect(sandboxModeLabel(undefined)).toBe("未知");
   });
 });
