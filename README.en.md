@@ -7,6 +7,7 @@
 <p align="center">
   <a href="https://github.com/whDonline/dsh-capsule/actions/workflows/ci.yml"><img src="https://github.com/whDonline/dsh-capsule/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <img src="https://img.shields.io/badge/status-Developer%20Preview-d9a441" alt="Developer Preview" />
+  <img src="https://img.shields.io/badge/dsh--plugin-3178c6" alt="dsh-plugin" />
   <img src="https://img.shields.io/badge/Node.js-22-43853d" alt="Node.js 22" />
   <img src="https://img.shields.io/badge/TypeScript-3178c6?logo=typescript&logoColor=white" alt="TypeScript" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-167d67" alt="MIT License" /></a>
