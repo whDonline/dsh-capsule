@@ -53,15 +53,29 @@ pnpm test
 
 ### 2. 安装到 DSH profile
 
-包中已声明 `dsh.bundle.patch` 与 Web 客户端入口，可把本地构建的 `adapter` 目录作为 profile bundle 安装。将下面的路径替换成你的绝对路径，`web` 替换成目标 profile。
+插件包已发布到 npm，包内声明了 `dsh.bundle.patch` 与 Web 客户端入口。`web` 可替换成目标 profile。
 
 ```bash
-dsh plugin --profile web add "/absolute/path/to/dsh-capsule/adapter"
+dsh plugin --profile web add @dsh-capsule/adapter
 dsh --profile web --dump-config
 dsh web
 ```
 
-Windows 路径示例：`D:/gitpro/dsh-capsule/adapter`。`--dump-config` 用于离线检查配置组合；启动命令应与你安装的 profile 对应。
+也可以在 [dsh.so](https://www.dsh.so/) 或 DSH 插件市场里搜索 **DSH Capsule** 安装。装完必须重启 DSH：profile 配置 HMR 不会重新加载已装载的宿主 JavaScript。
+
+<details>
+<summary>从源码安装（开发 / 贡献者）</summary>
+
+```bash
+git clone https://github.com/whDonline/dsh-capsule.git
+cd dsh-capsule
+pnpm install --frozen-lockfile
+pnpm build
+dsh plugin --profile web add "D:/gitpro/dsh-capsule/adapter"
+```
+
+本地路径安装时，`cordis.patch.yml` 注册的模块名是 `@dsh-capsule/adapter`；请确认 profile 的 `node_modules` 下能以该名字解析到本包，否则改用上面的 npm 安装。
+</details>
 
 ### 3. 完成第一次授权
 

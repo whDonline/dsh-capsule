@@ -1,7 +1,27 @@
 {
   "name": "dsh-capsule",
+  "version": "0.1.0",
   "private": true,
-  "description": "Short-lived authorization and sandbox permission lifecycle for DeepSeek Harness",
+  "description": "DSH Capability Guard: short-lived authorization leases, do-not-disturb windows and local authorization decisions for DeepSeek Harness",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/whDonline/dsh-capsule.git"
+  },
+  "homepage": "https://github.com/whDonline/dsh-capsule#readme",
+  "bugs": {
+    "url": "https://github.com/whDonline/dsh-capsule/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis-plugin",
+    "approval",
+    "authorization",
+    "permissions",
+    "sandbox"
+  ],
   "packageManager": "pnpm@11.25.0",
   "scripts": {
     "build": "pnpm -r --if-present build",

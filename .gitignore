@@ -51,6 +51,12 @@ docker-compose.override.yml
 *.log
 logs/
 
+# 本地发布 / 沙箱诊断临时产物（禁止入库）
+.npm-cache/
+.tmp/
+.acl-report/
+.package-files.json
+
 # 临时提交信息文件（禁止入库）
 .git-commit-msg.txt
 .commitmsg

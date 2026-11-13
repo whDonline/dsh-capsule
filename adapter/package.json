@@ -1,7 +1,7 @@
 {
   "name": "@dsh-capsule/adapter",
   "version": "0.1.0",
-  "description": "DSH Capability Guard - short-lived authorization leases and sandbox permission lifecycle for DeepSeek Harness",
+  "description": "DSH Capability Guard: short-lived authorization leases, do-not-disturb windows and local authorization decisions for DeepSeek Harness",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -16,7 +16,8 @@
   "files": [
     "dist",
     "client.js",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "README.md"
   ],
   "dsh": {
     "bundle": {
@@ -28,9 +29,47 @@
       "inject": []
     }
   },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/whDonline/dsh-capsule.git",
+    "directory": "adapter"
+  },
+  "homepage": "https://github.com/whDonline/dsh-capsule#readme",
+  "bugs": {
+    "url": "https://github.com/whDonline/dsh-capsule/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis-plugin",
+    "approval",
+    "authorization",
+    "permissions",
+    "sandbox"
+  ],
+  "engines": {
+    "dsh": ">=0.1.5-0 <0.3.0",
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "disclosure": {
+    "cloud": false,
+    "network": [],
+    "offlineMode": true,
+    "apiKeys": [],
+    "jurisdiction": [
+      "CN"
+    ],
+    "retention": "local"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepack": "tsc -p tsconfig.json"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.2",

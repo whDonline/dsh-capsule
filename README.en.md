@@ -51,15 +51,29 @@ pnpm test
 
 ### 2. Install into a DSH profile
 
-The package declares `dsh.bundle.patch` and a Web client entry. Install the locally built `adapter` directory as a profile bundle. Replace the path with your absolute path and `web` with your target profile.
+The package is published to npm and declares `dsh.bundle.patch` plus a Web client entry. Replace `web` with your target profile.
 
 ```bash
-dsh plugin --profile web add "/absolute/path/to/dsh-capsule/adapter"
+dsh plugin --profile web add @dsh-capsule/adapter
 dsh --profile web --dump-config
 dsh web
 ```
 
-Windows path example: `D:/gitpro/dsh-capsule/adapter`. `--dump-config` checks configuration composition offline. Use the startup command appropriate for the profile you installed into.
+You can also search for **DSH Capsule** in [dsh.so](https://www.dsh.so/) or a DSH plugin marketplace. Restart DSH after installing: profile-config HMR does not reload already-mounted host JavaScript.
+
+<details>
+<summary>Install from source (development / contributors)</summary>
+
+```bash
+git clone https://github.com/whDonline/dsh-capsule.git
+cd dsh-capsule
+pnpm install --frozen-lockfile
+pnpm build
+dsh plugin --profile web add "D:/gitpro/dsh-capsule/adapter"
+```
+
+A local-path install registers `@dsh-capsule/adapter` in `cordis.patch.yml`; make sure that name resolves inside the profile's `node_modules`, otherwise use the npm install above.
+</details>
 
 ### 3. Try the first approval
 
